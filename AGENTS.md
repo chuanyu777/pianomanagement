@@ -86,7 +86,14 @@ npm run test:e2e -w @piano/api  # 端到端，**需要库先起来**
 npm run typecheck && npm run lint && npm test
 ```
 
-碰了数据库或接口的，再加 `npm run test:e2e`（需要 `npm run db:up`）。
+碰了数据库或接口的，再加端到端：
+```bash
+npm run db:up && npm run db:migrate -w @piano/api && npm run test:e2e -w @piano/api
+bash scripts/local-db-and-smoke.sh     # 起本地库 + 迁移 + 起服务 + 走一遍业务主链路
+```
+`scripts/local-db-and-smoke.sh` 是**验收脚本**：不需要 Docker，会建号、登录、报名、交费、
+排课、确认扣费，并断言台账余额、收支小计、业绩排行都对。动过钱相关代码后应该跑它。
+
 汇报时必须区分「我实测过的」和「我没验的」。
 
 ## 8. 已知未做（诚实清单）
@@ -96,5 +103,10 @@ npm run typecheck && npm run lint && npm test
 - 无 refresh token、无改密流程、无登录失败限流。当前 JWT 有效期 12h，只有 access token。
 - 删除策略：用户是**硬删**（`DELETE`）。建业务表时要单独决定——凡是需要追溯的，一律软删。
 - `apps/web` 是空目录。前端还没开始。
-- 端到端测试（`test/app.e2e-spec.ts`）**尚未在真实 Postgres 上跑通过**。
 - `packages/shared` 目前只有分页信封和错误体；前端接进来以后才知道还需要共享什么。
+- 这几个子代理报告的**已知边界**，尚未处理：`OrganizationService.update()` 不接受事务客户端
+  （初始化向导的 carry-over 是两段写入，不是严格同一事务）；排课的时间冲突检测与赠送额度判断
+  是「先查后写」，并发下没有数据库约束兜底。
+- **Docker Hub 与三个国内镜像源在这台机器上都拉不动镜像。**
+  `docker compose up -d db` 起不来，验证时改用 `prisma dev`（本地 Postgres，不需要 Docker），
+  见 `apps/api/scripts/local-db-and-smoke.sh`。这条是环境问题，不是代码问题。

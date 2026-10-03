@@ -6,6 +6,7 @@ import { validateEnv } from './config/env.validation.js';
 import { HealthModule } from './health/health.module.js';
 import { AnalyticsModule } from './modules/analytics/analytics.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
+import { BootstrapModule } from './modules/bootstrap/bootstrap.module.js';
 import { CourseTypesModule } from './modules/course-types/course-types.module.js';
 import { EnrollmentsModule } from './modules/enrollments/enrollments.module.js';
 import { FinanceModule } from './modules/finance/finance.module.js';
@@ -52,6 +53,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
     HealthModule,
 
     // 账号与鉴权
+    BootstrapModule,
     AuthModule,
     UsersModule,
 

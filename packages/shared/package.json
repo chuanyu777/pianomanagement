@@ -1,0 +1,26 @@
+{
+  "name": "@piano/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "前后端共享的接口契约类型。只放 Prisma 表达不了的东西。",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

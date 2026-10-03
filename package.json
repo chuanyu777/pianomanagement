@@ -1,0 +1,23 @@
+{
+  "name": "piano-management",
+  "version": "0.1.0",
+  "private": true,
+  "description": "琴行管理系统 —— 前后端同仓。apps/api 为 NestJS + Prisma 后端，apps/web 为未来的 Refine 前端。",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "db:generate": "npm run db:generate -w @piano/api",
+    "db:migrate": "npm run db:migrate -w @piano/api"
+  }
+}

@@ -1,0 +1,37 @@
+// 数据模型的唯一来源。任何实体/枚举都在这里定义 ——
+// 禁止在 packages/shared 或前端再抄一份（同一规则两份实现 = 会静默跑偏）。
+//
+// 注：本文件当前只有账号相关模型，是脚手架的最小可用集。
+// 把 docs/需求-用户故事.md 的 44 条故事落成模型，是下一步独立任务。
+
+generator client {
+  provider = "prisma-client"
+  // 故意生成到 src/ 里面：Prisma 7 的新 generator 产出的是 TypeScript 源码
+  // （不是编译好的 JS），必须由本项目的 tsc 一起编译。
+  // 放到 src/ 外面会撞上 nest build 的 rootDir: src。
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// 系统账号角色。业务上只有两档：店主（可兼任授课老师）、授课老师。
+enum UserRole {
+  OWNER
+  TEACHER
+}
+
+/// 系统账号。授课老师与店主都在这张表里，靠 role 区分。
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  role         UserRole
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}

@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+
+*.log
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
+
+# Prisma 本地临时库
+apps/api/prisma/*.db
+
+# Prisma 7 生成的 client（由 prisma generate 产出，install 时自动重建）
+apps/api/src/generated/

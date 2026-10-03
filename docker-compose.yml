@@ -1,0 +1,21 @@
+services:
+  db:
+    # 如果拉不动，可换成 docker.m.daocloud.io/library/postgres:16-alpine
+    image: postgres:16-alpine
+    container_name: piano-db
+    environment:
+      POSTGRES_USER: piano
+      POSTGRES_PASSWORD: piano
+      POSTGRES_DB: piano
+    ports:
+      - "5433:5432"
+    volumes:
+      - piano-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piano -d piano"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  piano-pgdata:

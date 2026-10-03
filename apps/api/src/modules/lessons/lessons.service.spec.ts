@@ -40,11 +40,13 @@ function createPrismaMock() {
   return {
     lesson: {
       findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
       count: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     enrollment: { findUnique: vi.fn(), findMany: vi.fn() },
     giftGrant: { findUnique: vi.fn() },
@@ -103,6 +105,9 @@ describe('LessonsService', () => {
       return Promise.all(arg as readonly unknown[]);
     });
     periods = { assertOpenForDate: vi.fn().mockResolvedValue(undefined) };
+    // 默认：争抢成功。要测「抢不到」的用例自己改这一行。
+    prisma.lesson.updateMany.mockResolvedValue({ count: 1 });
+    prisma.lesson.findUniqueOrThrow.mockResolvedValue({ id: 'l1', status: 'CONFIRMED' });
     service = new LessonsService(
       prisma as unknown as PrismaService,
       periods as unknown as PeriodsService,
@@ -355,14 +360,16 @@ describe('LessonsService', () => {
 
       await service.confirm('l1', OWNER);
 
-      const update = prisma.lesson.update.mock.calls[0][0];
-      expect(update.where).toEqual({ id: 'l1' });
+      const update = prisma.lesson.updateMany.mock.calls[0][0];
+      // 必须是带状态条件的原子抢占（CAS），不能是无条件 update —— 否则并发会扣两次钱
+      expect(update.where).toEqual({ id: 'l1', status: LessonStatus.SCHEDULED });
       expect(update.data.status).toBe(LessonStatus.CONFIRMED);
       expect(update.data.confirmedAt).toBeInstanceOf(Date);
       expect(update.data.confirmedById).toBe(OWNER.id);
       expect((update.data.unitPriceSnapshot as Prisma.Decimal).equals(new Prisma.Decimal('350'))).toBe(
         true,
       );
+      expect(prisma.lesson.update).not.toHaveBeenCalled();
       const entry = prisma.ledgerEntry.create.mock.calls[0][0].data;
       expect(entry.kind).toBe(LedgerKind.CONSUMPTION);
       expect(entry.lessonId).toBe('l1');
@@ -430,7 +437,18 @@ describe('LessonsService', () => {
       await expect(service.confirm('l1', OWNER)).rejects.toBeInstanceOf(ConflictException);
 
       expect(prisma.ledgerEntry.create).toHaveBeenCalledTimes(1);
-      expect(prisma.lesson.update).toHaveBeenCalledTimes(1);
+      expect(prisma.lesson.updateMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('并发抢占失败（状态已被别人改掉）→ 409，且一条流水都不写', async () => {
+      stubNonGiftConfirm({ unitPrice: '200', paid: '1000' });
+      // 事务外读到的还是 SCHEDULED，但真正抢占时数据库回答「已经被改过了」——
+      // 这正是两个并发请求同时确认时的真实情形。
+      prisma.lesson.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.confirm('l1', OWNER)).rejects.toBeInstanceOf(ConflictException);
+
+      expect(prisma.ledgerEntry.create).not.toHaveBeenCalled();
     });
 
     it('老师确认不是自己名下的课 → 403，且不写流水', async () => {

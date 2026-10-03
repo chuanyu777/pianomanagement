@@ -244,6 +244,26 @@ export class LessonsService {
       const enrollment = await tx.enrollment.findUnique({ where: { id: lesson.enrollmentId } });
       if (!enrollment) throw new NotFoundException('报名关系不存在');
 
+      // ── 先原子抢占状态，再写流水 ──────────────────────────────────────────
+      // 顺序很关键：必须在写流水**之前**抢占。
+      // 两个并发确认请求都会通过事务外那次状态检查（都读到 SCHEDULED），
+      // 如果这里用无条件的 update，两边都会各写一条扣减流水 —— 同一节课扣两次钱。
+      // 需求明确要求「同一节课重复确认不应重复扣减」，所以把裁决权交给数据库：
+      // 条件更新让只有一个请求能 count=1，输的那个整个事务回滚，一条流水都不写。
+      const claimed = await tx.lesson.updateMany({
+        where: { id: lesson.id, status: LessonStatus.SCHEDULED },
+        data: {
+          status: LessonStatus.CONFIRMED,
+          confirmedAt,
+          confirmedById: actor.id,
+          // 快照锁的是确认时刻的 enrollment 单价；此后改价不影响本课。
+          unitPriceSnapshot: money(enrollment.unitPrice),
+        },
+      });
+      if (claimed.count === 0) {
+        throw new ConflictException('该课已被确认或状态已变更，请刷新后重试');
+      }
+
       let paidDelta: Money;
       let giftDelta: Money;
       let giftGrantId: string | null = null;
@@ -291,16 +311,8 @@ export class LessonsService {
         },
       });
 
-      return tx.lesson.update({
-        where: { id: lesson.id },
-        data: {
-          status: LessonStatus.CONFIRMED,
-          confirmedAt,
-          confirmedById: actor.id,
-          // 快照锁的是确认时刻的 enrollment 单价；此后改价不影响本课。
-          unitPriceSnapshot: money(enrollment.unitPrice),
-        },
-      });
+      // 状态与快照已经在上面那次抢占里写好了，这里只把最新行读回来。
+      return tx.lesson.findUniqueOrThrow({ where: { id: lesson.id } });
     });
   }
 

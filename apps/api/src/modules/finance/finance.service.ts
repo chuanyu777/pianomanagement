@@ -55,6 +55,8 @@ type IncomeBundle = {
 /** 某个支出项在某段跨度上的取值来源。 */
 type ExpenseBundle = {
   payroll: { accrued: Money; cash: Money };
+  /** 清单里是否存在独立的 PAYROLL_CASH 行 —— 决定工资行要不要让出现金口径 */
+  hasPayrollCashItem: boolean;
   gift: Money;
   profitShare: Money;
   refundPaid: Money;
@@ -349,7 +351,10 @@ export class FinanceService {
     switch (item.autoSource) {
       case AutoSource.PAYROLL_ACCRUED:
         amounts.operating = toMoneyString(bundle.payroll.accrued);
-        amounts.cash = toMoneyString(bundle.payroll.cash);
+        // 清单里如果另建了独立的 PAYROLL_CASH 行，现金口径就交给那一行承担，
+        // 这里必须置 0 —— 否则同一笔工资会在支出表里被算两遍（小计和现金结余都错）。
+        // 默认模板只有一个工资行（PAYROLL_ACCRUED），此时它同时承担两个口径。
+        amounts.cash = bundle.hasPayrollCashItem ? '0.00' : toMoneyString(bundle.payroll.cash);
         break;
       case AutoSource.PAYROLL_CASH:
         amounts.cash = toMoneyString(bundle.payroll.cash);
@@ -421,7 +426,11 @@ export class FinanceService {
       needsOther ? this.otherExpensesByItem(periods) : Promise.resolve(new Map<string, Money>()),
     ]);
 
-    return { payroll, gift, profitShare, refundPaid, other };
+    const hasPayrollCashItem = items.some(
+      (item) => item.autoSource === AutoSource.PAYROLL_CASH,
+    );
+
+    return { payroll, hasPayrollCashItem, gift, profitShare, refundPaid, other };
   }
 
   private async paymentsByItem(span: DateSpan): Promise<Map<string, Money>> {
@@ -579,10 +588,6 @@ export class FinanceService {
 
     const months = this.periodsBetween(firstMonth, period);
     const span = this.periodSpan(months);
-    // 若清单里另有 PAYROLL_CASH 支出项，支出表会出现「工资行 + 独立现金行」两行都取现金合计，
-    // 资金净流必须与支出表小计一致，所以这里也加上同一份（见报告「发现的模型问题」）。
-    const hasPayrollCashItem =
-      (await this.prisma.expenseItem.count({ where: { autoSource: AutoSource.PAYROLL_CASH } })) > 0;
 
     const [pay, manual, fees, refundOut, other] = await Promise.all([
       this.paymentsByItem(span),
@@ -599,9 +604,9 @@ export class FinanceService {
     let expenseCash = refundOut.plus(sumMoney([...other.values()]));
     for (const month of months) {
       const payroll = await computePeriodTotals(this.prisma, month);
-      const cash = money(payroll.cashTotal);
-      expenseCash = expenseCash.plus(cash);
-      if (hasPayrollCashItem) expenseCash = expenseCash.plus(cash);
+      // 工资现金支出只加一次。有无独立的 PAYROLL_CASH 行都不影响总额 ——
+      // 那是「这笔钱记在哪一行」的问题（见 expenseAmounts），不是「记几遍」的问题。
+      expenseCash = expenseCash.plus(money(payroll.cashTotal));
       expenseCash = expenseCash.plus(
         await this.profitShareOver([month], organization.previousMonthProfit),
       );

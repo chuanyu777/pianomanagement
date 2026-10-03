@@ -214,6 +214,32 @@ describe('FinanceService', () => {
       expect(computePeriodTotalsMock).toHaveBeenCalledWith(prisma, '2026-03');
     });
 
+    it('清单里另有独立 PAYROLL_CASH 行时，工资行的现金口径让给那一行，同一笔工资不会被算两遍', async () => {
+      prisma.expenseItem.findMany.mockResolvedValue([
+        { id: 'e-wage', name: '工资', autoSource: AutoSource.PAYROLL_ACCRUED, sortOrder: 0 },
+        { id: 'e-wage-cash', name: '工资现金', autoSource: AutoSource.PAYROLL_CASH, sortOrder: 1 },
+      ]);
+      computePeriodTotalsMock.mockImplementation((_prisma, period) =>
+        Promise.resolve(
+          period === '2026-03'
+            ? { accruedTotal: new Prisma.Decimal('1000'), cashTotal: new Prisma.Decimal('800') }
+            : { accruedTotal: new Prisma.Decimal(0), cashTotal: new Prisma.Decimal(0) },
+        ),
+      );
+
+      const rows = await service.buildExpenseStatement('2026-03');
+      const wageRow = rows.find((row) => row.itemId === 'e-wage');
+      const cashRow = rows.find((row) => row.itemId === 'e-wage-cash');
+
+      // 应发（经营口径）仍挂在工资行；现金口径整体挪到独立行
+      expect(wageRow?.month.operating).toBe('1000.00');
+      expect(wageRow?.month.cash).toBe('0.00');
+      expect(cashRow?.month.cash).toBe('800.00');
+
+      const totalCash = rows.reduce((acc, row) => acc.plus(row.month.cash), new Prisma.Decimal(0));
+      expect(totalCash.toFixed(2)).toBe('800.00');
+    });
+
     it('赠课成本：用 GIFT 与 GIFT_REVOKE 的净额（带符号 giftDelta 求和）', async () => {
       prisma.expenseItem.findMany.mockResolvedValue([
         { id: 'e-gift', name: '赠课成本', autoSource: AutoSource.GIFT_COST, sortOrder: 0 },

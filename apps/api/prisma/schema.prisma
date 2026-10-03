@@ -1,8 +1,14 @@
-// 数据模型的唯一来源。任何实体/枚举都在这里定义 ——
-// 禁止在 packages/shared 或前端再抄一份（同一规则两份实现 = 会静默跑偏）。
+// =============================================================================
+// 数据模型的唯一来源。需求见 D:\DevSpace\琴行经营报表\docs\需求-用户故事.md
 //
-// 注：本文件当前只有账号相关模型，是脚手架的最小可用集。
-// 把 docs/需求-用户故事.md 的 44 条故事落成模型，是下一步独立任务。
+// 三条建模原则（改这张表前先读 AGENTS.md §5）：
+//  1. 余额不是「存」出来的，是「算」出来的：Enrollment 只存起始值，
+//     之后所有变动都是 LedgerEntry 上带符号的 paidDelta / giftDelta。
+//     当前余额 = 起始值 + SUM(delta)。任何地方都不许再存一份「当前余额」。
+//  2. 一切金钱字段用 Decimal，禁止 float。精度统一 Decimal(14,2)。
+//  3. 历史不可改：取消 / 请假要回冲，就追加一条反向 LedgerEntry，
+//     不许 UPDATE 掉原来那条。关账锁月因此才成立。
+// =============================================================================
 
 generator client {
   provider = "prisma-client"
@@ -16,22 +22,509 @@ datasource db {
   provider = "postgresql"
 }
 
+// ---------------------------------------------------------------------------
+// 枚举
+// ---------------------------------------------------------------------------
+
 /// 系统账号角色。业务上只有两档：店主（可兼任授课老师）、授课老师。
 enum UserRole {
   OWNER
   TEACHER
 }
 
-/// 系统账号。授课老师与店主都在这张表里，靠 role 区分。
+enum TeacherStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// 学生状态。退费后 = WITHDRAWN；选择保留余额 = PAUSED。
+enum StudentStatus {
+  ENROLLED
+  PAUSED
+  WITHDRAWN
+}
+
+enum LessonStatus {
+  SCHEDULED
+  CONFIRMED
+  CANCELLED
+  LEAVE
+}
+
+/// 消费时先扣哪个池子。默认「先扣赠送池」。
+enum ConsumptionOrder {
+  GIFT_FIRST
+  PAID_FIRST
+}
+
+/// 台账流水类型。CONSUMPTION_REVERSAL 是回冲，不修改原条目。
+enum LedgerKind {
+  PAYMENT
+  GIFT
+  GIFT_REVOKE
+  CONSUMPTION
+  CONSUMPTION_REVERSAL
+  REFUND
+}
+
+/// 收支表里「自动取数」的项，数据从哪儿来。
+enum AutoSource {
+  LESSON_CONSUMPTION
+  PAYMENT
+  REFUND_FEE
+  REFUND_PAID
+  PAYROLL_ACCRUED
+  PAYROLL_CASH
+  GIFT_COST
+  PROFIT_SHARE
+}
+
+enum RefundMode {
+  /// 真退钱：两池清零，状态 → 退学
+  REFUND
+  /// 保留余额：两池原样，状态 → 停课
+  KEEP
+}
+
+enum PayrollSide {
+  INCOME
+  EXPENSE
+}
+
+// ---------------------------------------------------------------------------
+// 机构与全局参数（US-BD-07 / US-IW-01 / US-IW-02）
+// ---------------------------------------------------------------------------
+
+/// 全局参数。**单例表**：用 singleton 唯一约束从结构上杜绝出现第二行。
+model Organization {
+  id                    String            @id @default(uuid())
+  /// 恒为 true，只为了让唯一约束成立，业务上没有意义
+  singleton             Boolean           @default(true) @unique
+  name                  String
+  city                  String?
+  /// 填报人
+  reporter              String?
+  /// 默认课消奖比例（老师可在工资表逐人覆盖）。0.15 = 15%
+  defaultCommissionRate Decimal           @default(0) @db.Decimal(6, 4)
+  /// 退费手续费率
+  refundFeeRate         Decimal           @default(0) @db.Decimal(6, 4)
+  /// 赠送课时是否计入可用余额（赠送池）
+  giftCountsAsBalance   Boolean           @default(true)
+  consumptionOrder      ConsumptionOrder  @default(GIFT_FIRST)
+
+  /// --- 接续数据（US-IW-02）：首月没有上期，必须手工录入 ---
+  initialCashBalance    Decimal           @default(0) @db.Decimal(14, 2)
+  previousMonthProfit   Decimal           @default(0) @db.Decimal(14, 2)
+  previousMonthPayroll  Decimal           @default(0) @db.Decimal(14, 2)
+
+  onboardingCompletedAt DateTime?
+  createdAt             DateTime          @default(now()) @map("created_at")
+  updatedAt             DateTime          @updatedAt @map("updated_at")
+
+  @@map("organizations")
+}
+
+/// 利润分配人及比例（US-BD-07）。比例合计必须等于 1，由 service 校验。
+model ProfitShareRule {
+  id        String   @id @default(uuid())
+  name      String
+  ratio     Decimal  @db.Decimal(6, 4)
+  sortOrder Int      @default(0) @map("sort_order")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("profit_share_rules")
+}
+
+// ---------------------------------------------------------------------------
+// 账号与权限（US-AC-01 / US-AC-02 / US-AC-03）
+// ---------------------------------------------------------------------------
+
+/// 系统账号。可关联一位老师（授课老师账号），也可独立（协助人员）。
 model User {
-  id           String   @id @default(uuid())
-  username     String   @unique
-  passwordHash String   @map("password_hash")
-  displayName  String   @map("display_name")
+  id           String    @id @default(uuid())
+  username     String    @unique
+  passwordHash String    @map("password_hash")
+  displayName  String    @map("display_name")
   role         UserRole
-  isActive     Boolean  @default(true) @map("is_active")
+  isActive     Boolean   @default(true) @map("is_active")
+  /// 关联的老师档案。独立协助账号为 null。
+  teacherId    String?   @map("teacher_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  teacher      Teacher?  @relation(fields: [teacherId], references: [id], onDelete: SetNull)
+
+  @@index([teacherId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// 基础资料（US-BD-01 / US-BD-03 / US-BD-04 / US-BD-05 / US-BD-08）
+// ---------------------------------------------------------------------------
+
+model Teacher {
+  id                    String        @id @default(uuid())
+  name                  String
+  /// 岗位。业务上无「店长」
+  position              String?
+  hiredAt               DateTime?     @map("hired_at")
+  status                TeacherStatus @default(ACTIVE)
+  /// 逐人覆盖课消奖比例；为空则取机构默认（US-PR-02）
+  commissionRate        Decimal?      @map("commission_rate") @db.Decimal(6, 4)
+  /// 基本工资默认值，逐月可改（US-PR-06）
+  defaultBaseSalary     Decimal?      @map("default_base_salary") @db.Decimal(14, 2)
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  users                 User[]
+  enrollments           Enrollment[]
+  lessons               Lesson[]
+  payrolls              Payroll[]
+
+  @@map("teachers")
+}
+
+model CourseType {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  sortOrder Int      @default(0) @map("sort_order")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  enrollments Enrollment[]
+  lessons     Lesson[]
+
+  @@map("course_types")
+}
+
+model Student {
+  id          String        @id @default(uuid())
+  name        String
+  /// 学习级别 1~10。**不参与定价**，仅作教学分级参考。
+  gradeLevel  Int           @map("grade_level")
+  status      StudentStatus @default(ENROLLED)
+  /// 有退费意向（US-RF-01 的「待处理流失」）
+  wantsRefund Boolean       @default(false) @map("wants_refund")
+  note        String?
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  enrollments Enrollment[]
+  lessons     Lesson[]
+  refunds     RefundRecord[]
+
+  @@index([status])
+  @@map("students")
+}
+
+/// 报名关系 = 学生 + 老师 + 课程 + 该学生此课程的自定义单价（US-BD-05）。
+/// 台账的记账维度就是它：每条报名关系各有自己的实收池与赠送池。
+model Enrollment {
+  id                  String   @id @default(uuid())
+  studentId           String   @map("student_id")
+  teacherId           String   @map("teacher_id")
+  courseTypeId        String   @map("course_type_id")
+  /// 该学生此课程的自定义单价，不取自任何全局价格表
+  unitPrice           Decimal  @map("unit_price") @db.Decimal(14, 2)
+  effectiveFrom       DateTime @map("effective_from")
+  effectiveTo         DateTime? @map("effective_to")
+  /// 起始实收余额（接续数据 US-IW-02）
+  initialPaidBalance  Decimal  @default(0) @map("initial_paid_balance") @db.Decimal(14, 2)
+  /// 起始赠送余额（接续数据 US-IW-02）
+  initialGiftBalance  Decimal  @default(0) @map("initial_gift_balance") @db.Decimal(14, 2)
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  student     Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  teacher     Teacher       @relation(fields: [teacherId], references: [id], onDelete: Restrict)
+  courseType  CourseType    @relation(fields: [courseTypeId], references: [id], onDelete: Restrict)
+  entries     LedgerEntry[]
+  lessons     Lesson[]
+  gifts       GiftGrant[]
+
+  @@unique([studentId, teacherId, courseTypeId], name: "enrollment_identity")
+  @@index([studentId])
+  @@map("enrollments")
+}
+
+/// 收入项清单（US-BD-08）。autoSource 非空 = 自动取数项。
+model IncomeItem {
+  id         String      @id @default(uuid())
+  name       String      @unique
+  sortOrder  Int         @default(0) @map("sort_order")
+  isActive   Boolean     @default(true) @map("is_active")
+  isDefault  Boolean     @default(false) @map("is_default")
+  autoSource AutoSource? @map("auto_source")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @updatedAt @map("updated_at")
+
+  ledgerEntries LedgerEntry[]
+  manualIncomes ManualIncome[]
+
+  @@map("income_items")
+}
+
+/// 支出项清单（US-BD-08）。isCash = 计入现金流口径。
+model ExpenseItem {
+  id         String      @id @default(uuid())
+  name       String      @unique
+  sortOrder  Int         @default(0) @map("sort_order")
+  isActive   Boolean     @default(true) @map("is_active")
+  isDefault  Boolean     @default(false) @map("is_default")
+  autoSource AutoSource? @map("auto_source")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @updatedAt @map("updated_at")
+
+  otherExpenses OtherExpense[]
+
+  @@map("expense_items")
+}
+
+/// 工资代扣项，做成可配置列（US-BD-08 / US-PR-06）
+model DeductionItem {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  sortOrder Int      @default(0) @map("sort_order")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  payrollDeductions PayrollDeduction[]
+
+  @@map("deduction_items")
+}
+
+// ---------------------------------------------------------------------------
+// 排课与上课确认（US-SC-01/02、US-CC-01/02/03）
+// ---------------------------------------------------------------------------
+
+model Lesson {
+  id               String       @id @default(uuid())
+  enrollmentId     String       @map("enrollment_id")
+  studentId        String       @map("student_id")
+  teacherId        String       @map("teacher_id")
+  courseTypeId     String       @map("course_type_id")
+  scheduledAt      DateTime     @map("scheduled_at")
+  isGift           Boolean      @default(false) @map("is_gift")
+  /// 赠送课必须指向一笔赠送额度（US-CC-03）
+  giftGrantId      String?      @map("gift_grant_id")
+  status           LessonStatus @default(SCHEDULED)
+  /// 确认时锁定的单价快照。取消/请假后仍保留，用于回冲时对齐金额。
+  unitPriceSnapshot Decimal?    @map("unit_price_snapshot") @db.Decimal(14, 2)
+  confirmedAt      DateTime?    @map("confirmed_at")
+  confirmedById    String?      @map("confirmed_by_id")
+  note             String?
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  enrollment Enrollment       @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  student    Student          @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  teacher    Teacher          @relation(fields: [teacherId], references: [id], onDelete: Restrict)
+  courseType CourseType       @relation(fields: [courseTypeId], references: [id], onDelete: Restrict)
+  giftGrant  GiftGrant?       @relation(fields: [giftGrantId], references: [id], onDelete: SetNull)
+  entries    LedgerEntry[]
+
+  @@index([teacherId, scheduledAt])
+  @@index([studentId, scheduledAt])
+  @@index([status])
+  @@map("lessons")
+}
+
+// ---------------------------------------------------------------------------
+// 台账（US-ML-01 / US-ML-02）
+// ---------------------------------------------------------------------------
+
+/// 流水。**只追加，不改不删**。当前余额 = Enrollment 起始值 + SUM(这里的 delta)。
+model LedgerEntry {
+  id               String     @id @default(uuid())
+  enrollmentId     String     @map("enrollment_id")
+  kind             LedgerKind
+  /// 归属月份由此字段决定（上课确认用确认时间，US-CC-03）
+  occurredAt       DateTime   @map("occurred_at")
+  /// 实收池变动（有符号）
+  paidDelta        Decimal    @default(0) @map("paid_delta") @db.Decimal(14, 2)
+  /// 赠送池变动（有符号）
+  giftDelta        Decimal    @default(0) @map("gift_delta") @db.Decimal(14, 2)
+  /// 交费归属的收入项（US-IE-01）
+  incomeItemId     String?    @map("income_item_id")
+  lessonId         String?    @map("lesson_id")
+  giftGrantId      String?    @map("gift_grant_id")
+  refundRecordId   String?    @map("refund_record_id")
+  /// 指向被回冲的那条流水。唯一约束保证同一笔只能被回冲一次 ——
+  /// 这是「同一节课重复确认不应重复扣减」在数据库层的兜底。
+  reversesEntryId  String?    @unique @map("reverses_entry_id")
+  note             String?
+  createdById      String?    @map("created_by_id")
+  createdAt        DateTime   @default(now()) @map("created_at")
+
+  enrollment   Enrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  incomeItem   IncomeItem?   @relation(fields: [incomeItemId], references: [id], onDelete: SetNull)
+  lesson       Lesson?       @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+  giftGrant    GiftGrant?    @relation(fields: [giftGrantId], references: [id], onDelete: SetNull)
+  refundRecord RefundRecord? @relation(fields: [refundRecordId], references: [id], onDelete: SetNull)
+  reversedBy   LedgerEntry?  @relation("LedgerReversal", fields: [reversesEntryId], references: [id], onDelete: SetNull)
+  reverses     LedgerEntry?  @relation("LedgerReversal")
+
+  @@index([enrollmentId, occurredAt])
+  @@index([occurredAt])
+  @@index([kind])
+  @@map("ledger_entries")
+}
+
+// ---------------------------------------------------------------------------
+// 赠送（US-GL-01 / US-GL-02 / US-GL-03）
+// ---------------------------------------------------------------------------
+
+model GiftGrant {
+  id             String    @id @default(uuid())
+  enrollmentId   String    @map("enrollment_id")
+  /// 赠送节数（额度）
+  lessons        Int
+  /// 赠送时锁定的折算单价
+  unitPrice      Decimal   @map("unit_price") @db.Decimal(14, 2)
+  /// 折算金额 = 节数 × 单价
+  amount         Decimal   @db.Decimal(14, 2)
+  activityName   String    @map("activity_name")
+  grantedAt      DateTime  @map("granted_at")
+  grantedById    String?   @map("granted_by_id")
+  revokedAt      DateTime? @map("revoked_at")
+  revokedById    String?   @map("revoked_by_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  enrollment Enrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  lessonsRef Lesson[]
+  entries    LedgerEntry[]
+
+  @@index([enrollmentId, grantedAt])
+  @@index([activityName])
+  @@map("gift_grants")
+}
+
+// ---------------------------------------------------------------------------
+// 退费（US-RF-01/02/03）
+// ---------------------------------------------------------------------------
+
+model RefundRecord {
+  id          String     @id @default(uuid())
+  studentId   String     @map("student_id")
+  mode        RefundMode
+  occurredAt  DateTime   @map("occurred_at")
+  paidTotal   Decimal    @map("paid_total") @db.Decimal(14, 2)
+  giftTotal   Decimal    @map("gift_total") @db.Decimal(14, 2)
+  feeRate     Decimal    @map("fee_rate") @db.Decimal(6, 4)
+  feeAmount   Decimal    @map("fee_amount") @db.Decimal(14, 2)
+  refundAmount Decimal   @map("refund_amount") @db.Decimal(14, 2)
+  createdById String?    @map("created_by_id")
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  student Student       @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  entries LedgerEntry[]
+
+  @@index([studentId, occurredAt])
+  @@map("refund_records")
+}
+
+// ---------------------------------------------------------------------------
+// 收支（US-IE-01/02/03/04）
+// ---------------------------------------------------------------------------
+
+/// 其它支出明细（US-IE-03）
+model OtherExpense {
+  id            String   @id @default(uuid())
+  expenseItemId String   @map("expense_item_id")
+  /// 归属月份 YYYY-MM
+  period        String
+  summary       String
+  cashAmount    Decimal  @map("cash_amount") @db.Decimal(14, 2)
+  occurredAt    DateTime @map("occurred_at")
+  createdById   String?  @map("created_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  expenseItem ExpenseItem @relation(fields: [expenseItemId], references: [id], onDelete: Restrict)
+
+  @@index([period])
+  @@map("other_expenses")
+}
+
+/// 手工补录的收入（US-IE-01 的「支持手工补录项」）
+model ManualIncome {
+  id           String   @id @default(uuid())
+  incomeItemId String   @map("income_item_id")
+  period       String
+  amount       Decimal  @db.Decimal(14, 2)
+  note         String?
+  createdById  String?  @map("created_by_id")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  @@map("users")
+  incomeItem IncomeItem @relation(fields: [incomeItemId], references: [id], onDelete: Restrict)
+
+  @@index([period])
+  @@map("manual_incomes")
+}
+
+// ---------------------------------------------------------------------------
+// 工资（US-PR-01 … US-PR-07）
+// ---------------------------------------------------------------------------
+
+/// 每位老师每月一条。业绩与课消奖**不存**，一律从已确认课实时汇总 ——
+/// 存一份就会和上课确认对不上（US-PR-03 要的正是「与上课确认一致、不手工抄」）。
+model Payroll {
+  id                  String   @id @default(uuid())
+  teacherId           String   @map("teacher_id")
+  period              String
+  attendanceExpected  Int      @default(0) @map("attendance_expected")
+  attendanceActual    Int      @default(0) @map("attendance_actual")
+  attendanceAbsent    Int      @default(0) @map("attendance_absent")
+  baseSalary          Decimal  @default(0) @map("base_salary") @db.Decimal(14, 2)
+  pianoBonus          Decimal  @default(0) @map("piano_bonus") @db.Decimal(14, 2)
+  recruitBonus        Decimal  @default(0) @map("recruit_bonus") @db.Decimal(14, 2)
+  /// 逐人覆盖课消奖比例；为空取机构默认
+  commissionRate      Decimal? @map("commission_rate") @db.Decimal(6, 4)
+  note                String?
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  teacher    Teacher            @relation(fields: [teacherId], references: [id], onDelete: Restrict)
+  deductions PayrollDeduction[]
+
+  @@unique([teacherId, period])
+  @@index([period])
+  @@map("payrolls")
+}
+
+model PayrollDeduction {
+  id              String   @id @default(uuid())
+  payrollId       String   @map("payroll_id")
+  deductionItemId String   @map("deduction_item_id")
+  amount          Decimal  @db.Decimal(14, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  payroll       Payroll       @relation(fields: [payrollId], references: [id], onDelete: Cascade)
+  deductionItem DeductionItem @relation(fields: [deductionItemId], references: [id], onDelete: Restrict)
+
+  @@unique([payrollId, deductionItemId])
+  @@map("payroll_deductions")
+}
+
+// ---------------------------------------------------------------------------
+// 关账（US-PC-01 / US-PC-02）
+// ---------------------------------------------------------------------------
+
+/// 已锁定的月份。锁定后该月事件不可新增 / 修改 / 删除。
+model ClosedPeriod {
+  id         String   @id @default(uuid())
+  /// YYYY-MM
+  period     String   @unique
+  closedAt   DateTime @map("closed_at")
+  closedById String?  @map("closed_by_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("closed_periods")
 }

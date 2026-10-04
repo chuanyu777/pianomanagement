@@ -63,16 +63,16 @@ export const EnrollmentsPage = () => {
   const courseTypes = useList<OptionItem>({ resource: 'course-types', ...PAGE_OPTIONS });
 
   const studentName = useMemo(
-    () => new Map((students.result.data ?? []).map((row) => [row.id, row.name])),
-    [students.result.data],
+    () => new Map((students.result?.data ?? []).map((row) => [row.id, row.name])),
+    [students.result?.data],
   );
   const teacherName = useMemo(
-    () => new Map((teachers.result.data ?? []).map((row) => [row.id, row.name])),
-    [teachers.result.data],
+    () => new Map((teachers.result?.data ?? []).map((row) => [row.id, row.name])),
+    [teachers.result?.data],
   );
   const courseName = useMemo(
-    () => new Map((courseTypes.result.data ?? []).map((row) => [row.id, row.name])),
-    [courseTypes.result.data],
+    () => new Map((courseTypes.result?.data ?? []).map((row) => [row.id, row.name])),
+    [courseTypes.result?.data],
   );
 
   const { mutateAsync: createAsync } = useCreate();
@@ -219,7 +219,7 @@ export const EnrollmentsPage = () => {
                   optionFilterProp="label"
                   placeholder="选择学生"
                   loading={students.query.isLoading}
-                  options={(students.result.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
+                  options={(students.result?.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
                 />
               </Form.Item>
               <Form.Item name="teacherId" label="老师" rules={[{ required: true, message: '请选择老师' }]}>
@@ -228,7 +228,7 @@ export const EnrollmentsPage = () => {
                   optionFilterProp="label"
                   placeholder="选择老师"
                   loading={teachers.query.isLoading}
-                  options={(teachers.result.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
+                  options={(teachers.result?.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
                 />
               </Form.Item>
               <Form.Item name="courseTypeId" label="课程" rules={[{ required: true, message: '请选择课程' }]}>
@@ -237,7 +237,7 @@ export const EnrollmentsPage = () => {
                   optionFilterProp="label"
                   placeholder="选择课程类型"
                   loading={courseTypes.query.isLoading}
-                  options={(courseTypes.result.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
+                  options={(courseTypes.result?.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
                 />
               </Form.Item>
             </>

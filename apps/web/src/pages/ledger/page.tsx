@@ -89,8 +89,8 @@ export const LedgerPage = () => {
 
   const studentOptions = useMemo(
     () =>
-      (students.result.data ?? []).map((row) => ({ value: row.id, label: row.name })),
-    [students.result.data],
+      (students.result?.data ?? []).map((row) => ({ value: row.id, label: row.name })),
+    [students.result?.data],
   );
 
   const ledger = ledgerResult?.data;

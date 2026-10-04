@@ -66,7 +66,7 @@ export const RisksPage = () => {
     method: 'get',
   });
 
-  const sleeping = sleepingQuery.result.data;
+  const sleeping = sleepingQuery.result?.data;
 
   return (
     <Tabs
@@ -81,7 +81,7 @@ export const RisksPage = () => {
               </Typography.Text>
               <Table<UnpaidRow>
                 rowKey="enrollmentId"
-                dataSource={unpaidQuery.result.data}
+                dataSource={unpaidQuery.result?.data}
                 loading={unpaidQuery.query.isLoading}
                 pagination={false}
               >
@@ -100,7 +100,7 @@ export const RisksPage = () => {
             <Space direction="vertical" size="large" style={{ width: '100%' }}>
               <Typography.Text type="secondary">
                 {sleeping
-                  ? `超过 ${sleeping.thresholdDays} 天未确认上课的学生需要关注（店主与授课老师可见）。`
+                  ? `超过 ${sleeping?.thresholdDays ?? 40} 天未确认上课的学生需要关注（店主与授课老师可见）。`
                   : '按最后一次确认上课的时间，找出长期没来上课的学生。'}
               </Typography.Text>
               <Card title="超过阈值未上课">

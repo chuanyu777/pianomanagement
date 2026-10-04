@@ -119,19 +119,19 @@ export const FinancePage = () => {
   });
 
   // 手工补录/其它支出只允许挂在手工项上（autoSource 为空），自动项由系统汇总
-  const manualIncomeOptions = (incomeItemsQuery.result.data ?? [])
+  const manualIncomeOptions = (incomeItemsQuery.result?.data ?? [])
     .filter((item) => item.autoSource === null)
     .map((item) => ({ label: item.name, value: item.id }));
-  const manualExpenseOptions = (expenseItemsQuery.result.data ?? [])
+  const manualExpenseOptions = (expenseItemsQuery.result?.data ?? [])
     .filter((item) => item.autoSource === null)
     .map((item) => ({ label: item.name, value: item.id }));
 
   const incomeItemName = (id: string) =>
-    incomeItemsQuery.result.data.find((item) => item.id === id)?.name ?? id;
+    (incomeItemsQuery.result?.data ?? []).find((item) => item.id === id)?.name ?? id;
   const expenseItemName = (id: string) =>
-    expenseItemsQuery.result.data.find((item) => item.id === id)?.name ?? id;
+    (expenseItemsQuery.result?.data ?? []).find((item) => item.id === id)?.name ?? id;
 
-  const summary = summaryQuery.result.data;
+  const summary = summaryQuery.result?.data;
 
   // ---------- 其它支出 ----------
   const [otherExpenseForm] = Form.useForm<OtherExpenseFormValues>();
@@ -309,7 +309,7 @@ export const FinancePage = () => {
             children: (
               <Table
                 rowKey="itemId"
-                dataSource={incomeQuery.result.data}
+                dataSource={incomeQuery.result?.data}
                 loading={incomeQuery.query.isLoading}
                 pagination={false}
               >
@@ -338,7 +338,7 @@ export const FinancePage = () => {
             children: (
               <Table
                 rowKey="itemId"
-                dataSource={expenseQuery.result.data}
+                dataSource={expenseQuery.result?.data}
                 loading={expenseQuery.query.isLoading}
                 pagination={false}
               >

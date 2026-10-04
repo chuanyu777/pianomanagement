@@ -29,6 +29,7 @@ import {
 import '@ant-design/v5-patch-for-react-19';
 import '@refinedev/antd/dist/reset.css';
 
+import { PageErrorBoundary } from './components/page-error-boundary';
 import { dataProvider } from './data-provider';
 import { authProvider } from './auth-provider';
 
@@ -94,7 +95,9 @@ const App: React.FC = () => {
                 <Authenticated key="app" fallback={<CatchAllNavigate to="/login" />}>
                   <ThemedLayout>
                     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '0 16px' }}>
-                      <Outlet />
+                      <PageErrorBoundary>
+                        <Outlet />
+                      </PageErrorBoundary>
                     </div>
                   </ThemedLayout>
                 </Authenticated>

@@ -93,16 +93,16 @@ export const LessonsPage = () => {
   const courseTypes = useList<OptionItem>({ resource: 'course-types', ...PAGE_OPTIONS });
 
   const studentName = useMemo(
-    () => new Map((students.result.data ?? []).map((row) => [row.id, row.name])),
-    [students.result.data],
+    () => new Map((students.result?.data ?? []).map((row) => [row.id, row.name])),
+    [students.result?.data],
   );
   const teacherName = useMemo(
-    () => new Map((teachers.result.data ?? []).map((row) => [row.id, row.name])),
-    [teachers.result.data],
+    () => new Map((teachers.result?.data ?? []).map((row) => [row.id, row.name])),
+    [teachers.result?.data],
   );
   const courseName = useMemo(
-    () => new Map((courseTypes.result.data ?? []).map((row) => [row.id, row.name])),
-    [courseTypes.result.data],
+    () => new Map((courseTypes.result?.data ?? []).map((row) => [row.id, row.name])),
+    [courseTypes.result?.data],
   );
 
   const { mutateAsync: createAsync } = useCreate();
@@ -204,7 +204,7 @@ export const LessonsPage = () => {
           style={{ width: 200 }}
           value={teacherFilter}
           onChange={(value) => setTeacherFilter(value)}
-          options={(teachers.result.data ?? []).map((row) => ({
+          options={(teachers.result?.data ?? []).map((row) => ({
             value: row.id,
             label: row.name,
           }))}
@@ -299,7 +299,7 @@ export const LessonsPage = () => {
               showSearch
               optionFilterProp="label"
               placeholder="选择学生"
-              options={(students.result.data ?? []).map((row) => ({
+              options={(students.result?.data ?? []).map((row) => ({
                 value: row.id,
                 label: row.name,
               }))}
@@ -310,7 +310,7 @@ export const LessonsPage = () => {
               showSearch
               optionFilterProp="label"
               placeholder="选择老师"
-              options={(teachers.result.data ?? []).map((row) => ({
+              options={(teachers.result?.data ?? []).map((row) => ({
                 value: row.id,
                 label: row.name,
               }))}
@@ -325,7 +325,7 @@ export const LessonsPage = () => {
               showSearch
               optionFilterProp="label"
               placeholder="选择课程类型"
-              options={(courseTypes.result.data ?? []).map((row) => ({
+              options={(courseTypes.result?.data ?? []).map((row) => ({
                 value: row.id,
                 label: row.name,
               }))}

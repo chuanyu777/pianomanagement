@@ -132,16 +132,16 @@ export const OnboardingPage = () => {
   const shares = sharesQuery.result?.data;
 
   const studentName = useMemo(
-    () => new Map((students.result.data ?? []).map((row) => [row.id, row.name])),
-    [students.result.data],
+    () => new Map((students.result?.data ?? []).map((row) => [row.id, row.name])),
+    [students.result?.data],
   );
   const teacherName = useMemo(
-    () => new Map((teachers.result.data ?? []).map((row) => [row.id, row.name])),
-    [teachers.result.data],
+    () => new Map((teachers.result?.data ?? []).map((row) => [row.id, row.name])),
+    [teachers.result?.data],
   );
   const courseName = useMemo(
-    () => new Map((courseTypes.result.data ?? []).map((row) => [row.id, row.name])),
-    [courseTypes.result.data],
+    () => new Map((courseTypes.result?.data ?? []).map((row) => [row.id, row.name])),
+    [courseTypes.result?.data],
   );
 
   // 机构信息表单：数据到达后回填
@@ -180,7 +180,7 @@ export const OnboardingPage = () => {
   // 选中的学生有报名关系数据时，给每条报名预填当前值
   useEffect(() => {
     if (selectedStudentIds.length === 0) return;
-    const rows = enrollments.result.data ?? [];
+    const rows = enrollments.result?.data ?? [];
     setBalanceValues((prev) => {
       const next = { ...prev };
       let changed = false;
@@ -196,7 +196,7 @@ export const OnboardingPage = () => {
       }
       return changed ? next : prev;
     });
-  }, [selectedStudentIds, enrollments.result.data]);
+  }, [selectedStudentIds, enrollments.result?.data]);
 
   const updateBalance = (enrollmentId: string, patch: Partial<BalanceEntry>) => {
     setBalanceValues((prev) => {
@@ -221,7 +221,7 @@ export const OnboardingPage = () => {
     if (profit !== undefined) payload.previousMonthProfit = profit;
     if (payroll !== undefined) payload.previousMonthPayroll = payroll;
 
-    const studentRows = enrollments.result.data ?? [];
+    const studentRows = enrollments.result?.data ?? [];
     const studentsPayload = selectedStudentIds
       .map((studentId) => ({
         studentId,
@@ -426,11 +426,11 @@ export const OnboardingPage = () => {
           value={selectedStudentIds}
           onChange={setSelectedStudentIds}
           allowClear
-          options={(students.result.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
+          options={(students.result?.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
         />
 
         {selectedStudentIds.map((studentId) => {
-          const rows = (enrollments.result.data ?? []).filter((row) => row.studentId === studentId);
+          const rows = (enrollments.result?.data ?? []).filter((row) => row.studentId === studentId);
           return (
             <Card
               key={studentId}

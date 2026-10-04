@@ -124,7 +124,7 @@ export const PayrollPage = () => {
   const sheet = sheetQuery.result?.data;
   const totals = totalsQuery.result?.data;
   const optionalColumns = columnsQuery.result?.data ?? [];
-  const deductionOptions = (deductionItemsQuery.result.data ?? []).map((item) => ({
+  const deductionOptions = (deductionItemsQuery.result?.data ?? []).map((item) => ({
     label: item.name,
     value: item.id,
   }));

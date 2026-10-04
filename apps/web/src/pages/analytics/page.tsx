@@ -92,7 +92,7 @@ export const AnalyticsPage = () => {
       <Card title="教师业绩排行">
         <Table<TeacherRankingRow>
           rowKey="teacherId"
-          dataSource={teacherRankingQuery.result.data}
+          dataSource={teacherRankingQuery.result?.data}
           loading={teacherRankingQuery.query.isLoading}
           pagination={false}
         >
@@ -106,7 +106,7 @@ export const AnalyticsPage = () => {
       <Card title="学生消费排行">
         <Table<StudentRankingRow>
           rowKey="studentId"
-          dataSource={studentRankingQuery.result.data}
+          dataSource={studentRankingQuery.result?.data}
           loading={studentRankingQuery.query.isLoading}
           pagination={false}
         >
@@ -119,7 +119,7 @@ export const AnalyticsPage = () => {
 
       <Card title="教师业绩趋势（近 6 个月，金额为后端返回字符串）">
         <TrendTable
-          data={teacherTrendQuery.result.data ?? []}
+          data={teacherTrendQuery.result?.data ?? []}
           loading={teacherTrendQuery.query.isLoading}
         />
       </Card>

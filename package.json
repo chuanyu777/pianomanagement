@@ -19,5 +19,8 @@
     "db:down": "docker compose down",
     "db:generate": "npm run db:generate -w @piano/api",
     "db:migrate": "npm run db:migrate -w @piano/api"
+  },
+  "dependencies": {
+    "playwright-core": "1.63.0"
   }
 }

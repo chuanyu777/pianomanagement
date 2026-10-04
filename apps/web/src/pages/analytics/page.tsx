@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import dayjs from 'dayjs';
 import { useCustom } from '@refinedev/core';
-import { Card, DatePicker, Space, Table, Typography } from 'antd';
+import { Alert, Card, DatePicker, Space, Spin, Table, Typography } from 'antd';
 import { currentPeriod } from '../../period';
 
 /**
@@ -75,6 +75,19 @@ export const AnalyticsPage = () => {
     method: 'get',
   });
 
+  // ---------- 加载 / 错误（所有 hook 之后、读 result?.data 之前提前返回） ----------
+  // Refine 5 首次渲染时 result.data 是冻结的空对象（truthy），必须等加载完成再读
+  const loading =
+    teacherRankingQuery.query.isLoading ||
+    studentRankingQuery.query.isLoading ||
+    teacherTrendQuery.query.isLoading;
+  if (loading) return <Spin />;
+  const error =
+    teacherRankingQuery.query.error ||
+    studentRankingQuery.query.error ||
+    teacherTrendQuery.query.error;
+  if (error) return <Alert type="error" message={String(error)} showIcon />;
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Space>
@@ -92,7 +105,9 @@ export const AnalyticsPage = () => {
       <Card title="教师业绩排行">
         <Table<TeacherRankingRow>
           rowKey="teacherId"
-          dataSource={teacherRankingQuery.result?.data}
+          dataSource={
+            Array.isArray(teacherRankingQuery.result?.data) ? teacherRankingQuery.result.data : []
+          }
           loading={teacherRankingQuery.query.isLoading}
           pagination={false}
         >
@@ -106,7 +121,9 @@ export const AnalyticsPage = () => {
       <Card title="学生消费排行">
         <Table<StudentRankingRow>
           rowKey="studentId"
-          dataSource={studentRankingQuery.result?.data}
+          dataSource={
+            Array.isArray(studentRankingQuery.result?.data) ? studentRankingQuery.result.data : []
+          }
           loading={studentRankingQuery.query.isLoading}
           pagination={false}
         >
@@ -119,7 +136,9 @@ export const AnalyticsPage = () => {
 
       <Card title="教师业绩趋势（近 6 个月，金额为后端返回字符串）">
         <TrendTable
-          data={teacherTrendQuery.result?.data ?? []}
+          data={
+            Array.isArray(teacherTrendQuery.result?.data) ? teacherTrendQuery.result.data : []
+          }
           loading={teacherTrendQuery.query.isLoading}
         />
       </Card>

@@ -132,21 +132,39 @@ export const OnboardingPage = () => {
   const shares = sharesQuery.result?.data;
 
   const studentName = useMemo(
-    () => new Map((students.result?.data ?? []).map((row) => [row.id, row.name])),
+    () =>
+      new Map(
+        (Array.isArray(students.result?.data) ? students.result.data : []).map((row) => [
+          row.id,
+          row.name,
+        ]),
+      ),
     [students.result?.data],
   );
   const teacherName = useMemo(
-    () => new Map((teachers.result?.data ?? []).map((row) => [row.id, row.name])),
+    () =>
+      new Map(
+        (Array.isArray(teachers.result?.data) ? teachers.result.data : []).map((row) => [
+          row.id,
+          row.name,
+        ]),
+      ),
     [teachers.result?.data],
   );
   const courseName = useMemo(
-    () => new Map((courseTypes.result?.data ?? []).map((row) => [row.id, row.name])),
+    () =>
+      new Map(
+        (Array.isArray(courseTypes.result?.data) ? courseTypes.result.data : []).map((row) => [
+          row.id,
+          row.name,
+        ]),
+      ),
     [courseTypes.result?.data],
   );
 
-  // 机构信息表单：数据到达后回填
+  // 机构信息表单：数据到达后回填（加载中 result.data 是冻结的空对象，不能当真数据用）
   useEffect(() => {
-    if (org) {
+    if (org && typeof org.name === 'string') {
       orgForm.setFieldsValue({
         name: org.name,
         city: org.city ?? undefined,
@@ -158,7 +176,7 @@ export const OnboardingPage = () => {
   // 接续数据三个数字：只在首次加载时用机构当前值回填，之后以用户输入为准
   const carryOverPrefilled = useRef(false);
   useEffect(() => {
-    if (org && !carryOverPrefilled.current) {
+    if (org && typeof org.initialCashBalance === 'string' && !carryOverPrefilled.current) {
       carryOverPrefilled.current = true;
       carryOverForm.setFieldsValue({
         initialCashBalance: Number(org.initialCashBalance),
@@ -170,7 +188,7 @@ export const OnboardingPage = () => {
 
   // 利润分配表单：数据每次到达（含保存后刷新）都回填
   useEffect(() => {
-    if (shares) {
+    if (Array.isArray(shares)) {
       sharesForm.setFieldsValue({
         rules: shares.map((row) => ({ name: row.name, ratio: Number(row.ratio) })),
       });
@@ -180,7 +198,7 @@ export const OnboardingPage = () => {
   // 选中的学生有报名关系数据时，给每条报名预填当前值
   useEffect(() => {
     if (selectedStudentIds.length === 0) return;
-    const rows = enrollments.result?.data ?? [];
+    const rows = Array.isArray(enrollments.result?.data) ? enrollments.result.data : [];
     setBalanceValues((prev) => {
       const next = { ...prev };
       let changed = false;
@@ -221,7 +239,7 @@ export const OnboardingPage = () => {
     if (profit !== undefined) payload.previousMonthProfit = profit;
     if (payroll !== undefined) payload.previousMonthPayroll = payroll;
 
-    const studentRows = enrollments.result?.data ?? [];
+    const studentRows = Array.isArray(enrollments.result?.data) ? enrollments.result.data : [];
     const studentsPayload = selectedStudentIds
       .map((studentId) => ({
         studentId,
@@ -345,12 +363,29 @@ export const OnboardingPage = () => {
     });
   };
 
-  if (statusQuery.query.isLoading || orgQuery.query.isLoading) return <Spin />;
-  if (statusQuery.query.isError)
-    return <Alert type="error" showIcon message={String(statusQuery.query.error)} />;
+  // ---------- 加载 / 错误（所有 hook 之后、读 result?.data 之前提前返回） ----------
+  // Refine 5 首次渲染时 result.data 是冻结的空对象（truthy），必须等加载完成再读
+  const loading =
+    statusQuery.query.isLoading ||
+    orgQuery.query.isLoading ||
+    sharesQuery.query.isLoading ||
+    students.query.isLoading ||
+    enrollments.query.isLoading ||
+    teachers.query.isLoading ||
+    courseTypes.query.isLoading;
+  if (loading) return <Spin />;
+  const error =
+    statusQuery.query.error ||
+    orgQuery.query.error ||
+    sharesQuery.query.error ||
+    students.query.error ||
+    enrollments.query.error ||
+    teachers.query.error ||
+    courseTypes.query.error;
+  if (error) return <Alert type="error" message={String(error)} showIcon />;
 
   const status = statusQuery.result?.data;
-  if (!status) return <Empty description="暂无数据" />;
+  if (!status || !Array.isArray(status.steps)) return <Empty description="暂无数据" />;
 
   return (
     <div>
@@ -426,11 +461,15 @@ export const OnboardingPage = () => {
           value={selectedStudentIds}
           onChange={setSelectedStudentIds}
           allowClear
-          options={(students.result?.data ?? []).map((row) => ({ value: row.id, label: row.name }))}
+          options={(Array.isArray(students.result?.data) ? students.result.data : []).map(
+            (row) => ({ value: row.id, label: row.name }),
+          )}
         />
 
         {selectedStudentIds.map((studentId) => {
-          const rows = (enrollments.result?.data ?? []).filter((row) => row.studentId === studentId);
+          const rows = (Array.isArray(enrollments.result?.data) ? enrollments.result.data : []).filter(
+            (row) => row.studentId === studentId,
+          );
           return (
             <Card
               key={studentId}

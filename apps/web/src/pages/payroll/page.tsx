@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import { useCustom, useCustomMutation, useList } from '@refinedev/core';
 import type { TableColumnsType } from 'antd';
 import {
+  Alert,
   Button,
   Card,
   Checkbox,
@@ -15,6 +16,7 @@ import {
   Row,
   Select,
   Space,
+  Spin,
   Statistic,
   Table,
   Typography,
@@ -123,8 +125,11 @@ export const PayrollPage = () => {
 
   const sheet = sheetQuery.result?.data;
   const totals = totalsQuery.result?.data;
-  const optionalColumns = columnsQuery.result?.data ?? [];
-  const deductionOptions = (deductionItemsQuery.result?.data ?? []).map((item) => ({
+  // Array.isArray 保险：Refine 5 首次渲染时 result.data 可能是冻结的空对象（truthy），?? 不会兜底
+  const optionalColumns = Array.isArray(columnsQuery.result?.data) ? columnsQuery.result.data : [];
+  const deductionOptions = (
+    Array.isArray(deductionItemsQuery.result?.data) ? deductionItemsQuery.result.data : []
+  ).map((item) => ({
     label: item.name,
     value: item.id,
   }));
@@ -162,6 +167,20 @@ export const PayrollPage = () => {
   const [form] = Form.useForm<EditFormValues>();
   const [editing, setEditing] = useState<PayrollRow | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // ---------- 加载 / 错误（必须在所有 hook 之后、读 result?.data 的渲染之前提前返回） ----------
+  const loading =
+    sheetQuery.query.isLoading ||
+    totalsQuery.query.isLoading ||
+    columnsQuery.query.isLoading ||
+    deductionItemsQuery.query.isLoading;
+  if (loading) return <Spin />;
+  const error =
+    sheetQuery.query.error ||
+    totalsQuery.query.error ||
+    columnsQuery.query.error ||
+    deductionItemsQuery.query.error;
+  if (error) return <Alert type="error" message={String(error)} showIcon />;
 
   const openEdit = (row: PayrollRow) => {
     setEditing(row);

@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { DeleteButton, useTable } from '@refinedev/antd';
 import { useCreate, useCustom, useList, useUpdate } from '@refinedev/core';
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -14,6 +15,7 @@ import {
   Row,
   Select,
   Space,
+  Spin,
   Statistic,
   Table,
   Tabs,
@@ -119,17 +121,26 @@ export const FinancePage = () => {
   });
 
   // 手工补录/其它支出只允许挂在手工项上（autoSource 为空），自动项由系统汇总
-  const manualIncomeOptions = (incomeItemsQuery.result?.data ?? [])
+  // Array.isArray 保险：Refine 5 首次渲染时 result.data 可能是冻结的空对象（truthy），直接当数组用会崩
+  const manualIncomeOptions = (
+    Array.isArray(incomeItemsQuery.result?.data) ? incomeItemsQuery.result.data : []
+  )
     .filter((item) => item.autoSource === null)
     .map((item) => ({ label: item.name, value: item.id }));
-  const manualExpenseOptions = (expenseItemsQuery.result?.data ?? [])
+  const manualExpenseOptions = (
+    Array.isArray(expenseItemsQuery.result?.data) ? expenseItemsQuery.result.data : []
+  )
     .filter((item) => item.autoSource === null)
     .map((item) => ({ label: item.name, value: item.id }));
 
   const incomeItemName = (id: string) =>
-    (incomeItemsQuery.result?.data ?? []).find((item) => item.id === id)?.name ?? id;
+    (Array.isArray(incomeItemsQuery.result?.data) ? incomeItemsQuery.result.data : []).find(
+      (item) => item.id === id,
+    )?.name ?? id;
   const expenseItemName = (id: string) =>
-    (expenseItemsQuery.result?.data ?? []).find((item) => item.id === id)?.name ?? id;
+    (Array.isArray(expenseItemsQuery.result?.data) ? expenseItemsQuery.result.data : []).find(
+      (item) => item.id === id,
+    )?.name ?? id;
 
   const summary = summaryQuery.result?.data;
 
@@ -214,6 +225,13 @@ export const FinancePage = () => {
   const { mutateAsync: createManualIncomeAsync } = useCreate();
   const { mutateAsync: updateManualIncomeAsync } = useUpdate();
   const [savingManualIncome, setSavingManualIncome] = useState(false);
+
+  // ---------- 加载 / 错误（必须在所有 hook 之后、读 result?.data 的渲染之前提前返回） ----------
+  const loading =
+    incomeQuery.query.isLoading || expenseQuery.query.isLoading || summaryQuery.query.isLoading;
+  if (loading) return <Spin />;
+  const error = incomeQuery.query.error || expenseQuery.query.error || summaryQuery.query.error;
+  if (error) return <Alert type="error" message={String(error)} showIcon />;
 
   const openManualIncomeCreate = () => {
     setEditingManualIncome(null);
@@ -309,7 +327,7 @@ export const FinancePage = () => {
             children: (
               <Table
                 rowKey="itemId"
-                dataSource={incomeQuery.result?.data}
+                dataSource={Array.isArray(incomeQuery.result?.data) ? incomeQuery.result.data : []}
                 loading={incomeQuery.query.isLoading}
                 pagination={false}
               >
@@ -338,7 +356,7 @@ export const FinancePage = () => {
             children: (
               <Table
                 rowKey="itemId"
-                dataSource={expenseQuery.result?.data}
+                dataSource={Array.isArray(expenseQuery.result?.data) ? expenseQuery.result.data : []}
                 loading={expenseQuery.query.isLoading}
                 pagination={false}
               >

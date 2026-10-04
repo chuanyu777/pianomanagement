@@ -1,6 +1,6 @@
 import dayjs from 'dayjs';
 import { useCustom } from '@refinedev/core';
-import { Card, Space, Table, Tabs, Typography } from 'antd';
+import { Alert, Card, Space, Spin, Table, Tabs, Typography } from 'antd';
 
 /**
  * 风险提醒（US-RA-01 / US-RA-02）。
@@ -66,7 +66,16 @@ export const RisksPage = () => {
     method: 'get',
   });
 
+  // ---------- 加载 / 错误（所有 hook 之后、读 result?.data 之前提前返回） ----------
+  // Refine 5 首次渲染时 result.data 是冻结的空对象（truthy），必须等加载完成再读
+  const loading = unpaidQuery.query.isLoading || sleepingQuery.query.isLoading;
+  if (loading) return <Spin />;
+  const error = unpaidQuery.query.error || sleepingQuery.query.error;
+  if (error) return <Alert type="error" message={String(error)} showIcon />;
+
   const sleeping = sleepingQuery.result?.data;
+  const sleepingRows = Array.isArray(sleeping?.sleeping) ? sleeping.sleeping : [];
+  const neverRows = Array.isArray(sleeping?.never) ? sleeping.never : [];
 
   return (
     <Tabs
@@ -81,7 +90,9 @@ export const RisksPage = () => {
               </Typography.Text>
               <Table<UnpaidRow>
                 rowKey="enrollmentId"
-                dataSource={unpaidQuery.result?.data}
+                dataSource={
+                  Array.isArray(unpaidQuery.result?.data) ? unpaidQuery.result.data : []
+                }
                 loading={unpaidQuery.query.isLoading}
                 pagination={false}
               >
@@ -104,10 +115,10 @@ export const RisksPage = () => {
                   : '按最后一次确认上课的时间，找出长期没来上课的学生。'}
               </Typography.Text>
               <Card title="超过阈值未上课">
-                <SleepingTable data={sleeping?.sleeping ?? []} loading={sleepingQuery.query.isLoading} />
+                <SleepingTable data={sleepingRows} loading={sleepingQuery.query.isLoading} />
               </Card>
               <Card title="从未确认过任何一节课">
-                <SleepingTable data={sleeping?.never ?? []} loading={sleepingQuery.query.isLoading} />
+                <SleepingTable data={neverRows} loading={sleepingQuery.query.isLoading} />
               </Card>
             </Space>
           ),

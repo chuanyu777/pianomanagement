@@ -19,6 +19,7 @@ import { computeEnrollmentBalances, splitConsumption } from '../ledger/balance.j
 import { PeriodsService } from '../periods/periods.service.js';
 import { CreateLessonDto } from './dto/create-lesson.dto.js';
 import { ListLessonsQueryDto } from './dto/list-lessons.dto.js';
+import { ConfirmLessonDto } from './dto/confirm-lesson.dto.js';
 import { UpdateLessonDto } from './dto/update-lesson.dto.js';
 
 /** Prisma 唯一约束冲突错误码。回冲撞 reversesEntryId 唯一约束时用它转成可读 409。 */
@@ -227,7 +228,7 @@ export class LessonsService {
 
   // ── 上课确认（US-CC-03）：写扣减流水 ──────────────────────────────────────
 
-  async confirm(lessonId: string, actor: AuthenticatedUser) {
+  async confirm(lessonId: string, actor: AuthenticatedUser, confirmedAtInput?: string) {
     const lesson = await this.prisma.lesson.findUnique({ where: { id: lessonId } });
     if (!lesson) throw new NotFoundException('排课不存在');
     await this.assertTeacherOwnsLesson(actor, lesson);
@@ -236,7 +237,20 @@ export class LessonsService {
       throw new ConflictException('只有待排课（SCHEDULED）状态的课能被确认');
     }
 
-    const confirmedAt = new Date();
+    // 补录：只有店主能指定确认时间（漏点的课过几天才补），老师一律用当前时间。
+    // 归属月份由确认时间决定，所以这里的时间直接决定这笔消费进哪个月的报表。
+    let confirmedAt: Date;
+    if (confirmedAtInput !== undefined) {
+      if (actor.role !== UserRole.OWNER) {
+        throw new ForbiddenException('只有店主可以补录确认时间，授课老师确认一律记为当前时间');
+      }
+      confirmedAt = new Date(confirmedAtInput);
+      if (Number.isNaN(confirmedAt.getTime())) {
+        throw new BadRequestException('补录的确认时间不是合法时间');
+      }
+    } else {
+      confirmedAt = new Date();
+    }
     // 课时归属月份由 confirmedAt 决定；该月已关账就不能再写。
     await this.periods.assertOpenForDate(confirmedAt);
 

@@ -22,6 +22,7 @@ import { RolesGuard } from '../auth/guards/roles.guard.js';
 import { CreateLessonDto } from './dto/create-lesson.dto.js';
 import { ListLessonsQueryDto } from './dto/list-lessons.dto.js';
 import { ListPendingQueryDto } from './dto/list-pending.dto.js';
+import { ConfirmLessonDto } from './dto/confirm-lesson.dto.js';
 import { UpdateLessonDto } from './dto/update-lesson.dto.js';
 import { LessonsService } from './lessons.service.js';
 
@@ -69,10 +70,20 @@ export class LessonsController {
     return this.lessons.update(id, dto);
   }
 
+  /**
+   * 确认上课。**只有店主可以补录确认时间**（`confirmedAt`）——
+   * 现实里经常是课上完了没来得及点，过几天才想起来补；
+   * 课时归属月份由确认时间决定，所以补录能 correct 地落到当月。
+   * 老师确认一律用当前时间（不给老师改历史的能力）。
+   */
   @Post(':id/confirm')
   @Roles(UserRole.OWNER, UserRole.TEACHER)
-  confirm(@Param('id') id: string, @CurrentUser() actor: AuthenticatedUser) {
-    return this.lessons.confirm(id, actor);
+  confirm(
+    @Param('id') id: string,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Body() dto: ConfirmLessonDto = new ConfirmLessonDto(),
+  ) {
+    return this.lessons.confirm(id, actor, dto.confirmedAt);
   }
 
   @Post(':id/leave')

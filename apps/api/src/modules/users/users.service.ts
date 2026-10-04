@@ -17,6 +17,7 @@ import { UpdateUserDto } from './dto/update-user.dto.js';
 const PUBLIC_USER_SELECT = {
   id: true,
   username: true,
+  teacherId: true,
   displayName: true,
   role: true,
   isActive: true,
@@ -27,6 +28,7 @@ const PUBLIC_USER_SELECT = {
 export type PublicUser = {
   id: string;
   username: string;
+  teacherId: string | null;
   displayName: string;
   role: UserRole;
   isActive: boolean;
@@ -72,6 +74,14 @@ export class UsersService {
     const passwordHash = await hashPassword(dto.password);
 
     try {
+      if (dto.teacherId) {
+        const teacher = await this.prisma.teacher.findUnique({
+          where: { id: dto.teacherId },
+          select: { id: true },
+        });
+        if (!teacher) throw new NotFoundException('要关联的老师不存在');
+      }
+
       return await this.prisma.user.create({
         data: {
           username: dto.username,
@@ -79,6 +89,7 @@ export class UsersService {
           displayName: dto.displayName,
           role: dto.role,
           isActive: dto.isActive ?? true,
+          teacherId: dto.teacherId,
         },
         select: PUBLIC_USER_SELECT,
       });
@@ -113,6 +124,7 @@ export class UsersService {
 
     const data: {
       username?: string;
+      teacherId?: string;
       displayName?: string;
       role?: UserRole;
       isActive?: boolean;
@@ -120,6 +132,7 @@ export class UsersService {
     } = {};
     if (dto.username !== undefined) data.username = dto.username;
     if (dto.displayName !== undefined) data.displayName = dto.displayName;
+    if (dto.teacherId !== undefined) data.teacherId = dto.teacherId;
     if (dto.role !== undefined) data.role = dto.role;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
     if (dto.password !== undefined) data.passwordHash = await hashPassword(dto.password);

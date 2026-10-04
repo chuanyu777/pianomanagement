@@ -1,4 +1,4 @@
-import { IsBoolean, IsEnum, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 import { MAX_PASSWORD_BYTES } from '../../../common/password.js';
 import { UserRole } from '../../../prisma/generated.js';
 
@@ -37,4 +37,12 @@ export class CreateUserDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  /**
+   * 关联的老师档案（US-AC-01：可关联某位老师或为独立账号）。
+   * 传了它，这个账号就能以「授课老师」身份看自己的课与工资。
+   */
+  @IsOptional()
+  @IsUUID('4', { message: 'teacherId 必须是合法的 ID' })
+  teacherId?: string;
 }

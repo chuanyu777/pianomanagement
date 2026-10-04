@@ -45,7 +45,7 @@ export class GiftsService {
     private readonly periods: PeriodsService,
   ) {}
 
-  async createGift(dto: CreateGiftDto, actor: AuthenticatedUser): Promise<GiftGrant> {
+  async createGift(dto: CreateGiftDto, actor: AuthenticatedUser): Promise<Record<string, unknown>> {
     const enrollment = await this.prisma.enrollment.findUnique({
       where: { id: dto.enrollmentId },
     });
@@ -88,11 +88,12 @@ export class GiftsService {
         },
       });
 
-      return grant;
+      // 金额统一序列化成两位小数字符串（全项目约定），避免 Decimal 原样输出 '300' 这类
+      return { ...grant, unitPrice: toMoneyString(grant.unitPrice), amount: toMoneyString(grant.amount) };
     });
   }
 
-  async revokeGift(grantId: string, actor: AuthenticatedUser): Promise<GiftGrant> {
+  async revokeGift(grantId: string, actor: AuthenticatedUser): Promise<Record<string, unknown>> {
     const grant = await this.prisma.giftGrant.findUnique({ where: { id: grantId } });
     if (!grant) throw new NotFoundException('赠送记录不存在');
     if (grant.revokedAt !== null) throw new ConflictException('该赠送已撤销，不能重复撤销');
@@ -134,7 +135,13 @@ export class GiftsService {
         throw new ConflictException('该赠送已撤销，不能重复撤销');
       }
 
-      return { ...grant, revokedAt: occurredAt, revokedById: actor.id };
+      return {
+        ...grant,
+        revokedAt: occurredAt,
+        revokedById: actor.id,
+        unitPrice: toMoneyString(grant.unitPrice),
+        amount: toMoneyString(grant.amount),
+      };
     });
   }
 

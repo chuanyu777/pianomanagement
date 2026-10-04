@@ -8,8 +8,8 @@ import { chromium } from 'playwright-core';
 const CHROME =
   'C:\\Users\\86188\\.agent-browser\\browsers\\chrome-154.0.8037.92\\chrome.exe';
 const BASE = process.argv[2] ?? 'http://localhost:5173';
-const USER = 'apitest';
-const PASS = 'Apitest123456';
+const USER = 'zhoucc';
+const PASS = 'Zhoucc123456';
 
 const PAGES = [
   ['经营总览', '/'],

@@ -19,3 +19,6 @@ apps/api/prisma/*.db
 
 # Prisma 7 生成的 client（由 prisma generate 产出，install 时自动重建）
 apps/api/src/generated/
+
+# vite 临时文件
+apps/web/vite.config.ts.timestamp-*.mjs

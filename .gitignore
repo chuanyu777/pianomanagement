@@ -22,3 +22,6 @@ apps/api/src/generated/
 
 # vite 临时文件
 apps/web/vite.config.ts.timestamp-*.mjs
+
+# 静态原型由 Sites 独立建仓和发布，根仓库只保留访问链接
+prototypes/

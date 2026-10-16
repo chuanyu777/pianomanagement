@@ -7,6 +7,9 @@ import { AssistantGatewayModule } from './modules/assistant-gateway/assistant-ga
 import { AssistantStatusModule } from './modules/assistant-status/assistant-status.module.js';
 import { HealthController } from './modules/health/health.controller.js';
 import { InternalToolsController } from './modules/internal-tools/internal-tools.controller.js';
+import { CoursesModule } from './modules/courses/courses.module.js';
+import { StudentCourseAccountsModule } from './modules/student-course-accounts/student-course-accounts.module.js';
+import { StudentsModule } from './modules/students/students.module.js';
 import { TeachersModule } from './modules/teachers/teachers.module.js';
 
 @Module({
@@ -17,6 +20,9 @@ import { TeachersModule } from './modules/teachers/teachers.module.js';
     AssistantActionsModule,
     AssistantGatewayModule,
     AssistantStatusModule,
+    CoursesModule,
+    StudentsModule,
+    StudentCourseAccountsModule,
     TeachersModule,
   ],
   controllers: [HealthController, InternalToolsController],

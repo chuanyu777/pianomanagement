@@ -38,8 +38,8 @@
 阶段 0 已完成一组可运行的技术 Spike：双 PostgreSQL、Core Prisma 初始迁移、LangGraph
 `PostgresSaver` 初始化、Capability 骨架、内部只读工具、技术 Preview、SSE 协议、Core OpenAPI
 导出/生成链路和 Web AI 工作台骨架。阶段 1 已开始：Core 已具备店主/老师账号、bcrypt 登录、JWT、角色 Guard、
-店主创建老师接口，以及学生、课程、学生课程账户的数据模型。它仍不是可用业务系统：基础资料和课程账户尚未提供
-业务操作，金额流水、排课、Confirm/Execute/Receipt 和真实 AI 调用也仍未完成；Agent HTTP Run/Event 已有 SQL migration、repository 和运行时接线，
+店主创建老师接口，以及店主限定的学生、课程、学生课程账户基础资料接口（含课程默认价填充及个性化单价）。它仍不是可用业务系统：
+金额流水、排课、Confirm/Execute/Receipt 和真实 AI 调用也仍未完成；Agent HTTP Run/Event 已有 SQL migration、repository 和运行时接线，
 真实 PostgreSQL 测试验证了 Run 进入 `waiting_for_input` 后正常关闭旧实例，再由新实例恢复历史并 Resume。
 当前 Events 接口可在历史补发后持续推送本实例事件，并支持心跳、断开清理和 `Last-Event-ID`；跨实例需重连
 后从 PostgreSQL 补读。租约数据层已经实现，但执行 worker、续租心跳、崩溃自动恢复和公开 Gateway 仍未完成，

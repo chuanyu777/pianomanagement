@@ -14,6 +14,8 @@ if (hasDatabase) {
     let baseUrl: string;
     let prisma: PrismaService | undefined;
     const usernames: string[] = [];
+    const studentIds: string[] = [];
+    const courseIds: string[] = [];
     const originalSecret = process.env['JWT_SIGNING_SECRET'];
     const originalCapabilityKey = process.env['CAPABILITY_SIGNING_PRIVATE_KEY_B64'];
     const originalInternalSecret = process.env['INTERNAL_SERVICE_SECRET'];
@@ -42,6 +44,9 @@ if (hasDatabase) {
             select: { id: true },
           });
           await prisma.$transaction([
+            prisma.studentCourseAccount.deleteMany({ where: { studentId: { in: studentIds } } }),
+            prisma.student.deleteMany({ where: { id: { in: studentIds } } }),
+            prisma.course.deleteMany({ where: { id: { in: courseIds } } }),
             prisma.teacher.deleteMany({ where: { id: { in: teachers.map(({ id }) => id) } } }),
             prisma.user.deleteMany({ where: { username: { in: usernames } } }),
           ]);
@@ -119,6 +124,66 @@ if (hasDatabase) {
       expect(await teacherMe.json()).toMatchObject({ username: teacherUsername, teacherId: expect.any(String) });
       const forbidden = await fetch(`${baseUrl}/api/teachers`, { headers: teacherAuthorization });
       expect(forbidden.status).toBe(403);
+    });
+
+    it('lets the owner manage students, courses, and per-course unit prices through protected routes', async () => {
+      if (!prisma || !app) throw new Error('test application was not initialized');
+      const ownerUsername = `owner-${randomUUID()}`;
+      usernames.push(ownerUsername);
+      await prisma.user.create({
+        data: {
+          username: ownerUsername,
+          passwordHash: await bcrypt.hash('correct-owner-password', 4),
+          role: UserRole.OWNER,
+        },
+      });
+      const login = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: ownerUsername, password: 'correct-owner-password' }),
+      });
+      const session = await login.json() as { accessToken: string };
+      const authorization = { authorization: `Bearer ${session.accessToken}` };
+
+      const studentResponse = await fetch(`${baseUrl}/api/students`, {
+        method: 'POST',
+        headers: { ...authorization, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: '林同学', notes: '试听后报名' }),
+      });
+      expect(studentResponse.status).toBe(201);
+      const student = await studentResponse.json() as { id: string };
+      studentIds.push(student.id);
+
+      const courseResponse = await fetch(`${baseUrl}/api/courses`, {
+        method: 'POST',
+        headers: { ...authorization, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: '主课', defaultUnitPrice: '180.00', defaultDurationMinutes: 60 }),
+      });
+      expect(courseResponse.status).toBe(201);
+      const course = await courseResponse.json() as { id: string; defaultUnitPrice: string };
+      courseIds.push(course.id);
+      expect(course.defaultUnitPrice).toBe('180.00');
+
+      const accountResponse = await fetch(`${baseUrl}/api/students/${student.id}/course-accounts`, {
+        method: 'POST',
+        headers: { ...authorization, 'content-type': 'application/json' },
+        body: JSON.stringify({ courseId: course.id }),
+      });
+      expect(accountResponse.status).toBe(201);
+      const account = await accountResponse.json() as { id: string; currentUnitPrice: string; version: number };
+      expect(account).toMatchObject({ currentUnitPrice: '180.00', version: 0 });
+
+      const updateAccount = await fetch(`${baseUrl}/api/student-course-accounts/${account.id}`, {
+        method: 'PATCH',
+        headers: { ...authorization, 'content-type': 'application/json' },
+        body: JSON.stringify({ currentUnitPrice: '200.00' }),
+      });
+      expect(await updateAccount.json()).toMatchObject({ currentUnitPrice: '200.00', version: 1 });
+
+      const accounts = await fetch(`${baseUrl}/api/students/${student.id}/course-accounts`, {
+        headers: authorization,
+      });
+      expect(await accounts.json()).toMatchObject([{ id: account.id, currentUnitPrice: '200.00' }]);
     });
   });
 } else {

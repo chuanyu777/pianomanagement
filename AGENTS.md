@@ -115,9 +115,11 @@ npm run typecheck && npm run lint && npm test && npm run build
   权限为 `READ`、`PREVIEW_L1`、`PREVIEW_L2`；Core 的 `UserRole`、`Teacher` 已落库，但 Capability 尚缺需求/技术设计
   预留的 `role`、`teacherId`。不得在 assistant-protocol 或 Agent 中另写一份角色/老师枚举。
 - Core 已实现公开 `POST /api/auth/login`、`GET /api/auth/me`、`JwtAuthGuard`、`RolesGuard` 和店主限定的
-  `/api/teachers` 基础接口；密码仅存 bcrypt hash，响应统一走 `PUBLIC_USER_SELECT`。没有公开注册；初始店主仅能
-  通过 `auth:bootstrap:owner` 命令创建。学生、课程、课程账户尚无公开业务接口。内部工具和技术 Preview 仍同时校验
-  短期 Capability 与带时间戳、nonce 的 HMAC。公开 Assistant Gateway Controller 仍未实现，Web 不能创建会话。
+  `/api/teachers`、`/api/students`、`/api/courses`、`/api/students/:studentId/course-accounts` 基础接口；课程账户
+  创建时使用课程默认价或店主输入的个性化两位小数单价，后续改价递增账户版本。密码仅存 bcrypt hash，响应统一走
+  `PUBLIC_USER_SELECT`。没有公开注册；初始店主仅能通过 `auth:bootstrap:owner` 命令创建。金额、排课、退款等业务
+  接口尚未实现。内部工具和技术 Preview 仍同时校验短期 Capability 与带时间戳、nonce 的 HMAC。公开 Assistant
+  Gateway Controller 仍未实现，Web 不能创建会话。
 - Agent 的 LangGraph `interrupt`/`Command(resume)` 和官方 `PostgresSaver` 已有真实 PostgreSQL
   集成测试。HTTP Run/Event 持久化的 SQL migration、repository 和运行时接线已经出现在代码中，
   基础 typecheck、server 测试、数据库 migration，以及“实例 A 的 Run 进入 `waiting_for_input` 后正常关闭，
@@ -143,6 +145,6 @@ npm run typecheck && npm run lint && npm test && npm run build
 - Agent 默认 `AI_ENABLED=false`，首期模型供应商、模型、数据区域、保留条款和 Live Model 验证方案仍需确认；
   无密钥的默认安装、测试和构建不得调用 Live Model。
 - 2026-10-16 阶段 0/1 对账已实测完整 typecheck/lint/test/build、Agent Runtime migration、PostgresSaver 初始化、
-  带本地数据库配置的 Agent 27/27 与 Core 34/34 测试，以及 OpenAPI 导出/Client 生成；Agent 进程重启后
+  带本地数据库配置的 Agent 27/27 与 Core 50/50 测试，以及 OpenAPI 导出/Client 生成；Agent 进程重启后
   Run/Event 历史、实时 SSE、重复 Resume 幂等、并发 Resume 原子抢占、租约 fencing 与签名头篡改拒绝
   也有专门测试。

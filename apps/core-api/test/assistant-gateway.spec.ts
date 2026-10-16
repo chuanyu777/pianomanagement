@@ -111,8 +111,9 @@ describe('AssistantGatewayService', () => {
 
   it('returns a safe SSE proxy and validates upstream events', async () => {
     const body = [
-      `event: assistant.delta\ndata: ${JSON.stringify({ type: 'assistant.delta', text: '你好' })}\n\n`,
-      `event: run.completed\ndata: ${JSON.stringify({ type: 'run.completed', runId })}\n\n`,
+      ': upstream-private-heartbeat-text\n\n',
+      `id: 41\nevent: assistant.delta\ndata: ${JSON.stringify({ type: 'assistant.delta', text: '你好' })}\n\n`,
+      `id: 42\nevent: run.completed\ndata: ${JSON.stringify({ type: 'run.completed', runId })}\n\n`,
     ].join('');
     const openEvents = vi.fn(async () => ({
       body: new ReadableStream<Uint8Array>({
@@ -128,15 +129,47 @@ describe('AssistantGatewayService', () => {
       openEvents,
     });
 
-    const proxy = await service.openRunEvents({ userId, threadId, runId });
+    const proxy = await service.openRunEvents({ userId, threadId, runId, lastEventId: '40' });
     const text = await new Response(proxy.body).text();
 
     expect(proxy.contentType).toBe('text/event-stream');
+    expect(text).toContain(': keep-alive');
+    expect(text).not.toContain('upstream-private-heartbeat-text');
     expect(text).toContain('event: assistant.delta');
+    expect(text).toContain('id: 41');
     expect(text).toContain('"text":"你好"');
     expect(text).toContain('event: run.completed');
+    expect(text).toContain('id: 42');
     expect(text).not.toContain('event: unknown');
-    expect(openEvents).toHaveBeenCalledWith(expect.objectContaining({ runId }));
+    expect(openEvents).toHaveBeenCalledWith(expect.objectContaining({ runId, lastEventId: '40' }));
+  });
+
+  it('pulls upstream SSE only when the downstream consumer asks for data', async () => {
+    let upstreamPulls = 0;
+    const openEvents = vi.fn(async () => ({
+      body: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          upstreamPulls += 1;
+          controller.enqueue(
+            new TextEncoder().encode(
+              `event: run.completed\ndata: ${JSON.stringify({ type: 'run.completed', runId })}\n\n`,
+            ),
+          );
+          controller.close();
+        },
+      }, { highWaterMark: 0 }),
+    }));
+    const service = createService({ start: vi.fn(), resume: vi.fn(), openEvents });
+
+    const proxy = await service.openRunEvents({ userId, threadId, runId });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(upstreamPulls).toBe(0);
+
+    const reader = proxy.body.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    expect(upstreamPulls).toBe(1);
+    await reader.cancel();
   });
 
   it('maps upstream failures to public-safe errors without leaking the body', async () => {
@@ -311,6 +344,7 @@ describe('Core Gateway ↔ Agent Runtime contract', () => {
     const stream = await client.openEvents({
       runId,
       capability: 'short-lived-capability',
+      lastEventId: '1',
     });
     const streamText = await new Response(stream.body).text();
     expect(streamText).toContain('event: clarification.requested');
@@ -318,6 +352,8 @@ describe('Core Gateway ↔ Agent Runtime contract', () => {
     expect(streamText).toContain('event: run.completed');
 
     expect(fetchRuntime).toHaveBeenCalledTimes(3);
+    const eventHeaders = fetchRuntime.mock.calls[2]?.[1]?.headers as Record<string, string>;
+    expect(eventHeaders['last-event-id']).toBe('1');
     for (const [url, init] of fetchRuntime.mock.calls) {
       const headers = init?.headers as Record<string, string>;
       expect(headers['x-assistant-capability']).toBe('short-lived-capability');
@@ -333,6 +369,10 @@ describe('Core Gateway ↔ Agent Runtime contract', () => {
           method: init?.method ?? 'GET',
           path: `${target.pathname}${target.search}`,
           body: init?.body ? JSON.parse(String(init.body)) : undefined,
+          securityHeaders: {
+            'x-assistant-capability': headers['x-assistant-capability'],
+            'last-event-id': headers['last-event-id'],
+          },
         }),
       ).toBe(true);
     }

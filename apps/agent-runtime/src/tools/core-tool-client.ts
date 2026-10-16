@@ -19,13 +19,15 @@ export class CoreToolClient {
   async getSystemStatus(capabilityToken: string): Promise<SystemStatus> {
     const url = `${this.baseUrl}/tools/system-status`;
     const target = new URL(url);
+    const authorization = `Bearer ${capabilityToken}`;
     const response = await fetch(url, {
       headers: {
-        authorization: `Bearer ${capabilityToken}`,
+        authorization,
         ...createSignedInternalRequestHeaders({
           secret: this.serviceSecret,
           method: 'GET',
           path: `${target.pathname}${target.search}`,
+          securityHeaders: { authorization },
         }),
       },
       signal: AbortSignal.timeout(this.timeoutMs),

@@ -120,18 +120,27 @@ npm run typecheck && npm run lint && npm test && npm run build
   集成测试。HTTP Run/Event 持久化的 SQL migration、repository 和运行时接线已经出现在代码中，
   基础 typecheck、server 测试、数据库 migration，以及“实例 A 的 Run 进入 `waiting_for_input` 后正常关闭，
   由实例 B 恢复 Run/Events 历史并 Resume”的真实 PostgreSQL 集成测试已通过。当前 Events 接口只回放
-  截至请求时已持久化的事件并关闭连接，尚不是持续等待新事件的实时 SSE；进程在图执行期间崩溃时也没有
-  租约、超时回收或后台 worker 恢复 `running` Run。
+  持久化历史后保持连接，并通过进程内有界事件 Hub 推送本实例的新事件；支持心跳、客户端断开清理、终态
+  关闭和 `Last-Event-ID` 补读。实时广播不跨 Agent 实例；完成跨实例通知前，MVP 部署必须保持单 Agent 实例，
+  跨实例恢复只保证重连后从 PostgreSQL 补读。
+- Agent Run 租约 migration 与 PostgreSQL 原子 claim/renew/release/requeue repository 已有真实并发测试，
+  租约 owner 也会通过行锁 fencing 状态、消息和事件写入，Run 状态与对应事件在同一事务提交，终态清空
+  租约；但尚未接入执行 worker、续租心跳和启动回收流程，因此进程在图执行期间崩溃后，`running` Run
+  仍不会自动恢复。当前 HTTP inline 路径创建的 `running` Run 不持有租约，claim API 不会接管它们，以免
+  抢占仍在执行的请求；切换到 worker 前必须补一次显式状态对账/迁移。
 - 当前技术 Preview 只在 Core 事务中记录一个不落业务数据的 Preview 和审计事件，没有
   Confirm、Execute、Receipt 或资金/课消写入。并发幂等集成测试覆盖的是这个技术 Preview，不能替代业务验收。
 - Web 当前为产品骨架；`/api/assistant/status` 已接通 Core 数据库和 Agent 健康探测，但会话、Run 与业务操作
   仍未接通。不得添加演示业务数据冒充已完成。
 - 服务间 HMAC 的 nonce 防重放缓存由 Core 和 Agent 各自的单进程内存实现；同一实例可拒绝重放，但不能
   在多实例间共享，进程重启后也会丢失缓存。生产环境需改为共享或持久化 nonce 存储。
+- 服务间 HMAC 同时绑定请求体、Bearer Authorization、`x-assistant-capability` 和 `Last-Event-ID`；
+  该签名格式不向后兼容，Core 与 Agent 必须同步部署。
 - Core Gateway 当前只为已实现的只读图签发 `READ` 权限；协议和 Core Capability 虽预留
   `PREVIEW_L1`、`PREVIEW_L2`，公开 Gateway 尚未提供对应调用链。
 - Agent 默认 `AI_ENABLED=false`，首期模型供应商、模型、数据区域、保留条款和 Live Model 验证方案仍需确认；
   无密钥的默认安装、测试和构建不得调用 Live Model。
 - 2026-10-16 阶段 0 对账已实测完整 typecheck/lint/test/build、Agent Runtime migration、PostgresSaver 初始化、
-  带本地数据库配置的 Agent 16/16 与 Core 24/24 测试，以及 OpenAPI 导出/Client 生成；Agent 进程重启后
-  Run/Event 历史、重复 Resume 幂等和并发 Resume 原子抢占也有专门测试。
+  带本地数据库配置的 Agent 27/27 与 Core 26/26 测试，以及 OpenAPI 导出/Client 生成；Agent 进程重启后
+  Run/Event 历史、实时 SSE、重复 Resume 幂等、并发 Resume 原子抢占、租约 fencing 与签名头篡改拒绝
+  也有专门测试。

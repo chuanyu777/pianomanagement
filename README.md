@@ -40,8 +40,9 @@
 导出/生成链路和 Web AI 工作台骨架。它还不是可用业务系统：公开鉴权业务接口尚未实现，完整领域模型、
 Confirm/Execute/Receipt 和真实 AI 调用仍未完成；Agent HTTP Run/Event 已有 SQL migration、repository 和运行时接线，
 真实 PostgreSQL 测试验证了 Run 进入 `waiting_for_input` 后正常关闭旧实例，再由新实例恢复历史并 Resume。
-当前 Events 接口只回放持久化历史后关闭，实时 SSE、执行中崩溃恢复和公开 Gateway 仍未完成，因此这不代表
-完整业务系统已完成。
+当前 Events 接口可在历史补发后持续推送本实例事件，并支持心跳、断开清理和 `Last-Event-ID`；跨实例需重连
+后从 PostgreSQL 补读。租约数据层已经实现，但执行 worker、续租心跳、崩溃自动恢复和公开 Gateway 仍未完成，
+因此这不代表完整业务系统已完成。
 
 精确的环境变量名、启动顺序、已实测项和待验收项见
 [`docs/阶段0-开发运行手册.md`](./docs/阶段0-开发运行手册.md)。

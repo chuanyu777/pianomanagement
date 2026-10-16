@@ -36,6 +36,7 @@ export type AgentRuntimeResumeInput = {
 
 export type AgentRuntimeEventsInput = {
   runId: string;
+  lastEventId?: string;
   traceId?: string;
   capability: string;
 };
@@ -73,6 +74,12 @@ function isAbortError(error: unknown): boolean {
 
 function assertUuid(value: string): void {
   if (!z.string().uuid().safeParse(value).success) {
+    throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE);
+  }
+}
+
+function assertEventCursor(value: string): void {
+  if (!/^[1-9]\d*$/.test(value) || BigInt(value) > 9_223_372_036_854_775_807n) {
     throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE);
   }
 }
@@ -124,12 +131,25 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
 
   async openEvents(input: AgentRuntimeEventsInput): Promise<AgentRuntimeEventStream> {
     assertUuid(input.runId);
+    if (input.lastEventId !== undefined) assertEventCursor(input.lastEventId);
     const url = `${this.#baseUrl}/internal/assistant/runs/${encodeURIComponent(input.runId)}/events`;
+    const headers = this.headers(
+      url,
+      'GET',
+      input.capability,
+      input.traceId,
+      'text/event-stream',
+      undefined,
+      input.lastEventId === undefined ? {} : { 'last-event-id': input.lastEventId },
+    );
+    if (input.lastEventId !== undefined) {
+      (headers as Record<string, string>)['last-event-id'] = input.lastEventId;
+    }
     const response = await this.request(
       url,
       {
         method: 'GET',
-        headers: this.headers(url, 'GET', input.capability, input.traceId, 'text/event-stream'),
+        headers,
       },
     );
 
@@ -178,6 +198,7 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
     traceId: string | undefined,
     accept: string,
     body?: unknown,
+    additionalSecurityHeaders: Record<string, string> = {},
   ): HeadersInit {
     const target = new URL(url);
     const headers: Record<string, string> = {
@@ -188,6 +209,10 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
         method,
         path: `${target.pathname}${target.search}`,
         body,
+        securityHeaders: {
+          [ASSISTANT_CAPABILITY_HEADER]: capability,
+          ...additionalSecurityHeaders,
+        },
       }),
     };
     if (accept === 'application/json') headers['content-type'] = 'application/json';

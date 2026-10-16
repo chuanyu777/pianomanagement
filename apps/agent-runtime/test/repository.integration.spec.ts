@@ -70,6 +70,202 @@ describe('Agent Runtime PostgreSQL repository', () => {
     }
   }, 30_000);
 
+  test('commits a run transition and its event atomically', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const repository = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const cleanup = new Pool({ connectionString: databaseUrl });
+
+    try {
+      await repository.createRun({ runId, threadId, userMessage: 'atomic transition test' });
+      const committed = await repository.updateRunWithEvent(
+        { runId, status: 'completed' },
+        { type: 'run.completed', runId },
+      );
+
+      expect(committed.run).toMatchObject({ runId, status: 'completed' });
+      expect(committed.event.event).toEqual({ type: 'run.completed', runId });
+      await expect(repository.listEvents(runId)).resolves.toEqual([
+        expect.objectContaining({ event: { type: 'run.completed', runId } }),
+      ]);
+    } finally {
+      await repository.close().catch(() => undefined);
+      await cleanup.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_messages WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_runs WHERE id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await cleanup.end();
+    }
+  }, 30_000);
+
+  test('claims queued runs atomically, fences lease owners, and increments attempts', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const workerA = crypto.randomUUID();
+    const workerB = crypto.randomUUID();
+    const repositoryA = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const repositoryB = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const cleanup = new Pool({ connectionString: databaseUrl });
+
+    try {
+      await repositoryA.createRun({ runId, threadId, userMessage: 'lease claim test' });
+      await repositoryA.updateRun({ runId, status: 'queued' });
+
+      const claims = await Promise.all([
+        repositoryA.claimNextRun(workerA, 30_000),
+        repositoryB.claimNextRun(workerB, 30_000),
+      ]);
+      const claimed = claims.filter((claim) => claim !== null);
+      expect(claimed).toHaveLength(1);
+      expect(claimed[0]).toMatchObject({ runId, status: 'running', attemptCount: 1 });
+      const owner = claimed[0]?.leaseOwnerToken;
+      expect([workerA, workerB]).toContain(owner);
+
+      expect(await repositoryA.renewRunLease(runId, crypto.randomUUID(), 30_000)).toBe(false);
+      expect(await repositoryA.renewRunLease(runId, owner!, 30_000)).toBe(true);
+      expect(await repositoryB.releaseRunLease(runId, crypto.randomUUID())).toBe(false);
+      expect(await repositoryA.releaseRunLease(runId, owner!)).toBe(true);
+
+      const reclaimed = await repositoryB.claimNextRun(workerB, 30_000);
+      expect(reclaimed).toMatchObject({ runId, status: 'running', leaseOwnerToken: workerB, attemptCount: 2 });
+    } finally {
+      await repositoryA.close().catch(() => undefined);
+      await repositoryB.close().catch(() => undefined);
+      await cleanup.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_messages WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_runs WHERE id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await cleanup.end();
+    }
+  }, 30_000);
+
+  test('requeues expired running leases and makes them claimable again', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const workerA = crypto.randomUUID();
+    const workerB = crypto.randomUUID();
+    const repository = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const cleanup = new Pool({ connectionString: databaseUrl });
+
+    try {
+      await repository.createRun({ runId, threadId, userMessage: 'expired lease test' });
+      await repository.updateRun({ runId, status: 'queued' });
+      const firstClaim = await repository.claimNextRun(workerA, 30_000);
+      expect(firstClaim).toMatchObject({ runId, attemptCount: 1, leaseOwnerToken: workerA });
+
+      await cleanup.query(
+        `UPDATE agent_runtime.agent_runs
+            SET lease_expires_at = now() - interval '1 second'
+          WHERE id = $1`,
+        [runId],
+      );
+      expect(await repository.requeueExpiredRunLeases(10)).toBe(1);
+      expect(await repository.requeueExpiredRunLeases(10)).toBe(0);
+
+      const recovered = await repository.claimNextRun(workerB, 30_000);
+      expect(recovered).toMatchObject({ runId, status: 'running', leaseOwnerToken: workerB, attemptCount: 2 });
+
+      await expect(
+        repository.updateRun({ runId, status: 'completed', leaseOwnerToken: workerA }),
+      ).rejects.toThrow('运行不存在或租约已失效');
+      await expect(
+        repository.appendEvent(runId, { type: 'run.completed', runId }, workerA),
+      ).rejects.toThrow('运行不存在或租约已失效');
+      await expect(
+        repository.updateRunWithEvent(
+          { runId, status: 'completed', leaseOwnerToken: workerA },
+          { type: 'run.completed', runId },
+        ),
+      ).rejects.toThrow('运行不存在或租约已失效');
+
+      await expect(
+        repository.updateRunWithEvent(
+          { runId, status: 'completed', leaseOwnerToken: workerB },
+          { type: 'run.completed', runId },
+        ),
+      ).resolves.toMatchObject({ run: { runId, status: 'completed' } });
+      const terminal = await cleanup.query<{
+        status: string;
+        lease_owner_token: string | null;
+        lease_expires_at: Date | null;
+      }>(
+        `SELECT status, lease_owner_token, lease_expires_at
+           FROM agent_runtime.agent_runs
+          WHERE id = $1`,
+        [runId],
+      );
+      expect(terminal.rows[0]).toMatchObject({
+        status: 'completed',
+        lease_owner_token: null,
+        lease_expires_at: null,
+      });
+    } finally {
+      await repository.close().catch(() => undefined);
+      await cleanup.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_messages WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_runs WHERE id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await cleanup.end();
+    }
+  }, 30_000);
+
+  test('prevents a leased event write from crossing an ownership change', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const workerA = crypto.randomUUID();
+    const workerB = crypto.randomUUID();
+    const repository = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const control = new Pool({ connectionString: databaseUrl });
+    const locker = await control.connect();
+
+    try {
+      await repository.createRun({ runId, threadId, userMessage: 'lease write serialization' });
+      await repository.updateRun({ runId, status: 'queued' });
+      await repository.claimNextRun(workerA, 100);
+
+      await control.query(`
+        CREATE OR REPLACE FUNCTION agent_runtime.test_pause_event_insert()
+        RETURNS trigger AS $$
+        BEGIN
+          PERFORM pg_advisory_xact_lock(hashtext(NEW.run_id::text));
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER test_pause_event_insert
+        BEFORE INSERT ON agent_runtime.agent_run_events
+        FOR EACH ROW EXECUTE FUNCTION agent_runtime.test_pause_event_insert();
+      `);
+
+      await locker.query('SELECT pg_advisory_lock(hashtext($1))', [runId]);
+      let settled = false;
+      const append = repository
+        .appendEvent(runId, { type: 'assistant.delta', text: 'serialized' }, workerA)
+        .finally(() => {
+          settled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(settled).toBe(false);
+      await expect(repository.claimNextRun(workerB, 30_000)).resolves.toBeNull();
+
+      await locker.query('SELECT pg_advisory_unlock(hashtext($1))', [runId]);
+      await expect(append).resolves.toMatchObject({ event: { type: 'assistant.delta' } });
+      await expect(repository.claimNextRun(workerB, 30_000)).resolves.toMatchObject({
+        leaseOwnerToken: workerB,
+      });
+    } finally {
+      await locker.query('SELECT pg_advisory_unlock(hashtext($1))', [runId]).catch(() => undefined);
+      locker.release();
+      await control.query('DROP TRIGGER IF EXISTS test_pause_event_insert ON agent_runtime.agent_run_events');
+      await control.query('DROP FUNCTION IF EXISTS agent_runtime.test_pause_event_insert()');
+      await repository.close().catch(() => undefined);
+      await control.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await control.query('DELETE FROM agent_runtime.agent_messages WHERE run_id = $1', [runId]);
+      await control.query('DELETE FROM agent_runtime.agent_runs WHERE id = $1', [runId]);
+      await control.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await control.end();
+    }
+  }, 30_000);
+
   test('restores a run through a new server, repository, and PostgresSaver instance', async () => {
     const schema = `stage0_runtime_${crypto.randomUUID().replaceAll('-', '')}`;
     const runId = crypto.randomUUID();
@@ -123,6 +319,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
             method: 'POST',
             path: startPath,
             body: startBody,
+            securityHeaders: { 'x-assistant-capability': 'stage-0-capability' },
           }),
           'x-assistant-capability': 'stage-0-capability',
         },
@@ -144,6 +341,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
             secret,
             method: 'GET',
             path: `/internal/assistant/runs/${runId}`,
+            securityHeaders: { 'x-assistant-capability': 'stage-0-capability' },
           }),
           'x-assistant-capability': 'stage-0-capability',
         },
@@ -162,6 +360,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
             method: 'POST',
             path: resumePath,
             body: resumeBody,
+            securityHeaders: { 'x-assistant-capability': 'stage-0-capability' },
           }),
           'x-assistant-capability': 'stage-0-capability',
         },

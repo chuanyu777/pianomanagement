@@ -47,6 +47,7 @@ export type OpenAssistantEventsInput = {
   userId: string;
   threadId: string;
   runId: string;
+  lastEventId?: string;
   traceId?: string;
 };
 
@@ -105,6 +106,7 @@ export class AssistantGatewayService {
       upstream = await this.agentRuntime.openEvents({
         runId: input.runId,
         capability,
+        ...(input.lastEventId ? { lastEventId: input.lastEventId } : {}),
         ...(input.traceId ? { traceId: input.traceId } : {}),
       });
     } catch (error) {
@@ -145,6 +147,8 @@ export class AssistantGatewayService {
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     let buffer = '';
+    let upstreamDone = false;
+    const pending: Uint8Array[] = [];
 
     const emitFailure = (controller: ReadableStreamDefaultController<Uint8Array>) => {
       controller.enqueue(encoder.encode(encodeSseEvent(SAFE_STREAM_ERROR)));
@@ -154,6 +158,8 @@ export class AssistantGatewayService {
     const consumeFrame = (frame: string): Uint8Array | undefined => {
       const normalized = frame.replace(/\r\n/g, '\n');
       const lines = normalized.split('\n');
+      const hasComment = lines.some((line) => line.startsWith(':'));
+      let eventId: string | undefined;
       let eventName: string | undefined;
       const data: string[] = [];
       for (const line of lines) {
@@ -161,49 +167,70 @@ export class AssistantGatewayService {
         const separator = line.indexOf(':');
         const field = separator === -1 ? line : line.slice(0, separator);
         const value = separator === -1 ? '' : line.slice(separator + 1).trimStart();
+        if (field === 'id') eventId = value;
         if (field === 'event') eventName = value;
         if (field === 'data') data.push(value);
       }
-      if (data.length === 0) return undefined;
+      if (data.length === 0) {
+        return hasComment ? encoder.encode(': keep-alive\n\n') : undefined;
+      }
 
       const event = AssistantEventSchema.parse(JSON.parse(data.join('\n')));
       if (eventName && eventName !== event.type) throw new Error('SSE event mismatch');
-      return encoder.encode(encodeSseEvent(event));
+      if (
+        eventId !== undefined &&
+        (!/^[1-9]\d*$/.test(eventId) || BigInt(eventId) > 9_223_372_036_854_775_807n)
+      ) {
+        throw new Error('SSE event id invalid');
+      }
+      return encoder.encode(`${eventId === undefined ? '' : `id: ${eventId}\n`}${encodeSseEvent(event)}`);
     };
 
-    return new ReadableStream<Uint8Array>({
-      start(controller) {
-        void (async () => {
+    const consumeAvailableFrames = () => {
+      let separator = buffer.search(/\r?\n\r?\n/);
+      while (separator >= 0) {
+        const frame = buffer.slice(0, separator);
+        buffer = buffer.slice(separator).replace(/^\r?\n\r?\n/, '');
+        const output = consumeFrame(frame);
+        if (output) pending.push(output);
+        separator = buffer.search(/\r?\n\r?\n/);
+      }
+    };
+
+    return new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
           try {
-            while (true) {
+            while (pending.length === 0 && !upstreamDone) {
               const result = await reader.read();
-              if (result.done) break;
-              buffer += decoder.decode(result.value, { stream: true });
-              let separator = buffer.search(/\r?\n\r?\n/);
-              while (separator >= 0) {
-                const frame = buffer.slice(0, separator);
-                buffer = buffer.slice(separator).replace(/^\r?\n\r?\n/, '');
-                const output = consumeFrame(frame);
-                if (output) controller.enqueue(output);
-                separator = buffer.search(/\r?\n\r?\n/);
+              if (result.done) {
+                upstreamDone = true;
+                buffer += decoder.decode();
+                consumeAvailableFrames();
+                if (buffer.trim()) {
+                  const output = consumeFrame(buffer);
+                  buffer = '';
+                  if (output) pending.push(output);
+                }
+                break;
               }
+              buffer += decoder.decode(result.value, { stream: true });
+              consumeAvailableFrames();
             }
-            buffer += decoder.decode();
-            if (buffer.trim()) {
-              const output = consumeFrame(buffer);
-              if (output) controller.enqueue(output);
-            }
-            controller.close();
+
+            const output = pending.shift();
+            if (output) controller.enqueue(output);
+            else if (upstreamDone) controller.close();
           } catch {
-            emitFailure(controller);
-          } finally {
             await reader.cancel();
+            emitFailure(controller);
           }
-        })();
+        },
+        cancel(reason) {
+          return reader.cancel(reason);
+        },
       },
-      cancel(reason) {
-        return reader.cancel(reason);
-      },
-    });
+      { highWaterMark: 0 },
+    );
   }
 }

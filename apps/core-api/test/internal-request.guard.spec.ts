@@ -29,7 +29,9 @@ describe('InternalRequestGuard', () => {
       method,
       path: originalUrl,
       body,
+      securityHeaders: { authorization: 'Bearer capability-a' },
     });
+    headers['authorization'] = 'Bearer capability-a';
     const request = { method, originalUrl, body, headers };
     const guard = new InternalRequestGuard();
 
@@ -46,7 +48,9 @@ describe('InternalRequestGuard', () => {
       method,
       path: originalUrl,
       body: { idempotencyKey: 'one' },
+      securityHeaders: { authorization: 'Bearer capability-a' },
     });
+    headers['authorization'] = 'Bearer capability-a';
     const guard = new InternalRequestGuard();
 
     expect(() =>
@@ -58,6 +62,24 @@ describe('InternalRequestGuard', () => {
           body: { idempotencyKey: 'tampered' },
         }),
       ),
+    ).toThrow('服务鉴权失败');
+  });
+
+  it('rejects a valid HMAC when the bearer Capability changes', () => {
+    process.env['INTERNAL_SERVICE_SECRET'] = secret;
+    const method = 'GET';
+    const originalUrl = '/api/internal/tools/system-status';
+    const headers = createSignedInternalRequestHeaders({
+      secret,
+      method,
+      path: originalUrl,
+      securityHeaders: { authorization: 'Bearer capability-a' },
+    });
+    headers['authorization'] = 'Bearer capability-b';
+    const guard = new InternalRequestGuard();
+
+    expect(() =>
+      guard.canActivate(contextFor({ method, originalUrl, headers })),
     ).toThrow('服务鉴权失败');
   });
 });

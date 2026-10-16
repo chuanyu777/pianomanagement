@@ -18,8 +18,9 @@ type InternalRequest = {
 };
 
 function headerValue(request: InternalRequest, name: string): string | undefined {
-  const value = request.headers[name];
-  return typeof value === 'string' ? value : undefined;
+  const normalizedName = name.toLowerCase();
+  const entry = Object.entries(request.headers).find(([key]) => key.toLowerCase() === normalizedName);
+  return typeof entry?.[1] === 'string' ? entry[1] : undefined;
 }
 
 @Injectable()
@@ -46,6 +47,11 @@ export class InternalRequestGuard implements CanActivate {
         method: request.method,
         path: request.originalUrl,
         body: request.body,
+        securityHeaders: {
+          authorization: headerValue(request, 'authorization'),
+          'x-assistant-capability': headerValue(request, 'x-assistant-capability'),
+          'last-event-id': headerValue(request, 'last-event-id'),
+        },
       }) ||
       !this.#replayProtector.consume(nonce)
     ) {

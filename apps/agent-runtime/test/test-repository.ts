@@ -50,6 +50,19 @@ export function createTestRepository(): AgentRuntimeRepository {
       runs.set(input.runId, updated);
       return updated;
     },
+    async updateRunWithEvent(input: UpdateRunInput, event: AssistantEvent) {
+      const current = runs.get(input.runId);
+      if (!current) throw new Error('运行不存在');
+      const updated = { ...current, status: input.status };
+      const persisted = {
+        eventId: String(nextEventId++),
+        event,
+        createdAt: new Date().toISOString(),
+      };
+      runs.set(input.runId, updated);
+      events.get(input.runId)?.push(persisted);
+      return { run: updated, event: persisted };
+    },
     async appendMessage(_input: AppendMessageInput) {},
     async appendEvent(runId: string, event: AssistantEvent) {
       const persisted = {

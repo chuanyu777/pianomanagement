@@ -88,6 +88,55 @@ describe('assistant protocol', () => {
     ).toBe(false);
   });
 
+  it('binds capability and event cursor headers with case-insensitive deterministic names', () => {
+    const base = {
+      secret: 'stage-0-hmac-secret-01234567890123456789',
+      timestamp: '1792108800',
+      nonce: 'f5ea92cf-e736-4f02-ac40-2876cfdf1944',
+      method: 'GET',
+      path: '/internal/assistant/runs/run-1/events',
+    };
+    const signed = createSignedInternalRequestHeaders({
+      ...base,
+      now: new Date(1792108800_000),
+      securityHeaders: {
+        'X-Assistant-Capability': 'capability-a',
+        'Last-Event-ID': '41',
+      },
+    });
+    const verification = {
+      ...base,
+      secret: base.secret,
+      timestamp: signed[INTERNAL_REQUEST_TIMESTAMP_HEADER]!,
+      nonce: signed[INTERNAL_REQUEST_NONCE_HEADER]!,
+      signature: signed[INTERNAL_REQUEST_SIGNATURE_HEADER]!,
+      securityHeaders: {
+        'x-assistant-capability': 'capability-a',
+        'last-event-id': '41',
+      },
+      now: new Date(1792108800_000),
+    };
+
+    expect(verifySignedInternalRequest(verification)).toBe(true);
+    expect(verifySignedInternalRequest({
+      ...verification,
+      securityHeaders: { 'X-ASSISTANT-CAPABILITY': 'capability-b', 'LAST-EVENT-ID': '41' },
+    })).toBe(false);
+    expect(verifySignedInternalRequest({
+      ...verification,
+      securityHeaders: { 'x-assistant-capability': 'capability-a', 'Last-Event-Id': '42' },
+    })).toBe(false);
+
+    const differentlyCasedSignature = createInternalRequestSignature({
+      ...base,
+      securityHeaders: {
+        'x-assistant-capability': 'capability-a',
+        'last-event-id': '41',
+      },
+    });
+    expect(differentlyCasedSignature).toBe(signed[INTERNAL_REQUEST_SIGNATURE_HEADER]);
+  });
+
   it('rejects expired and replayed signed internal requests', () => {
     const now = new Date('2026-10-16T00:00:00.000Z');
     const secret = 'stage-0-hmac-secret-01234567890123456789';

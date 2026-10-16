@@ -1,9 +1,18 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
+  ASSISTANT_CAPABILITY_HEADER,
   INTERNAL_REQUEST_NONCE_HEADER,
   INTERNAL_REQUEST_SIGNATURE_HEADER,
   INTERNAL_REQUEST_TIMESTAMP_HEADER,
 } from './index.js';
+
+const SIGNED_SECURITY_HEADERS = new Set([
+  'authorization',
+  ASSISTANT_CAPABILITY_HEADER,
+  'last-event-id',
+]);
+
+export type InternalSecurityHeaders = Record<string, string | undefined>;
 
 export type InternalRequestSignatureInput = {
   secret: string;
@@ -12,6 +21,7 @@ export type InternalRequestSignatureInput = {
   method: string;
   path: string;
   body?: string;
+  securityHeaders?: InternalSecurityHeaders | undefined;
 };
 
 export type SignedInternalRequestInput = {
@@ -21,6 +31,7 @@ export type SignedInternalRequestInput = {
   body?: unknown;
   now?: Date;
   nonce?: string;
+  securityHeaders?: InternalSecurityHeaders | undefined;
 };
 
 function normalizeJson(value: unknown): unknown {
@@ -41,6 +52,29 @@ export function canonicalizeInternalRequestBody(value: unknown): string {
   return JSON.stringify(normalizeJson(value));
 }
 
+export function canonicalizeInternalSecurityHeaders(
+  headers: InternalSecurityHeaders = {},
+): string {
+  const normalized = new Map<string, string>();
+  for (const [rawName, rawValue] of Object.entries(headers)) {
+    if (rawValue === undefined) continue;
+    const name = rawName.toLowerCase();
+    if (!SIGNED_SECURITY_HEADERS.has(name)) {
+      throw new TypeError(`Unsupported signed security header: ${name}`);
+    }
+    if (/\r|\n/.test(rawValue)) throw new TypeError('Invalid signed security header value');
+    const value = rawValue.trim();
+    const prior = normalized.get(name);
+    if (prior !== undefined && prior !== value) {
+      throw new TypeError(`Conflicting values for signed security header: ${name}`);
+    }
+    normalized.set(name, value);
+  }
+  return JSON.stringify(
+    [...normalized.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+  );
+}
+
 function signingInput(input: InternalRequestSignatureInput): string {
   const bodyDigest = createHash('sha256').update(input.body ?? '').digest('base64url');
   return [
@@ -49,6 +83,7 @@ function signingInput(input: InternalRequestSignatureInput): string {
     input.method.toUpperCase(),
     input.path,
     bodyDigest,
+    canonicalizeInternalSecurityHeaders(input.securityHeaders),
   ].join('\n');
 }
 
@@ -76,6 +111,7 @@ export function createSignedInternalRequestHeaders(
     method: input.method,
     path: input.path,
     body: canonicalizeInternalRequestBody(input.body),
+    securityHeaders: input.securityHeaders,
   });
   return {
     [INTERNAL_REQUEST_TIMESTAMP_HEADER]: timestamp,
@@ -92,6 +128,7 @@ export function verifySignedInternalRequest(input: {
   method: string;
   path: string;
   body?: unknown;
+  securityHeaders?: InternalSecurityHeaders | undefined;
   now?: Date;
   maxClockSkewSeconds?: number;
 }): boolean {
@@ -119,6 +156,7 @@ export function verifySignedInternalRequest(input: {
     method: input.method,
     path: input.path,
     body: canonicalizeInternalRequestBody(input.body),
+    securityHeaders: input.securityHeaders,
   });
 }
 

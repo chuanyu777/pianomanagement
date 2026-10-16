@@ -32,6 +32,7 @@ export interface UpdateRunInput {
   status: AssistantRun['status'];
   errorCode?: string;
   errorMessage?: string;
+  leaseOwnerToken?: string;
 }
 
 export interface AppendMessageInput {
@@ -40,18 +41,37 @@ export interface AppendMessageInput {
   role: 'user' | 'assistant';
   content: string;
   structured?: unknown;
+  leaseOwnerToken?: string;
 }
 
 export interface AgentRuntimeRepository {
   createRun(input: CreateRunInput): Promise<{ run: AgentRunRecord; created: boolean }>;
   findRun(runId: string): Promise<AgentRunRecord | null>;
   claimRunForResume(runId: string): Promise<AgentRunRecord | null>;
+  claimNextRun(ownerToken: string, leaseDurationMs: number): Promise<LeasedAgentRunRecord | null>;
+  renewRunLease(runId: string, ownerToken: string, leaseDurationMs: number): Promise<boolean>;
+  releaseRunLease(runId: string, ownerToken: string): Promise<boolean>;
+  requeueExpiredRunLeases(limit: number): Promise<number>;
   updateRun(input: UpdateRunInput): Promise<AgentRunRecord>;
+  updateRunWithEvent(
+    input: UpdateRunInput,
+    event: AssistantEvent,
+  ): Promise<{ run: AgentRunRecord; event: PersistedAssistantEvent }>;
   appendMessage(input: AppendMessageInput): Promise<void>;
-  appendEvent(runId: string, event: AssistantEvent): Promise<PersistedAssistantEvent>;
+  appendEvent(
+    runId: string,
+    event: AssistantEvent,
+    leaseOwnerToken?: string,
+  ): Promise<PersistedAssistantEvent>;
   listEvents(runId: string, afterEventId?: string): Promise<PersistedAssistantEvent[]>;
   close(): Promise<void>;
 }
+
+export type LeasedAgentRunRecord = AgentRunRecord & {
+  leaseOwnerToken: string;
+  leaseExpiresAt: string;
+  attemptCount: number;
+};
 
 type RunRow = {
   id: string;
@@ -60,6 +80,71 @@ type RunRow = {
   user_message: string;
   client_request_id: string | null;
 };
+
+type LeasedRunRow = RunRow & {
+  lease_owner_token: string;
+  lease_expires_at: Date;
+  attempt_count: number;
+};
+
+function toLeasedRun(row: LeasedRunRow): LeasedAgentRunRecord {
+  return {
+    ...toRun(row),
+    leaseOwnerToken: row.lease_owner_token,
+    leaseExpiresAt: row.lease_expires_at.toISOString(),
+    attemptCount: row.attempt_count,
+  };
+}
+
+function assertLeaseDuration(leaseDurationMs: number): void {
+  if (!Number.isSafeInteger(leaseDurationMs) || leaseDurationMs < 1 || leaseDurationMs > 86_400_000) {
+    throw new Error('运行租约时长必须是 1 到 86400000 毫秒的整数');
+  }
+}
+
+function assertBatchLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+    throw new Error('过期租约回收数量必须是 1 到 1000 的整数');
+  }
+}
+
+function assertRunEventTransition(update: UpdateRunInput, event: AssistantEvent): void {
+  const expectedEvent =
+    update.status === 'waiting_for_input'
+      ? 'clarification.requested'
+      : update.status === 'completed'
+        ? 'run.completed'
+        : update.status === 'failed'
+          ? 'run.failed'
+          : undefined;
+  if (!expectedEvent || event.type !== expectedEvent) {
+    throw new Error('运行状态与持久化事件不匹配');
+  }
+}
+
+async function lockRunForWrite(
+  client: PoolClient,
+  runId: string,
+  leaseOwnerToken?: string,
+): Promise<{ thread_id: string }> {
+  const result = await client.query<{ thread_id: string }>(
+    `SELECT thread_id
+       FROM ${schema}.agent_runs
+      WHERE id = $1
+        AND (
+          (lease_owner_token IS NULL AND $2::uuid IS NULL)
+          OR (
+            lease_owner_token = $2::uuid
+            AND lease_expires_at > now()
+          )
+        )
+      FOR UPDATE`,
+    [runId, leaseOwnerToken ?? null],
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error('运行不存在或租约已失效');
+  return row;
+}
 
 function toRun(row: RunRow): AgentRunRecord {
   const run = AssistantRunSchema.parse({
@@ -171,6 +256,90 @@ export function createAgentRuntimeRepository(input: {
       return row ? toRun(row) : null;
     },
 
+    async claimNextRun(ownerToken, leaseDurationMs) {
+      assertLeaseDuration(leaseDurationMs);
+      const result = await pool.query<LeasedRunRow>(
+        `WITH candidate AS (
+           SELECT id
+             FROM ${schema}.agent_runs
+            WHERE status = 'queued'
+               OR (status = 'running' AND lease_expires_at <= now())
+            ORDER BY created_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+         )
+         UPDATE ${schema}.agent_runs AS run
+            SET status = 'running',
+                lease_owner_token = $1::uuid,
+                lease_expires_at = now() + ($2::double precision * interval '1 millisecond'),
+                attempt_count = run.attempt_count + 1,
+                started_at = COALESCE(run.started_at, now()),
+                updated_at = now()
+           FROM candidate
+          WHERE run.id = candidate.id
+         RETURNING run.id, run.thread_id, run.status, run.user_message, run.client_request_id,
+                   run.lease_owner_token, run.lease_expires_at, run.attempt_count`,
+        [ownerToken, leaseDurationMs],
+      );
+      const row = result.rows[0];
+      return row ? toLeasedRun(row) : null;
+    },
+
+    async renewRunLease(runId, ownerToken, leaseDurationMs) {
+      assertLeaseDuration(leaseDurationMs);
+      const result = await pool.query(
+        `UPDATE ${schema}.agent_runs
+            SET lease_expires_at = now() + ($3::double precision * interval '1 millisecond'),
+                updated_at = now()
+          WHERE id = $1
+            AND status = 'running'
+            AND lease_owner_token = $2::uuid
+            AND lease_expires_at > now()`,
+        [runId, ownerToken, leaseDurationMs],
+      );
+      return result.rowCount === 1;
+    },
+
+    async releaseRunLease(runId, ownerToken) {
+      const result = await pool.query(
+        `UPDATE ${schema}.agent_runs
+            SET status = 'queued',
+                lease_owner_token = NULL,
+                lease_expires_at = NULL,
+                updated_at = now()
+          WHERE id = $1
+            AND status = 'running'
+            AND lease_owner_token = $2::uuid
+            AND lease_expires_at > now()`,
+        [runId, ownerToken],
+      );
+      return result.rowCount === 1;
+    },
+
+    async requeueExpiredRunLeases(limit) {
+      assertBatchLimit(limit);
+      const result = await pool.query(
+        `WITH expired AS (
+           SELECT id
+             FROM ${schema}.agent_runs
+            WHERE status = 'running'
+              AND lease_expires_at <= now()
+            ORDER BY lease_expires_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT $1
+         )
+         UPDATE ${schema}.agent_runs AS run
+            SET status = 'queued',
+                lease_owner_token = NULL,
+                lease_expires_at = NULL,
+                updated_at = now()
+           FROM expired
+          WHERE run.id = expired.id`,
+        [limit],
+      );
+      return result.rowCount ?? 0;
+    },
+
     async updateRun(update) {
       const client = await pool.connect();
       try {
@@ -180,14 +349,29 @@ export function createAgentRuntimeRepository(input: {
               SET status = $2,
                   error_code = $3,
                   error_message = $4,
+                  lease_owner_token = CASE WHEN $2 = 'running' THEN lease_owner_token ELSE NULL END,
+                  lease_expires_at = CASE WHEN $2 = 'running' THEN lease_expires_at ELSE NULL END,
                   completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN now() ELSE completed_at END,
                   updated_at = now()
             WHERE id = $1
+              AND (
+                (lease_owner_token IS NULL AND $5::uuid IS NULL)
+                OR (
+                  lease_owner_token = $5::uuid
+                  AND lease_expires_at > now()
+                )
+              )
             RETURNING id, thread_id, status, user_message, client_request_id`,
-          [update.runId, update.status, update.errorCode ?? null, update.errorMessage ?? null],
+          [
+            update.runId,
+            update.status,
+            update.errorCode ?? null,
+            update.errorMessage ?? null,
+            update.leaseOwnerToken ?? null,
+          ],
         );
         const row = result.rows[0];
-        if (!row) throw new Error('运行不存在');
+        if (!row) throw new Error('运行不存在或租约已失效');
         await client.query(
           `UPDATE ${schema}.agent_threads
               SET last_activity_at = now(), updated_at = now()
@@ -204,22 +388,104 @@ export function createAgentRuntimeRepository(input: {
       }
     },
 
+    async updateRunWithEvent(update, event) {
+      const checked = AssistantEventSchema.parse(event);
+      assertRunEventTransition(update, checked);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const runResult = await client.query<RunRow>(
+          `UPDATE ${schema}.agent_runs
+              SET status = $2,
+                  error_code = $3,
+                  error_message = $4,
+                  lease_owner_token = CASE WHEN $2 = 'running' THEN lease_owner_token ELSE NULL END,
+                  lease_expires_at = CASE WHEN $2 = 'running' THEN lease_expires_at ELSE NULL END,
+                  completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN now() ELSE completed_at END,
+                  updated_at = now()
+            WHERE id = $1
+              AND (
+                (lease_owner_token IS NULL AND $5::uuid IS NULL)
+                OR (
+                  lease_owner_token = $5::uuid
+                  AND lease_expires_at > now()
+                )
+              )
+            RETURNING id, thread_id, status, user_message, client_request_id`,
+          [
+            update.runId,
+            update.status,
+            update.errorCode ?? null,
+            update.errorMessage ?? null,
+            update.leaseOwnerToken ?? null,
+          ],
+        );
+        const runRow = runResult.rows[0];
+        if (!runRow) throw new Error('运行不存在或租约已失效');
+        const eventResult = await client.query<{ event_id: string; created_at: Date }>(
+          `INSERT INTO ${schema}.agent_run_events (run_id, event_type, payload)
+           VALUES ($1, $2, $3)
+           RETURNING event_id, created_at`,
+          [update.runId, checked.type, checked],
+        );
+        const eventRow = eventResult.rows[0];
+        if (!eventRow) throw new Error('事件持久化失败');
+        await client.query(
+          `UPDATE ${schema}.agent_threads
+              SET last_activity_at = now(), updated_at = now()
+            WHERE id = $1`,
+          [runRow.thread_id],
+        );
+        await client.query('COMMIT');
+        return {
+          run: toRun(runRow),
+          event: {
+            eventId: eventRow.event_id,
+            event: checked,
+            createdAt: eventRow.created_at.toISOString(),
+          },
+        };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
     async appendMessage(message) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        await client.query(
-          `INSERT INTO ${schema}.agent_messages (id, thread_id, run_id, role, content, structured)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            randomUUID(),
-            message.threadId,
-            message.runId ?? null,
-            message.role,
-            message.content,
-            message.structured ?? null,
-          ],
-        );
+        if (message.runId) {
+          const run = await lockRunForWrite(client, message.runId, message.leaseOwnerToken);
+          if (run.thread_id !== message.threadId) throw new Error('运行与会话不匹配');
+        }
+        const inserted = message.runId
+          ? await client.query(
+              `INSERT INTO ${schema}.agent_messages (id, thread_id, run_id, role, content, structured)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [
+                randomUUID(),
+                message.threadId,
+                message.runId,
+                message.role,
+                message.content,
+                message.structured ?? null,
+              ],
+            )
+          : await client.query(
+              `INSERT INTO ${schema}.agent_messages (id, thread_id, run_id, role, content, structured)
+               VALUES ($1, $2, NULL, $3, $4, $5)`,
+              [
+                randomUUID(),
+                message.threadId,
+                message.role,
+                message.content,
+                message.structured ?? null,
+              ],
+            );
+        if (inserted.rowCount !== 1) throw new Error('消息持久化失败或租约已失效');
         await client.query(
           `UPDATE ${schema}.agent_threads
               SET last_activity_at = now(), updated_at = now()
@@ -235,11 +501,12 @@ export function createAgentRuntimeRepository(input: {
       }
     },
 
-    async appendEvent(runId, event) {
+    async appendEvent(runId, event, leaseOwnerToken) {
       const checked = AssistantEventSchema.parse(event);
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        const run = await lockRunForWrite(client, runId, leaseOwnerToken);
         const result = await client.query<{ event_id: string; created_at: Date }>(
           `INSERT INTO ${schema}.agent_run_events (run_id, event_type, payload)
            VALUES ($1, $2, $3)
@@ -247,12 +514,12 @@ export function createAgentRuntimeRepository(input: {
           [runId, checked.type, checked],
         );
         const row = result.rows[0];
-        if (!row) throw new Error('事件持久化失败');
+        if (!row) throw new Error('事件持久化失败或租约已失效');
         await client.query(
           `UPDATE ${schema}.agent_threads
               SET last_activity_at = now(), updated_at = now()
-            WHERE id = (SELECT thread_id FROM ${schema}.agent_runs WHERE id = $1)`,
-          [runId],
+            WHERE id = $1`,
+          [run.thread_id],
         );
         await client.query('COMMIT');
         return {

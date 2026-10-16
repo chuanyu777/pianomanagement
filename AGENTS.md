@@ -1,114 +1,137 @@
-# AGENTS.md — 琴行管理系统 项目规约
+# AGENTS.md — 琴行管理系统项目规约
 
-本文件是**硬约束**，不是建议。WorkBuddy 在每次 agent 运行前会自动读取本文件并注入上下文，
-所以：**加内容前先想「这条值不值得每次对话都烧一遍 token」**。能靠代码表达的就别写在这儿。
+本文件是硬约束。能由类型、数据库约束、测试或脚本表达的规则，不重复写在这里。
 
-## 1. 这个项目是什么
+## 1. 产品与设计基线
 
-琴行经营管理系统。前后端同仓：`apps/api` 是后端（NestJS + Prisma + PostgreSQL），
-`apps/web` 是前端（React + Refine + Ant Design），主要经营页面已实现。
+这是全新实现的 AI Native 琴行经营管理系统。冻结需求只有：
 
-新系统需求以本仓库两份冻结文档为唯一业务基线：
-`docs/系统需求设计-V2-MVP-v1.0.md` 定义业务规则，
-`docs/系统需求设计-AI-Native-MVP-v1.0.md` 定义 AI 产品形态与交互边界。
-目标技术方案见 `docs/系统技术设计-AI-Native-MVP-v1.0.md`，不得从当前代码反向推导或改变已冻结需求。
+- `docs/系统需求设计-V2-MVP-v1.0.md`：确定性业务规则；
+- `docs/系统需求设计-AI-Native-MVP-v1.0.md`：AI 产品形态和交互边界；
+- `docs/系统技术设计-AI-Native-MVP-v1.0.md`：目标架构和实施顺序。
 
-## 2. 仓库结构
+不得从旧代码反向推导需求。旧实现已保存在 Git 标签 `design-ai-native-mvp-v1.0`，只用于逐条复核后的参考，不复制旧领域模型。
 
+## 2. 目标结构与依赖方向
+
+```text
+apps/web/                       React AI 工作台与结构化降级页面
+apps/core-api/                  NestJS 确定性业务核心
+  prisma/schema.prisma          领域数据模型唯一来源
+  src/generated/prisma/         Prisma 生成物，不手改、不进 git
+  src/prisma/                   唯一允许接触 Prisma 生成物的目录
+  src/common/                   跨模块通用件，禁止依赖 src/modules
+  src/modules/<领域>/           controller → service → repository
+apps/agent-runtime/             Fastify + LangGraph.js 编排运行时
+packages/assistant-protocol/    Workspace、SSE 等非领域传输协议
+packages/generated-core-client/由 Core OpenAPI 生成，不手写领域 DTO
 ```
-apps/api/          NestJS 后端
-  prisma/schema.prisma     ← 数据模型的唯一来源
-  src/generated/prisma/    ← Prisma 生成物，不手改、不进 git
-  src/prisma/              ← 全项目唯一接触生成产物的地方
-  src/config/              ← 环境变量校验
-  src/common/              ← 跨模块通用件（禁止依赖 src/modules）
-  src/modules/<领域>/      ← 每个领域一个模块
-apps/web/          前端占位（Refine）
-packages/shared/   前后端共享的接口契约类型
-```
 
-## 3. 技术栈（已锁，别随手升）
+固定依赖方向：Web → Core；Agent Runtime → Core Internal Read/Preview API；Core controller → service → repository → Prisma。
+Agent Runtime 禁止连接 Core 数据库或调用 Confirm/Execute API；Core 禁止持有模型密钥。
 
-NestJS 12 · Prisma 7（`prisma-client` generator）· PostgreSQL 16 · TypeScript 6 · ESM ·
-Vitest 4 · oxlint · npm workspaces。
+## 3. 技术栈
 
-**三个已经踩过的坑，改依赖前先读**：
+Node.js 24 · TypeScript 6 · ESM · npm workspaces · oxlint · Vitest 4。
+Core 使用 NestJS 12、Prisma 7.10.0、PostgreSQL 16；Agent 使用 Fastify、LangChain.js、LangGraph.js 和独立 PostgreSQL；Web 使用 React、Vite、React Router、TanStack Query、Ant Design。
 
-- `prisma` 的 npm `latest` 现在指向 **8.0.0-rc**。CLI 和 `@prisma/client` 必须**钉同一版本**
-  （当前 `7.10.0`）。版本不一致会出现难以定位的生成/运行时错配。
-- `.npmrc` 里 `legacy-peer-deps=true` 是**必须的**：npm 10 在解 vitest 的 peer 集时会崩
-  （`Cannot read properties of null (reading 'edgesOut')`）。代价是 peer 冲突不再报错，
-  所以**动完依赖必须跑一遍 build + test**。
-- 不使用 tsconfig path 别名。ESM + tsc 不会重写别名，能编译过、跑起来找不到模块。
-  一律用带 `.js` 后缀的相对路径（`import { X } from './x.js'`）。
+- Prisma CLI、`@prisma/client` 和 adapter 必须固定为同一版本；npm `latest` 指向预发布版时禁止跟随。
+- `.npmrc` 的 `legacy-peer-deps=true` 保留；依赖变更后必须跑完整门禁。
+- 不使用 tsconfig path alias。ESM 本地相对导入一律写 `.js` 后缀。
+- 不提前引入 DeepAgents、Redis、向量数据库、多 Agent 或第二模型供应商。
 
 ## 4. 常用命令
 
 ```bash
-npm install                     # 根目录一次装完；会自动 prisma generate + 构建 shared
-npm run db:up                   # 起 Postgres（需要 Docker，端口 5433）
-npm run db:down                 # 停库
-npm run db:migrate -w @piano/api   # 建/改表后生成迁移
-npm run start:dev -w @piano/api    # 开发模式，接口在 http://localhost:3000/api
-npm run typecheck -w @piano/api
-npm run lint -w @piano/api
-npm test -w @piano/api          # 单元测试（不需要数据库）
-npm run test:e2e -w @piano/api  # 端到端，**需要库先起来**
+npm install
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run db:up                    # Core DB 5433，Agent DB 5434
+npm run db:down
+npm run db:generate
+npm run db:migrate
+npm run agent:db:migrate
+npm run dev:core
+npm run dev:agent
+npm run dev:web
+npm run openapi:export -w @piano/core-api
+npm run generate -w @piano/generated-core-client -- \
+  --input ../../apps/core-api/openapi.json
+npm run agent:checkpoint:setup
 ```
+
+`npm run agent:checkpoint:setup` 是 Agent PostgreSQL 的官方 LangGraph
+`PostgresSaver.setup()` 初始化命令；不要写成 `agent:checkpointer:setup`。
 
 ## 5. 硬规则
 
 | # | 规则 |
 |---|---|
-| R1 | **`prisma/schema.prisma` 是数据模型的唯一来源。** 禁止在 `packages/shared`、前端或常量文件里再抄一份枚举/实体/状态定义。抄一份就是「同一规则两份实现」，改一处忘一处会静默跑偏。 |
-| R2 | **金额一律用 Decimal，禁止 float/double。** 不许用 JS `number` 做金额加减。 |
-| R3 | **跨表写必须在一个事务里**（`$transaction`）。唯一性靠数据库约束兜底，不许用「先查再插」——并发下必然漏。 |
-| R4 | **业务规则只写在 service。** controller 只做参数绑定和转发，不写业务判断。前端不做业务算术（前端判断能被绕过，且是第二份实现）。 |
-| R5 | **时间一律存 UTC**，展示层再转本地时区。直接切 ISO 字符串会差整整一个时区且看不出来。 |
-| R6 | 密码只存 bcrypt 哈希。**任何返回用户信息的接口必须走 `PUBLIC_USER_SELECT` 白名单**，不许「查全表再删字段」。 |
-| R7 | 需要鉴权的接口**必须同时挂 `JwtAuthGuard` + `RolesGuard`**。只挂 RolesGuard 会让 `@Roles` 形同虚设（默认放行）且不报错。 |
-| R8 | **不留假实现。** 没做的、没验的，写进「§8 已知未做」，不许假装完成或用假数据糊过去。 |
-| R9 | **新检查必须见过红。** 先让它失败，再让它通过。待查集合不许与被检查的名单同源，否则变异测试会假绿。 |
-| R10 | 登录失败对外**只有一句话**（「用户名或密码不正确」），不许区分「用户不存在／密码错／已停用」。 |
-| R11 | 500 类错误对外只给通用文案，细节只进日志 —— 别把栈和 SQL 泄露给前端。 |
-| R12 | `.env` 不进 git。日志、报错、对话里都禁止出现密钥或完整连接串（要回显目标就只回显 `host:port/db`）。 |
-| R13 | 引用了任何历史清单/旧结论前，**逐条复核是否仍然成立**。把上一阶段的状态当现状汇报，就是一句假话。 |
+| R1 | `apps/core-api/prisma/schema.prisma` 是领域数据模型唯一来源。Web、Agent 和传输协议不得抄写领域枚举/实体；使用 OpenAPI 生成 Client。 |
+| R2 | 金额只用 Prisma Decimal 运算，对外一律为两位小数字符串；禁止用 JS `number` 做金额运算。 |
+| R3 | 跨表写必须在同一 `$transaction`；唯一性靠数据库约束，禁止“先查再插”。 |
+| R4 | 业务规则只写在 Core service。Controller、Agent 工具和前端不得重算余额、手续费、工资或报表。 |
+| R5 | 时间存 UTC；业务日历按 `Asia/Shanghai` 转换，禁止直接截 ISO 字符串。 |
+| R6 | 密码只存 bcrypt 哈希；用户响应必须走 `PUBLIC_USER_SELECT` 白名单。 |
+| R7 | Core 公共受限接口同时使用 `JwtAuthGuard` 与 `RolesGuard`；内部工具接口使用短期最小权限 Capability。两套鉴权不得混用或省略。 |
+| R8 | 不留假实现。未完成、未实测的内容写入 §8，禁止用演示数据冒充业务实现。 |
+| R9 | 新检查必须见过红再变绿；被检查名单和待查集合不得同源。 |
+| R10 | 登录失败对外统一为“用户名或密码不正确”。 |
+| R11 | 500 错误只返回通用文案，细节仅进脱敏日志。 |
+| R12 | `.env` 不进 Git；日志、错误和对话禁止出现密钥或完整连接串。 |
+| R13 | 引用历史代码、报告或环境结论前必须重新验证。 |
+| R14 | Agent 只能查询和申请 Preview；确认执行必须由浏览器携带用户登录态直接调用 Core。 |
 
 ## 6. 禁改清单
 
-- `apps/api/src/generated/**` —— Prisma 生成物，改了下次 `generate` 就没了。
-- `apps/api/prisma/migrations/**` 里**已经应用过**的迁移文件。要改表就加新迁移。
-- 不要为了「让测试变绿」而把真实数据库换成假数据；测试红是有信息量的。
+- `apps/core-api/src/generated/**`；
+- `packages/generated-core-client/src/generated/**`；
+- 已应用的 `apps/core-api/prisma/migrations/**`；
+- LangGraph checkpointer 官方表结构。
 
-## 7. 改完必须过的门槛
+数据库和接口测试不得为了变绿而替换为假数据。
 
-在 `apps/api` 下依次跑通，三条全绿才能说「做完了」：
+## 7. 完成门槛
+
+所有改动至少通过：
 
 ```bash
-npm run typecheck && npm run lint && npm test
+npm run typecheck && npm run lint && npm test && npm run build
 ```
 
-碰了数据库或接口的，再加端到端：
-```bash
-npm run db:up && npm run db:migrate -w @piano/api && npm run test:e2e -w @piano/api
-bash scripts/local-db-and-smoke.sh     # 起本地库 + 迁移 + 起服务 + 走一遍业务主链路
-```
-`scripts/local-db-and-smoke.sh` 是**验收脚本**：不需要 Docker，会建号、登录、报名、交费、
-排课、确认扣费，并断言台账余额、收支小计、业绩排行都对。动过钱相关代码后应该跑它。
+涉及数据库、API、Capability、Preview 或资金逻辑时，还要运行对应集成测试、E2E 和业务 smoke。汇报必须明确区分实测与未验证。
 
-汇报时必须区分「我实测过的」和「我没验的」。
+## 8. 已知未做
 
-## 8. 已知未做（诚实清单）
-
-- 后端领域模型与主要业务模块已落地；新增需求仍须先修改 `schema.prisma` 和迁移，
-  不要在前端或其它常量文件里用「临时字段」凑。
-- 无 refresh token、无改密流程、无登录失败限流。当前 JWT 有效期 12h，只有 access token。
-- 删除策略：用户是**硬删**（`DELETE`）。建业务表时要单独决定——凡是需要追溯的，一律软删。
-- 前端尚缺独立的交费、赠送、退费、关账、机构设置页面；账号页也未完整暴露新增、改密和老师关联。
-- `packages/shared` 目前只有分页信封和错误体；前端接进来以后才知道还需要共享什么。
-- 这几个子代理报告的**已知边界**，尚未处理：`OrganizationService.update()` 不接受事务客户端
-  （初始化向导的 carry-over 是两段写入，不是严格同一事务）；排课的时间冲突检测与赠送额度判断
-  是「先查后写」，并发下没有数据库约束兜底。
-- **Docker Hub 与三个国内镜像源在这台机器上都拉不动镜像。**
-  `docker compose up -d db` 起不来，验证时改用 `prisma dev`（本地 Postgres，不需要 Docker），
-  见 `apps/api/scripts/local-db-and-smoke.sh`。这条是环境问题，不是代码问题。
+- 当前仍处于阶段 0 技术 Spike，尚未形成可用业务系统。Core 数据库当前只有
+  `ActionPreview` 和 `BusinessAuditEvent` 两张 Spike 表，没有冻结需求中的完整领域模型。
+- `assistant-protocol`、Core Capability、Agent Runtime、Core 内部 Gateway、技术 Preview、
+  OpenAPI 导出/生成链路和 Web 工作台骨架已经落地；完整门禁和阶段 0 退出条件仍需以本次实测为准，
+  不能据此宣称业务系统已完成。
+- Capability 当前只包含 `sub`、`threadId`、`runId`、`jti`、`permissions`、`iat`、`exp`，
+  权限为 `READ`、`PREVIEW_L1`、`PREVIEW_L2`；尚缺需求/技术设计预留的 `role`、`teacherId`。
+  在 Core User/Teacher 领域模型落地前，不得在协议包或 Agent 中另写一份角色/老师枚举。
+- 公开 JWT 登录、`JwtAuthGuard`、`RolesGuard` 和公开业务接口尚未实现。Core 目前公开提供健康检查和
+  不含业务数据的 `/api/assistant/status`；内部工具和技术 Preview 同时校验短期 Capability 与带时间戳、
+  nonce 的 HMAC。公开 Assistant Gateway Controller 仍未实现，因此 Web 只能检查可用性，不能创建会话。
+- Agent 的 LangGraph `interrupt`/`Command(resume)` 和官方 `PostgresSaver` 已有真实 PostgreSQL
+  集成测试。HTTP Run/Event 持久化的 SQL migration、repository 和运行时接线已经出现在代码中，
+  基础 typecheck、server 测试、数据库 migration，以及“实例 A 的 Run 进入 `waiting_for_input` 后正常关闭，
+  由实例 B 恢复 Run/Events 历史并 Resume”的真实 PostgreSQL 集成测试已通过。当前 Events 接口只回放
+  截至请求时已持久化的事件并关闭连接，尚不是持续等待新事件的实时 SSE；进程在图执行期间崩溃时也没有
+  租约、超时回收或后台 worker 恢复 `running` Run。
+- 当前技术 Preview 只在 Core 事务中记录一个不落业务数据的 Preview 和审计事件，没有
+  Confirm、Execute、Receipt 或资金/课消写入。并发幂等集成测试覆盖的是这个技术 Preview，不能替代业务验收。
+- Web 当前为产品骨架；`/api/assistant/status` 已接通 Core 数据库和 Agent 健康探测，但会话、Run 与业务操作
+  仍未接通。不得添加演示业务数据冒充已完成。
+- 服务间 HMAC 的 nonce 防重放缓存由 Core 和 Agent 各自的单进程内存实现；同一实例可拒绝重放，但不能
+  在多实例间共享，进程重启后也会丢失缓存。生产环境需改为共享或持久化 nonce 存储。
+- Core Gateway 当前只为已实现的只读图签发 `READ` 权限；协议和 Core Capability 虽预留
+  `PREVIEW_L1`、`PREVIEW_L2`，公开 Gateway 尚未提供对应调用链。
+- Agent 默认 `AI_ENABLED=false`，首期模型供应商、模型、数据区域、保留条款和 Live Model 验证方案仍需确认；
+  无密钥的默认安装、测试和构建不得调用 Live Model。
+- 2026-10-16 阶段 0 对账已实测完整 typecheck/lint/test/build、Agent Runtime migration、PostgresSaver 初始化、
+  带本地数据库配置的 Agent 16/16 与 Core 24/24 测试，以及 OpenAPI 导出/Client 生成；Agent 进程重启后
+  Run/Event 历史、重复 Resume 幂等和并发 Resume 原子抢占也有专门测试。

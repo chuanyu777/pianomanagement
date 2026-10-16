@@ -1,26 +1,42 @@
 {
   "name": "piano-management",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "琴行管理系统 —— 前后端同仓。apps/api 为 NestJS + Prisma 后端，apps/web 为未来的 Refine 前端。",
+  "description": "AI Native 琴行经营管理系统",
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=24.11"
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "db:up": "docker compose up -d db",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "dev:core": "npm run start:dev -w @piano/core-api",
+    "dev:agent": "npm run start:dev -w @piano/agent-runtime",
+    "dev:web": "npm run dev -w @piano/web",
+    "db:up": "docker compose up -d core-db agent-db",
     "db:down": "docker compose down",
-    "db:generate": "npm run db:generate -w @piano/api",
-    "db:migrate": "npm run db:migrate -w @piano/api"
+    "db:generate": "npm run db:generate -w @piano/core-api",
+    "db:migrate": "npm run db:migrate -w @piano/core-api",
+    "agent:db:migrate": "npm run db:migrate -w @piano/agent-runtime",
+    "agent:checkpoint:setup": "npm run checkpoint:setup -w @piano/agent-runtime",
+    "test:agent:integration": "npm test -w @piano/agent-runtime"
   },
-  "dependencies": {
-    "playwright-core": "1.63.0"
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "oxlint": "1.88.0",
+    "typescript": "6.0.3"
+  },
+  "allowScripts": {
+    "prisma": true,
+    "@prisma/engines": true,
+    "esbuild@0.28.2": true,
+    "@scarf/scarf": false,
+    "fsevents": false
   }
 }

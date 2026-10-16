@@ -1,0 +1,56 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PreviewRiskLevel {
+  L1
+  L2
+}
+
+enum PreviewStatus {
+  PENDING
+  EXECUTED
+  CANCELLED
+  EXPIRED
+  STALE
+}
+
+model ActionPreview {
+  id                   String           @id @default(uuid())
+  actorUserId          String
+  actionType           String
+  schemaVersion        String
+  riskLevel            PreviewRiskLevel
+  normalizedCommandJson Json
+  displayJson          Json
+  resourceVersionsJson Json
+  idempotencyKey       String           @unique
+  status               PreviewStatus    @default(PENDING)
+  expiresAt            DateTime
+  executedAt           DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  @@index([actorUserId, status, expiresAt])
+}
+
+model BusinessAuditEvent {
+  id             String   @id @default(uuid())
+  actorUserId    String?
+  runId          String?
+  previewId      String?
+  eventType      String
+  resourceType   String?
+  resourceId     String?
+  requestId      String
+  detailJson     Json
+  createdAt      DateTime @default(now())
+
+  @@index([runId, createdAt])
+  @@index([previewId, createdAt])
+}

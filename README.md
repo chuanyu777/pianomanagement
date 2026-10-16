@@ -8,7 +8,7 @@
 | `apps/agent-runtime` | Fastify + LangGraph.js 编排运行时；独占 Agent PostgreSQL |
 | `apps/web` | React AI 工作台与结构化降级页面 |
 | `packages/assistant-protocol` | Workspace、SSE 等非领域传输协议 |
-| `packages/generated-core-client` | 由 Core OpenAPI 生成的类型化 Client；当前只覆盖 Spike 接口 |
+| `packages/generated-core-client` | 由 Core OpenAPI 生成的类型化 Client；当前覆盖 Spike 与账号/老师基础接口 |
 
 ## 目标设计
 
@@ -33,12 +33,13 @@
 
 三套原型均使用演示数据，只用于产品评审，不连接真实业务后端。
 
-## 阶段 0 当前状态
+## 当前状态
 
 阶段 0 已完成一组可运行的技术 Spike：双 PostgreSQL、Core Prisma 初始迁移、LangGraph
 `PostgresSaver` 初始化、Capability 骨架、内部只读工具、技术 Preview、SSE 协议、Core OpenAPI
-导出/生成链路和 Web AI 工作台骨架。它还不是可用业务系统：公开鉴权业务接口尚未实现，完整领域模型、
-Confirm/Execute/Receipt 和真实 AI 调用仍未完成；Agent HTTP Run/Event 已有 SQL migration、repository 和运行时接线，
+导出/生成链路和 Web AI 工作台骨架。阶段 1 已开始：Core 已具备店主/老师账号、bcrypt 登录、JWT、角色 Guard、
+店主创建老师接口，以及学生、课程、学生课程账户的数据模型。它仍不是可用业务系统：基础资料和课程账户尚未提供
+业务操作，金额流水、排课、Confirm/Execute/Receipt 和真实 AI 调用也仍未完成；Agent HTTP Run/Event 已有 SQL migration、repository 和运行时接线，
 真实 PostgreSQL 测试验证了 Run 进入 `waiting_for_input` 后正常关闭旧实例，再由新实例恢复历史并 Resume。
 当前 Events 接口可在历史补发后持续推送本实例事件，并支持心跳、断开清理和 `Last-Event-ID`；跨实例需重连
 后从 PostgreSQL 补读。租约数据层已经实现，但执行 worker、续租心跳、崩溃自动恢复和公开 Gateway 仍未完成，
@@ -61,12 +62,14 @@ npm run check
 
 首次启动前请按运行手册复制并填写 `apps/core-api/.env.example` 和
 `apps/agent-runtime/.env.example`；Core 的 Capability 私钥变量名是
-`CAPABILITY_SIGNING_PRIVATE_KEY_B64`，不能使用旧文档中的名称。然后执行
+`CAPABILITY_SIGNING_PRIVATE_KEY_B64`，且必须设置独立的 `JWT_SIGNING_SECRET`。首次初始化店主时，临时设置
+`OWNER_BOOTSTRAP_USERNAME` 与 `OWNER_BOOTSTRAP_PASSWORD`，执行 `npm run auth:bootstrap:owner -w @piano/core-api`，
+成功后从环境中移除这两个 bootstrap 变量。然后执行
 `npm run agent:checkpoint:setup` 初始化 Agent PostgreSQL 的官方检查点表。
 
 当前探活路径为 Core 的 `GET http://localhost:3000/api/health`、助手聚合状态
 `GET http://localhost:3000/api/assistant/status` 和 Agent 的 `GET http://localhost:3100/health`。
-浏览器尚不能登录或创建 Assistant Run；Web 目前只接通聚合状态检查与结构化降级入口。
+浏览器可通过 Core 的 `POST /api/auth/login` 登录，但尚不能创建 Assistant Run；Web 目前只接通聚合状态检查与结构化降级入口。
 
 ## 约定
 

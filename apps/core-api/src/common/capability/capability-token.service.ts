@@ -6,7 +6,7 @@ import {
   verify,
   type KeyObject,
 } from 'node:crypto';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Optional, UnauthorizedException } from '@nestjs/common';
 import { z } from 'zod';
 
 const CapabilityPayloadSchema = z.object({
@@ -37,7 +37,7 @@ export class CapabilityTokenService {
   readonly #privateKey: KeyObject;
   readonly #publicKey: KeyObject;
 
-  constructor(keys?: CapabilityKeyConfig) {
+  constructor(@Optional() keys?: CapabilityKeyConfig) {
     if (keys) {
       this.#privateKey = keys.privateKey;
       this.#publicKey = keys.publicKey;

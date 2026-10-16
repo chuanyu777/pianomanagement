@@ -105,9 +105,9 @@ npm run typecheck && npm run lint && npm test && npm run build
 
 ## 8. 已知未做
 
-- 当前已从阶段 0 技术 Spike 进入阶段 1 的身份与基础资料底座，但尚未形成可用业务系统。Core 数据库已有
-  `User`、`Teacher`、`Student`、`Course`、`StudentCourseAccount` 及两张 Spike 表；金额流水、排课、退款、工资、
-  收支和关账模型仍未实现。
+- 当前已从阶段 0 技术 Spike 进入阶段 1 的业务内核，但尚未形成可用业务系统。Core 数据库已有
+  `User`、`Teacher`、`Student`、`Course`、`StudentCourseAccount`、`PaymentRecord`、`GiftRecord`、`LedgerEntry` 及两张
+  Spike 表；课程账户的期初金额、交费、赠送、余额查询和一次冲正已实现。排课、课消、退款、工资、收支和关账模型仍未实现。
 - `assistant-protocol`、Core Capability、Agent Runtime、Core 内部 Gateway、技术 Preview、
   OpenAPI 导出/生成链路和 Web 工作台骨架已经落地；完整门禁和阶段 0 退出条件仍需以本次实测为准，
   不能据此宣称业务系统已完成。
@@ -116,9 +116,10 @@ npm run typecheck && npm run lint && npm test && npm run build
   预留的 `role`、`teacherId`。不得在 assistant-protocol 或 Agent 中另写一份角色/老师枚举。
 - Core 已实现公开 `POST /api/auth/login`、`GET /api/auth/me`、`JwtAuthGuard`、`RolesGuard` 和店主限定的
   `/api/teachers`、`/api/students`、`/api/courses`、`/api/students/:studentId/course-accounts` 基础接口；课程账户
-  创建时使用课程默认价或店主输入的个性化两位小数单价，后续改价递增账户版本。密码仅存 bcrypt hash，响应统一走
-  `PUBLIC_USER_SELECT`。没有公开注册；初始店主仅能通过 `auth:bootstrap:owner` 命令创建。金额、排课、退款等业务
-  接口尚未实现。内部工具和技术 Preview 仍同时校验短期 Capability 与带时间戳、nonce 的 HMAC。公开 Assistant
+  创建时使用课程默认价或店主输入的个性化两位小数单价，后续改价递增账户版本。店主限定的课程账户余额、交费、赠送和
+  冲正接口使用 `Idempotency-Key`，追加不可变 `LedgerEntry`，并在账户行锁内增加版本；当前仅支持交费/赠送的冲正。
+  密码仅存 bcrypt hash，响应统一走 `PUBLIC_USER_SELECT`。没有公开注册；初始店主仅能通过 `auth:bootstrap:owner` 命令
+  创建。排课、课消、退款等业务接口尚未实现。内部工具和技术 Preview 仍同时校验短期 Capability 与带时间戳、nonce 的 HMAC。公开 Assistant
   Gateway Controller 仍未实现，Web 不能创建会话。
 - Agent 的 LangGraph `interrupt`/`Command(resume)` 和官方 `PostgresSaver` 已有真实 PostgreSQL
   集成测试。HTTP Run/Event 持久化的 SQL migration、repository 和运行时接线已经出现在代码中，
@@ -145,6 +146,6 @@ npm run typecheck && npm run lint && npm test && npm run build
 - Agent 默认 `AI_ENABLED=false`，首期模型供应商、模型、数据区域、保留条款和 Live Model 验证方案仍需确认；
   无密钥的默认安装、测试和构建不得调用 Live Model。
 - 2026-10-16 阶段 0/1 对账已实测完整 typecheck/lint/test/build、Agent Runtime migration、PostgresSaver 初始化、
-  带本地数据库配置的 Agent 27/27 与 Core 50/50 测试，以及 OpenAPI 导出/Client 生成；Agent 进程重启后
+  带本地数据库配置的 Agent 27/27 与 Core 58/58 测试，以及 OpenAPI 导出/Client 生成；Agent 进程重启后
   Run/Event 历史、实时 SSE、重复 Resume 幂等、并发 Resume 原子抢占、租约 fencing 与签名头篡改拒绝
   也有专门测试。

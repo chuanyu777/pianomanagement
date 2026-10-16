@@ -43,8 +43,15 @@ if (hasDatabase) {
             where: { user: { username: { in: usernames } } },
             select: { id: true },
           });
+          const accounts = await prisma.studentCourseAccount.findMany({
+            where: { studentId: { in: studentIds } },
+            select: { id: true },
+          });
           await prisma.$transaction([
-            prisma.studentCourseAccount.deleteMany({ where: { studentId: { in: studentIds } } }),
+            prisma.ledgerEntry.deleteMany({ where: { accountId: { in: accounts.map(({ id }) => id) } } }),
+            prisma.paymentRecord.deleteMany({ where: { accountId: { in: accounts.map(({ id }) => id) } } }),
+            prisma.giftRecord.deleteMany({ where: { accountId: { in: accounts.map(({ id }) => id) } } }),
+            prisma.studentCourseAccount.deleteMany({ where: { id: { in: accounts.map(({ id }) => id) } } }),
             prisma.student.deleteMany({ where: { id: { in: studentIds } } }),
             prisma.course.deleteMany({ where: { id: { in: courseIds } } }),
             prisma.teacher.deleteMany({ where: { id: { in: teachers.map(({ id }) => id) } } }),
@@ -184,6 +191,35 @@ if (hasDatabase) {
         headers: authorization,
       });
       expect(await accounts.json()).toMatchObject([{ id: account.id, currentUnitPrice: '200.00' }]);
+
+      const payment = await fetch(`${baseUrl}/api/student-course-accounts/${account.id}/payments`, {
+        method: 'POST',
+        headers: {
+          ...authorization,
+          'content-type': 'application/json',
+          'idempotency-key': randomUUID(),
+        },
+        body: JSON.stringify({ amount: '300.00', channel: 'WECHAT', occurredAt: '2026-10-16T09:00:00.000Z' }),
+      });
+      expect(payment.status).toBe(201);
+      expect(await payment.json()).toMatchObject({ paidBalance: '300.00', giftBalance: '0.00' });
+
+      const gift = await fetch(`${baseUrl}/api/student-course-accounts/${account.id}/gifts`, {
+        method: 'POST',
+        headers: {
+          ...authorization,
+          'content-type': 'application/json',
+          'idempotency-key': randomUUID(),
+        },
+        body: JSON.stringify({ amount: '50.00', occurredAt: '2026-10-16T09:00:00.000Z' }),
+      });
+      expect(gift.status).toBe(201);
+      expect(await gift.json()).toMatchObject({ paidBalance: '300.00', giftBalance: '50.00', totalBalance: '350.00' });
+
+      const balance = await fetch(`${baseUrl}/api/student-course-accounts/${account.id}/balance`, {
+        headers: authorization,
+      });
+      expect(await balance.json()).toMatchObject({ paidBalance: '300.00', giftBalance: '50.00', totalBalance: '350.00' });
     });
   });
 } else {

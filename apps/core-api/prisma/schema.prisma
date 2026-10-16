@@ -25,15 +25,37 @@ enum UserRole {
   TEACHER
 }
 
+enum PaymentChannel {
+  CASH
+  WECHAT
+  ALIPAY
+  BANK_CARD
+  OTHER
+}
+
+enum LedgerEntryKind {
+  PAYMENT
+  GIFT
+  PAYMENT_REVERSAL
+  GIFT_REVERSAL
+  LESSON_CONSUMPTION
+  LESSON_CONSUMPTION_REVERSAL
+  REFUND_PAID
+  REFUND_GIFT_CLEARING
+}
+
 model User {
-  id           String    @id @default(uuid())
-  username     String    @unique
-  passwordHash String
-  role         UserRole
-  isActive     Boolean   @default(true)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  teacher      Teacher?
+  id            String          @id @default(uuid())
+  username      String          @unique
+  passwordHash  String
+  role          UserRole
+  isActive      Boolean         @default(true)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  teacher       Teacher?
+  payments      PaymentRecord[]
+  gifts         GiftRecord[]
+  ledgerEntries LedgerEntry[]
 }
 
 model Teacher {
@@ -47,71 +69,132 @@ model Teacher {
 }
 
 model Student {
-  id             String                  @id @default(uuid())
+  id             String                 @id @default(uuid())
   name           String
   notes          String?
   withdrawnAt    DateTime?
-  createdAt      DateTime                @default(now())
-  updatedAt      DateTime                @updatedAt
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
   courseAccounts StudentCourseAccount[]
 }
 
 model Course {
-  id                    String                @id @default(uuid())
-  name                  String
-  defaultUnitPrice      Decimal               @db.Decimal(14, 2)
+  id                     String                 @id @default(uuid())
+  name                   String
+  defaultUnitPrice       Decimal                @db.Decimal(14, 2)
   defaultDurationMinutes Int
-  isActive              Boolean               @default(true)
-  createdAt             DateTime              @default(now())
-  updatedAt             DateTime              @updatedAt
-  studentAccounts       StudentCourseAccount[]
+  isActive               Boolean                @default(true)
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+  studentAccounts        StudentCourseAccount[]
 }
 
 model StudentCourseAccount {
-  id               String   @id @default(uuid())
-  studentId        String
-  courseId         String
-  currentUnitPrice Decimal  @db.Decimal(14, 2)
-  version          Int      @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  student          Student  @relation(fields: [studentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  course           Course   @relation(fields: [courseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  id                 String          @id @default(uuid())
+  studentId          String
+  courseId           String
+  currentUnitPrice   Decimal         @db.Decimal(14, 2)
+  openingPaidBalance Decimal         @default(0) @db.Decimal(14, 2)
+  openingGiftBalance Decimal         @default(0) @db.Decimal(14, 2)
+  version            Int             @default(0)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  student            Student         @relation(fields: [studentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  course             Course          @relation(fields: [courseId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  payments           PaymentRecord[]
+  gifts              GiftRecord[]
+  ledgerEntries      LedgerEntry[]
 
   @@unique([studentId, courseId])
   @@index([courseId])
 }
 
+model PaymentRecord {
+  id          String               @id @default(uuid())
+  accountId   String
+  amount      Decimal              @db.Decimal(14, 2)
+  occurredAt  DateTime
+  channel     PaymentChannel
+  note        String?
+  createdById String
+  createdAt   DateTime             @default(now())
+  account     StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy   User                 @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntry LedgerEntry?
+
+  @@index([accountId, occurredAt])
+}
+
+model GiftRecord {
+  id          String               @id @default(uuid())
+  accountId   String
+  amount      Decimal              @db.Decimal(14, 2)
+  occurredAt  DateTime
+  note        String?
+  createdById String
+  createdAt   DateTime             @default(now())
+  account     StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy   User                 @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntry LedgerEntry?
+
+  @@index([accountId, occurredAt])
+}
+
+model LedgerEntry {
+  id              String               @id @default(uuid())
+  accountId       String
+  kind            LedgerEntryKind
+  paidDelta       Decimal              @default(0) @db.Decimal(14, 2)
+  giftDelta       Decimal              @default(0) @db.Decimal(14, 2)
+  occurredAt      DateTime
+  note            String?
+  createdById     String
+  commandId       String               @unique
+  paymentId       String?              @unique
+  giftId          String?              @unique
+  reversesEntryId String?              @unique
+  createdAt       DateTime             @default(now())
+  account         StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy       User                 @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  payment         PaymentRecord?       @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  gift            GiftRecord?          @relation(fields: [giftId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversesEntry   LedgerEntry?         @relation("LedgerEntryReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversedBy      LedgerEntry?         @relation("LedgerEntryReversal")
+
+  @@index([accountId, occurredAt, id])
+  @@index([createdById, createdAt])
+}
+
 model ActionPreview {
-  id                   String           @id @default(uuid())
-  actorUserId          String
-  actionType           String
-  schemaVersion        String
-  riskLevel            PreviewRiskLevel
+  id                    String           @id @default(uuid())
+  actorUserId           String
+  actionType            String
+  schemaVersion         String
+  riskLevel             PreviewRiskLevel
   normalizedCommandJson Json
-  displayJson          Json
-  resourceVersionsJson Json
-  idempotencyKey       String           @unique
-  status               PreviewStatus    @default(PENDING)
-  expiresAt            DateTime
-  executedAt           DateTime?
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
+  displayJson           Json
+  resourceVersionsJson  Json
+  idempotencyKey        String           @unique
+  status                PreviewStatus    @default(PENDING)
+  expiresAt             DateTime
+  executedAt            DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
 
   @@index([actorUserId, status, expiresAt])
 }
 
 model BusinessAuditEvent {
-  id             String   @id @default(uuid())
-  actorUserId    String?
-  runId          String?
-  previewId      String?
-  eventType      String
-  resourceType   String?
-  resourceId     String?
-  requestId      String
-  detailJson     Json
-  createdAt      DateTime @default(now())
+  id           String   @id @default(uuid())
+  actorUserId  String?
+  runId        String?
+  previewId    String?
+  eventType    String
+  resourceType String?
+  resourceId   String?
+  requestId    String
+  detailJson   Json
+  createdAt    DateTime @default(now())
 
   @@index([runId, createdAt])
   @@index([previewId, createdAt])

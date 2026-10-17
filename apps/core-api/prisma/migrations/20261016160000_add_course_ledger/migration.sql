@@ -34,12 +34,6 @@ ALTER TABLE "PaymentRecord" ADD CONSTRAINT "PaymentRecord_amount_positive_check"
 -- AddCheckConstraint
 ALTER TABLE "PaymentRecord" ADD CONSTRAINT "PaymentRecord_other_channel_note_check" CHECK ("channel" <> 'OTHER' OR btrim(COALESCE("note", '')) <> '');
 
--- AddCheckConstraint
-ALTER TABLE "GiftRecord" ADD CONSTRAINT "GiftRecord_amount_positive_check" CHECK ("amount" > 0);
-
--- AddCheckConstraint
-ALTER TABLE "LedgerEntry" ADD CONSTRAINT "LedgerEntry_nonzero_delta_check" CHECK ("paidDelta" <> 0 OR "giftDelta" <> 0);
-
 -- CreateTable
 CREATE TABLE "GiftRecord" (
     "id" TEXT NOT NULL,
@@ -52,6 +46,9 @@ CREATE TABLE "GiftRecord" (
 
     CONSTRAINT "GiftRecord_pkey" PRIMARY KEY ("id")
 );
+
+-- AddCheckConstraint
+ALTER TABLE "GiftRecord" ADD CONSTRAINT "GiftRecord_amount_positive_check" CHECK ("amount" > 0);
 
 -- CreateTable
 CREATE TABLE "LedgerEntry" (
@@ -71,6 +68,9 @@ CREATE TABLE "LedgerEntry" (
 
     CONSTRAINT "LedgerEntry_pkey" PRIMARY KEY ("id")
 );
+
+-- AddCheckConstraint
+ALTER TABLE "LedgerEntry" ADD CONSTRAINT "LedgerEntry_nonzero_delta_check" CHECK ("paidDelta" <> 0 OR "giftDelta" <> 0);
 
 -- CreateIndex
 CREATE INDEX "PaymentRecord_accountId_occurredAt_idx" ON "PaymentRecord"("accountId", "occurredAt");

@@ -44,18 +44,25 @@ enum LedgerEntryKind {
   REFUND_GIFT_CLEARING
 }
 
+enum LessonStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
 model User {
-  id            String          @id @default(uuid())
-  username      String          @unique
-  passwordHash  String
-  role          UserRole
-  isActive      Boolean         @default(true)
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-  teacher       Teacher?
-  payments      PaymentRecord[]
-  gifts         GiftRecord[]
-  ledgerEntries LedgerEntry[]
+  id               String          @id @default(uuid())
+  username         String          @unique
+  passwordHash     String
+  role             UserRole
+  isActive         Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  teacher          Teacher?
+  payments         PaymentRecord[]
+  gifts            GiftRecord[]
+  ledgerEntries    LedgerEntry[]
+  completedLessons Lesson[]        @relation("LessonCompletedBy")
 }
 
 model Teacher {
@@ -66,6 +73,7 @@ model Teacher {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lessons   Lesson[]
 }
 
 model Student {
@@ -104,6 +112,7 @@ model StudentCourseAccount {
   payments           PaymentRecord[]
   gifts              GiftRecord[]
   ledgerEntries      LedgerEntry[]
+  lessons            Lesson[]
 
   @@unique([studentId, courseId])
   @@index([courseId])
@@ -152,17 +161,42 @@ model LedgerEntry {
   commandId       String               @unique
   paymentId       String?              @unique
   giftId          String?              @unique
+  lessonId        String?              @unique
   reversesEntryId String?              @unique
   createdAt       DateTime             @default(now())
   account         StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   createdBy       User                 @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
   payment         PaymentRecord?       @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   gift            GiftRecord?          @relation(fields: [giftId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lesson          Lesson?              @relation(fields: [lessonId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   reversesEntry   LedgerEntry?         @relation("LedgerEntryReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   reversedBy      LedgerEntry?         @relation("LedgerEntryReversal")
 
   @@index([accountId, occurredAt, id])
   @@index([createdById, createdAt])
+}
+
+model Lesson {
+  id                String               @id @default(uuid())
+  accountId         String
+  teacherId         String
+  startsAt          DateTime
+  endsAt            DateTime
+  status            LessonStatus         @default(SCHEDULED)
+  note              String?
+  unitPriceSnapshot Decimal?             @db.Decimal(14, 2)
+  completedAt       DateTime?
+  completedById     String?
+  version           Int                  @default(0)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  account           StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  teacher           Teacher              @relation(fields: [teacherId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  completedBy       User?                @relation("LessonCompletedBy", fields: [completedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  consumptionEntry  LedgerEntry?
+
+  @@index([accountId, startsAt])
+  @@index([teacherId, startsAt])
 }
 
 model ActionPreview {

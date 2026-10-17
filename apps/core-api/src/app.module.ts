@@ -9,6 +9,7 @@ import { HealthController } from './modules/health/health.controller.js';
 import { InternalToolsController } from './modules/internal-tools/internal-tools.controller.js';
 import { CoursesModule } from './modules/courses/courses.module.js';
 import { CourseLedgerModule } from './modules/course-ledger/course-ledger.module.js';
+import { LessonsModule } from './modules/lessons/lessons.module.js';
 import { StudentCourseAccountsModule } from './modules/student-course-accounts/student-course-accounts.module.js';
 import { StudentsModule } from './modules/students/students.module.js';
 import { TeachersModule } from './modules/teachers/teachers.module.js';
@@ -23,6 +24,7 @@ import { TeachersModule } from './modules/teachers/teachers.module.js';
     AssistantStatusModule,
     CoursesModule,
     CourseLedgerModule,
+    LessonsModule,
     StudentsModule,
     StudentCourseAccountsModule,
     TeachersModule,

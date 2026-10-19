@@ -33,6 +33,9 @@ class StudentResponse implements StudentSummary {
   @ApiProperty({ type: String, nullable: true })
   notes!: string | null;
 
+  @ApiProperty({ enum: ['STUDYING', 'FROZEN', 'WITHDRAWN'] })
+  enrollmentStatus!: 'STUDYING' | 'FROZEN' | 'WITHDRAWN';
+
   @ApiProperty({ type: String, format: 'date-time' })
   createdAt!: Date;
 

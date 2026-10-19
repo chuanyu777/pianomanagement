@@ -12,6 +12,7 @@ const schema = 'agent_runtime';
 export type AgentRunRecord = AssistantRun & {
   userMessage: string;
   clientRequestId?: string | undefined;
+  capability?: string | undefined;
 };
 
 export interface PersistedAssistantEvent {
@@ -25,6 +26,7 @@ export interface CreateRunInput {
   threadId: string;
   userMessage: string;
   clientRequestId?: string | undefined;
+  capability?: string | undefined;
 }
 
 export interface UpdateRunInput {
@@ -79,6 +81,7 @@ type RunRow = {
   status: AssistantRun['status'];
   user_message: string;
   client_request_id: string | null;
+  capability_token: string | null;
 };
 
 type LeasedRunRow = RunRow & {
@@ -156,12 +159,13 @@ function toRun(row: RunRow): AgentRunRecord {
     ...run,
     userMessage: row.user_message,
     ...(row.client_request_id ? { clientRequestId: row.client_request_id } : {}),
+    ...(row.capability_token ? { capability: row.capability_token } : {}),
   };
 }
 
 async function findRunWithClient(client: Pool | PoolClient, runId: string): Promise<AgentRunRecord | null> {
   const result = await client.query<RunRow>(
-    `SELECT id, thread_id, status, user_message, client_request_id
+    `SELECT id, thread_id, status, user_message, client_request_id, capability_token
        FROM ${schema}.agent_runs
       WHERE id = $1`,
     [runId],
@@ -199,11 +203,11 @@ export function createAgentRuntimeRepository(input: {
         );
         const inserted = await client.query<RunRow>(
           `INSERT INTO ${schema}.agent_runs
-             (id, thread_id, client_request_id, status, user_message, started_at)
-           VALUES ($1, $2, $3, 'running', $4, now())
+             (id, thread_id, client_request_id, status, user_message, started_at, capability_token)
+           VALUES ($1, $2, $3, 'queued', $4, NULL, $5)
            ON CONFLICT DO NOTHING
-           RETURNING id, thread_id, status, user_message, client_request_id`,
-          [runInput.runId, runInput.threadId, runInput.clientRequestId ?? null, runInput.userMessage],
+           RETURNING id, thread_id, status, user_message, client_request_id, capability_token`,
+          [runInput.runId, runInput.threadId, runInput.clientRequestId ?? null, runInput.userMessage, runInput.capability ?? null],
         );
         if (inserted.rows[0]) {
           await client.query(
@@ -216,7 +220,7 @@ export function createAgentRuntimeRepository(input: {
         }
 
         const existing = await client.query<RunRow>(
-          `SELECT id, thread_id, status, user_message, client_request_id
+          `SELECT id, thread_id, status, user_message, client_request_id, capability_token
              FROM ${schema}.agent_runs
             WHERE id = $1
                OR ($2::text IS NOT NULL AND thread_id = $3 AND client_request_id = $2)
@@ -249,7 +253,7 @@ export function createAgentRuntimeRepository(input: {
         `UPDATE ${schema}.agent_runs
             SET status = 'running', updated_at = now()
           WHERE id = $1 AND status = 'waiting_for_input'
-          RETURNING id, thread_id, status, user_message, client_request_id`,
+          RETURNING id, thread_id, status, user_message, client_request_id, capability_token`,
         [runId],
       );
       const row = result.rows[0];
@@ -278,7 +282,8 @@ export function createAgentRuntimeRepository(input: {
            FROM candidate
           WHERE run.id = candidate.id
          RETURNING run.id, run.thread_id, run.status, run.user_message, run.client_request_id,
-                   run.lease_owner_token, run.lease_expires_at, run.attempt_count`,
+                   run.lease_owner_token, run.lease_expires_at, run.attempt_count,
+                   run.capability_token`,
         [ownerToken, leaseDurationMs],
       );
       const row = result.rows[0];
@@ -361,7 +366,7 @@ export function createAgentRuntimeRepository(input: {
                   AND lease_expires_at > now()
                 )
               )
-            RETURNING id, thread_id, status, user_message, client_request_id`,
+            RETURNING id, thread_id, status, user_message, client_request_id, capability_token`,
           [
             update.runId,
             update.status,
@@ -411,7 +416,7 @@ export function createAgentRuntimeRepository(input: {
                   AND lease_expires_at > now()
                 )
               )
-            RETURNING id, thread_id, status, user_message, client_request_id`,
+            RETURNING id, thread_id, status, user_message, client_request_id, capability_token`,
           [
             update.runId,
             update.status,

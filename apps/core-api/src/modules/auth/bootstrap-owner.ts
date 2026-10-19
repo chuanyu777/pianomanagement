@@ -1,8 +1,6 @@
 import 'dotenv/config';
-import 'reflect-metadata';
-import { NestFactory } from '@nestjs/core';
 import { z } from 'zod';
-import { AppModule } from '../../app.module.js';
+import { PrismaService } from '../../prisma/prisma.service.js';
 import { OwnerBootstrapService } from './owner-bootstrap.service.js';
 
 const InputSchema = z.object({
@@ -11,14 +9,18 @@ const InputSchema = z.object({
 });
 
 const input = InputSchema.parse(process.env);
-const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error', 'warn'] });
+// 账号初始化只需要数据库和 bcrypt，不应要求 Agent Gateway 或 Capability
+// 等在线服务配置；这样 Docker 中也能在服务启动后单独创建首个店主账号。
+const prisma = new PrismaService();
+const owners = new OwnerBootstrapService(prisma);
 
 try {
-  const owner = await app.get(OwnerBootstrapService).createOwner({
+  await prisma.$connect();
+  const owner = await owners.createOwner({
     username: input.OWNER_BOOTSTRAP_USERNAME,
     password: input.OWNER_BOOTSTRAP_PASSWORD,
   });
   console.log(`已创建店主账号：${owner.username}（${owner.id}）`);
 } finally {
-  await app.close();
+  await prisma.$disconnect();
 }

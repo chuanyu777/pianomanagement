@@ -5,6 +5,7 @@ import {
   Prisma,
 } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { PeriodsService } from '../periods/periods.service.js';
 
 type LedgerTransaction = Prisma.TransactionClient;
 
@@ -24,6 +25,12 @@ export type CourseAccountBalance = {
   paidBalance: string;
   giftBalance: string;
   totalBalance: string;
+};
+
+export type CourseAccountPreviewSnapshot = CourseAccountBalance & { version: number };
+export type ProjectedCourseAccountBalance = {
+  before: CourseAccountBalance;
+  after: CourseAccountBalance;
 };
 
 export type RecordPaymentInput = {
@@ -93,10 +100,47 @@ function isUniqueConstraintError(error: unknown): boolean {
 
 @Injectable()
 export class CourseLedgerService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly periods: PeriodsService,
+  ) {}
 
   async getBalance(accountId: string): Promise<CourseAccountBalance> {
     return this.getBalanceWithClient(this.prisma, accountId);
+  }
+
+  async getPreviewSnapshotInTransaction(
+    tx: LedgerTransaction,
+    accountId: string,
+  ): Promise<CourseAccountPreviewSnapshot> {
+    await this.lockAccount(tx, accountId);
+    const account = await tx.studentCourseAccount.findUnique({
+      where: { id: accountId },
+      select: { version: true },
+    });
+    if (!account) throw new NotFoundException('学生课程账户不存在');
+    return { ...(await this.getBalanceWithClient(tx, accountId)), version: account.version };
+  }
+
+  projectBalance(
+    before: CourseAccountBalance,
+    kind: 'PAYMENT' | 'GIFT',
+    amount: Prisma.Decimal,
+  ): ProjectedCourseAccountBalance {
+    this.assertPositiveAmount(amount);
+    const paid = new Prisma.Decimal(before.paidBalance);
+    const gift = new Prisma.Decimal(before.giftBalance);
+    const afterPaid = kind === 'PAYMENT' ? paid.add(amount) : paid;
+    const afterGift = kind === 'GIFT' ? gift.add(amount) : gift;
+    return {
+      before,
+      after: {
+        accountId: before.accountId,
+        paidBalance: afterPaid.toFixed(2),
+        giftBalance: afterGift.toFixed(2),
+        totalBalance: afterPaid.add(afterGift).toFixed(2),
+      },
+    };
   }
 
   async recordPayment(input: RecordPaymentInput): Promise<CourseAccountBalance> {
@@ -105,91 +149,107 @@ export class CourseLedgerService {
       throw new BadRequestException('选择其他渠道时必须填写备注');
     }
     try {
-      return await this.prisma.$transaction(async (tx) => {
-        const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
-        if (replay) return replay;
-        await this.lockAccount(tx, input.accountId);
-        const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById);
-        if (afterLockReplay) return afterLockReplay;
-
-        const payment = await tx.paymentRecord.create({
-          data: {
-            accountId: input.accountId,
-            amount: input.amount,
-            occurredAt: input.occurredAt,
-            channel: input.channel,
-            note: input.note?.trim() || null,
-            createdById: input.createdById,
-          },
-          select: { id: true },
-        });
-        await tx.ledgerEntry.create({
-          data: {
-            accountId: input.accountId,
-            kind: LedgerEntryKind.PAYMENT,
-            paidDelta: input.amount,
-            giftDelta: new Prisma.Decimal(0),
-            occurredAt: input.occurredAt,
-            note: input.note?.trim() || null,
-            createdById: input.createdById,
-            commandId: input.commandId,
-            paymentId: payment.id,
-          },
-        });
-        await this.incrementAccountVersion(tx, input.accountId);
-        return this.getBalanceWithClient(tx, input.accountId);
-      });
+      return await this.prisma.$transaction((tx) => this.recordPaymentInTransaction(tx, input));
     } catch (error) {
       if (!isUniqueConstraintError(error)) throw error;
       return this.resolveCommandConflict(input.commandId, input.createdById);
     }
+  }
+
+  async recordPaymentInTransaction(
+    tx: LedgerTransaction,
+    input: RecordPaymentInput,
+  ): Promise<CourseAccountBalance> {
+    this.assertPositiveAmount(input.amount);
+    if (input.channel === 'OTHER' && !input.note?.trim()) {
+      throw new BadRequestException('选择其他渠道时必须填写备注');
+    }
+    await this.periods.assertWritableForDate(input.occurredAt, tx);
+    const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    if (replay) return replay;
+    await this.lockAccount(tx, input.accountId);
+    const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    if (afterLockReplay) return afterLockReplay;
+    const payment = await tx.paymentRecord.create({
+      data: {
+        accountId: input.accountId,
+        amount: input.amount,
+        occurredAt: input.occurredAt,
+        channel: input.channel,
+        note: input.note?.trim() || null,
+        createdById: input.createdById,
+      },
+      select: { id: true },
+    });
+    await tx.ledgerEntry.create({
+      data: {
+        accountId: input.accountId,
+        kind: LedgerEntryKind.PAYMENT,
+        paidDelta: input.amount,
+        giftDelta: new Prisma.Decimal(0),
+        occurredAt: input.occurredAt,
+        note: input.note?.trim() || null,
+        createdById: input.createdById,
+        commandId: input.commandId,
+        paymentId: payment.id,
+      },
+    });
+    await this.incrementAccountVersion(tx, input.accountId);
+    return this.getBalanceWithClient(tx, input.accountId);
   }
 
   async recordGift(input: RecordGiftInput): Promise<CourseAccountBalance> {
     this.assertPositiveAmount(input.amount);
     try {
-      return await this.prisma.$transaction(async (tx) => {
-        const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
-        if (replay) return replay;
-        await this.lockAccount(tx, input.accountId);
-        const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById);
-        if (afterLockReplay) return afterLockReplay;
-
-        const gift = await tx.giftRecord.create({
-          data: {
-            accountId: input.accountId,
-            amount: input.amount,
-            occurredAt: input.occurredAt,
-            note: input.note?.trim() || null,
-            createdById: input.createdById,
-          },
-          select: { id: true },
-        });
-        await tx.ledgerEntry.create({
-          data: {
-            accountId: input.accountId,
-            kind: LedgerEntryKind.GIFT,
-            paidDelta: new Prisma.Decimal(0),
-            giftDelta: input.amount,
-            occurredAt: input.occurredAt,
-            note: input.note?.trim() || null,
-            createdById: input.createdById,
-            commandId: input.commandId,
-            giftId: gift.id,
-          },
-        });
-        await this.incrementAccountVersion(tx, input.accountId);
-        return this.getBalanceWithClient(tx, input.accountId);
-      });
+      return await this.prisma.$transaction((tx) => this.recordGiftInTransaction(tx, input));
     } catch (error) {
       if (!isUniqueConstraintError(error)) throw error;
       return this.resolveCommandConflict(input.commandId, input.createdById);
     }
   }
 
+  async recordGiftInTransaction(
+    tx: LedgerTransaction,
+    input: RecordGiftInput,
+  ): Promise<CourseAccountBalance> {
+    this.assertPositiveAmount(input.amount);
+    await this.periods.assertWritableForDate(input.occurredAt, tx);
+    const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    if (replay) return replay;
+    await this.lockAccount(tx, input.accountId);
+    const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    if (afterLockReplay) return afterLockReplay;
+    const gift = await tx.giftRecord.create({
+      data: {
+        accountId: input.accountId,
+        amount: input.amount,
+        occurredAt: input.occurredAt,
+        note: input.note?.trim() || null,
+        createdById: input.createdById,
+      },
+      select: { id: true },
+    });
+    await tx.ledgerEntry.create({
+      data: {
+        accountId: input.accountId,
+        kind: LedgerEntryKind.GIFT,
+        paidDelta: new Prisma.Decimal(0),
+        giftDelta: input.amount,
+        occurredAt: input.occurredAt,
+        note: input.note?.trim() || null,
+        createdById: input.createdById,
+        commandId: input.commandId,
+        giftId: gift.id,
+      },
+    });
+    await this.incrementAccountVersion(tx, input.accountId);
+    return this.getBalanceWithClient(tx, input.accountId);
+  }
+
   async reverseEntry(input: ReverseLedgerEntryInput): Promise<CourseAccountBalance> {
     try {
       return await this.prisma.$transaction(async (tx) => {
+        await this.periods.assertWritableForDate(input.occurredAt, tx);
         const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
         if (replay) return replay;
         const original = await tx.ledgerEntry.findUnique({

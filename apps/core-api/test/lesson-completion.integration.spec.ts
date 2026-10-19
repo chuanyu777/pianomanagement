@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LedgerEntryKind, Prisma, UserRole } from '../src/generated/prisma/client.js';
 import { LessonsRepository } from '../src/modules/lessons/lessons.repository.js';
 import { LessonsService } from '../src/modules/lessons/lessons.service.js';
+import { PeriodsService } from '../src/modules/periods/periods.service.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 
 const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
@@ -10,7 +11,7 @@ const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
 if (hasDatabase) {
   describe('LessonsService completion with real PostgreSQL', () => {
     const prisma = new PrismaService();
-    const service = new LessonsService(new LessonsRepository(prisma));
+    const service = new LessonsService(new LessonsRepository(prisma), new PeriodsService(prisma));
     const userIds: string[] = [];
     const teacherIds: string[] = [];
     const studentIds: string[] = [];

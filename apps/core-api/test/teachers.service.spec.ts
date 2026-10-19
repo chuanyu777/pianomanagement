@@ -1,4 +1,5 @@
 import { UserRole } from '../src/generated/prisma/client.js';
+import { Prisma } from '../src/generated/prisma/client.js';
 import { TeachersService } from '../src/modules/teachers/teachers.service.js';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -8,6 +9,9 @@ describe('TeachersService', () => {
     const createTeacher = vi.fn(async () => ({
       id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7',
       name: '王老师',
+      isActive: true,
+      defaultBaseSalary: new Prisma.Decimal('0.00'),
+      defaultCommissionRate: new Prisma.Decimal('0.0000'),
       user: { id: 'd63788c6-8e3f-4e98-9a10-720af1cbd997', username: 'teacher.wang', role: UserRole.TEACHER },
     }));
     const transaction = vi.fn(async (callback) => callback({
@@ -34,6 +38,9 @@ describe('TeachersService', () => {
       name: '王老师',
       userId: 'd63788c6-8e3f-4e98-9a10-720af1cbd997',
       username: 'teacher.wang',
+      isActive: true,
+      defaultBaseSalary: '0.00',
+      defaultCommissionRate: '0.0000',
     });
   });
 });

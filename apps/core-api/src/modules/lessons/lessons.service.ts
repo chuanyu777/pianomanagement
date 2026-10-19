@@ -8,11 +8,20 @@ import {
 import { LedgerEntryKind, LessonStatus, Prisma } from '../../generated/prisma/client.js';
 import type { AuthenticatedActor } from '../auth/auth.types.js';
 import { LessonsRepository } from './lessons.repository.js';
+import { PeriodsService } from '../periods/periods.service.js';
 
 export type CreateSingleLessonInput = {
   accountId: string;
   teacherId: string;
   startsAt: Date;
+  note?: string | undefined;
+};
+
+export type CreateBatchLessonsInput = {
+  accountId: string;
+  teacherId: string;
+  firstStartsAt: Date;
+  weeks: number;
   note?: string | undefined;
 };
 
@@ -27,6 +36,28 @@ export type CancelLessonInput = {
 export type CompleteLessonInput = {
   commandId: string;
   note?: string | undefined;
+};
+
+export type SingleLessonPreview = {
+  normalizedCommand: CreateSingleLessonInput & { endsAt: Date; note?: string };
+  resourceVersions: {
+    accountId: string;
+    accountVersion: number;
+    teacherId: string;
+    conflicts: Array<{ id: string; version: number; startsAt: Date; endsAt: Date }>;
+  };
+};
+
+export type BatchLessonPreview = {
+  normalizedCommand: CreateBatchLessonsInput;
+  lessons: Array<{ startsAt: Date; endsAt: Date }>;
+  conflicts: Array<Record<string, string>>;
+  resourceVersions: {
+    accountId: string;
+    accountVersion: number;
+    teacherId: string;
+    teacherUpdatedAt: Date;
+  };
 };
 
 const LESSON_SELECT = {
@@ -103,9 +134,152 @@ function canAccess(actor: AuthenticatedActor, teacherId: string): boolean {
 
 @Injectable()
 export class LessonsService {
-  constructor(private readonly repository: LessonsRepository) {}
+  constructor(
+    private readonly repository: LessonsRepository,
+    private readonly periods: PeriodsService,
+  ) {}
+
+  async createBatch(input: CreateBatchLessonsInput, actor: AuthenticatedActor): Promise<LessonSummary[]> {
+    if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以批量排课');
+    return this.repository.transaction((tx) => this.createBatchInTransaction(tx, input, actor));
+  }
+
+  async previewBatch(input: CreateBatchLessonsInput, actor: AuthenticatedActor): Promise<BatchLessonPreview> {
+    if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以批量排课');
+    return this.repository.transaction((tx) => this.previewBatchInTransaction(tx, input, actor));
+  }
+
+  async createBatchInTransaction(
+    tx: TransactionClient,
+    input: CreateBatchLessonsInput,
+    actor: AuthenticatedActor,
+    expected?: BatchLessonPreview['resourceVersions'],
+  ): Promise<LessonSummary[]> {
+    const preview = await this.previewBatchInTransaction(tx, input, actor);
+    if (expected && (
+      expected.accountId !== preview.resourceVersions.accountId ||
+      expected.accountVersion !== preview.resourceVersions.accountVersion ||
+      expected.teacherId !== preview.resourceVersions.teacherId ||
+      expected.teacherUpdatedAt.toISOString() !== preview.resourceVersions.teacherUpdatedAt.toISOString()
+    )) {
+      throw new ConflictException('排课资源已变化，请重新预览');
+    }
+    if (preview.conflicts.length > 0) {
+      throw new ConflictException({ message: '批量排课存在时间冲突，未创建任何排课', conflicts: preview.conflicts });
+    }
+
+    const note = input.note?.trim() || null;
+    const created: LessonSummary[] = [];
+    for (const slot of preview.lessons) {
+      const lesson = await tx.lesson.create({
+        data: {
+          accountId: input.accountId,
+          teacherId: input.teacherId,
+          startsAt: slot.startsAt,
+          endsAt: slot.endsAt,
+          status: LessonStatus.SCHEDULED,
+          note,
+        },
+        select: LESSON_SELECT,
+      });
+      created.push(toSummary(lesson));
+    }
+    return created;
+  }
+
+  private async previewBatchInTransaction(
+    tx: TransactionClient,
+    input: CreateBatchLessonsInput,
+    actor: AuthenticatedActor,
+  ): Promise<BatchLessonPreview> {
+    if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以批量排课');
+    if (!Number.isInteger(input.weeks) || input.weeks < 1 || input.weeks > 52) {
+      throw new BadRequestException('批量排课周数必须为 1 至 52 的整数');
+    }
+    if (!Number.isFinite(input.firstStartsAt.getTime())) throw new BadRequestException('首次上课时间无效');
+
+      const account = await tx.studentCourseAccount.findUnique({
+        where: { id: input.accountId },
+        include: { course: true },
+      });
+      if (!account) throw new NotFoundException('学生课程账户不存在');
+      if (!Number.isInteger(account.course.defaultDurationMinutes) || account.course.defaultDurationMinutes < 1) {
+        throw new BadRequestException('课程默认时长无效');
+      }
+
+      const teacher = await tx.teacher.findUnique({ where: { id: input.teacherId }, select: { id: true, updatedAt: true } });
+      if (!teacher) throw new NotFoundException('教师不存在');
+
+      const duration = account.course.defaultDurationMinutes * 60_000;
+      const proposed = Array.from({ length: input.weeks }, (_, index) => {
+        const startsAt = new Date(input.firstStartsAt.getTime() + index * 7 * 24 * 60 * 60_000);
+        return { startsAt, endsAt: new Date(startsAt.getTime() + duration) };
+      });
+      const existing = await tx.lesson.findMany({
+        where: {
+          teacherId: input.teacherId,
+          status: { not: LessonStatus.CANCELLED },
+          startsAt: { lt: proposed.at(-1)!.endsAt },
+          endsAt: { gt: proposed[0]!.startsAt },
+        },
+        select: { id: true, startsAt: true, endsAt: true },
+      });
+
+      const conflicts: Array<Record<string, string>> = [];
+      for (const slot of proposed) {
+        for (const lesson of existing) {
+          if (lesson.startsAt < slot.endsAt && lesson.endsAt > slot.startsAt) {
+            conflicts.push({
+              startsAt: slot.startsAt.toISOString(),
+              endsAt: slot.endsAt.toISOString(),
+              conflictingLessonId: lesson.id,
+              conflictingStartsAt: lesson.startsAt.toISOString(),
+              conflictingEndsAt: lesson.endsAt.toISOString(),
+            });
+          }
+        }
+      }
+      for (let index = 0; index < proposed.length; index += 1) {
+        for (let otherIndex = index + 1; otherIndex < proposed.length; otherIndex += 1) {
+          const slot = proposed[index]!;
+          const other = proposed[otherIndex]!;
+          if (other.startsAt < slot.endsAt && other.endsAt > slot.startsAt) {
+            conflicts.push({
+              startsAt: other.startsAt.toISOString(),
+              endsAt: other.endsAt.toISOString(),
+              conflictingStartsAt: slot.startsAt.toISOString(),
+              conflictingEndsAt: slot.endsAt.toISOString(),
+            });
+          }
+        }
+      }
+      return {
+        normalizedCommand: {
+          accountId: input.accountId,
+          teacherId: input.teacherId,
+          firstStartsAt: new Date(input.firstStartsAt),
+          weeks: input.weeks,
+          ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+        },
+        lessons: proposed,
+        conflicts,
+        resourceVersions: {
+          accountId: account.id,
+          accountVersion: account.version,
+          teacherId: teacher.id,
+          teacherUpdatedAt: teacher.updatedAt,
+        },
+      };
+  }
 
   async createSingle(input: CreateSingleLessonInput, actor: AuthenticatedActor): Promise<LessonSummary> {
+    const preview = await this.previewSingle(input, actor);
+    return this.repository.transaction((tx) =>
+      this.createSingleInTransaction(tx, preview.normalizedCommand, actor),
+    );
+  }
+
+  async previewSingle(input: CreateSingleLessonInput, actor: AuthenticatedActor): Promise<SingleLessonPreview> {
     if (actor.role === 'TEACHER') {
       if (!actor.teacherId) throw new ForbiddenException('教师账号未关联教师资料');
       if (actor.teacherId !== input.teacherId) throw new ForbiddenException('不能为其他教师排课');
@@ -118,8 +292,78 @@ export class LessonsService {
     if (!account) throw new NotFoundException('学生课程账户不存在');
 
     const endsAt = this.addDuration(input.startsAt, account.course.defaultDurationMinutes);
-    await this.assertNoOverlap(input.teacherId, input.startsAt, endsAt);
-    const lesson = await this.repository.lesson.create({
+    const conflicts = await this.repository.lesson.findMany({
+      where: {
+        teacherId: input.teacherId,
+        status: { not: LessonStatus.CANCELLED },
+        startsAt: { lt: endsAt },
+        endsAt: { gt: input.startsAt },
+      },
+      select: { id: true, version: true, startsAt: true, endsAt: true },
+    });
+    if (conflicts.length > 0) throw new ConflictException('该教师在此时间段已有排课');
+    return {
+      normalizedCommand: {
+        accountId: input.accountId,
+        teacherId: input.teacherId,
+        startsAt: input.startsAt,
+        endsAt,
+        ...(input.note?.trim() ? { note: input.note.trim() } : {}),
+      },
+      resourceVersions: {
+        accountId: account.id,
+        accountVersion: account.version,
+        teacherId: input.teacherId,
+        conflicts: conflicts.map((lesson) => ({
+          id: lesson.id,
+          version: lesson.version,
+          startsAt: lesson.startsAt,
+          endsAt: lesson.endsAt,
+        })),
+      },
+    };
+  }
+
+  async createSingleInTransaction(
+    tx: Prisma.TransactionClient,
+    input: CreateSingleLessonInput & { endsAt: Date },
+    actor: AuthenticatedActor,
+    expected?: SingleLessonPreview['resourceVersions'],
+  ): Promise<LessonSummary> {
+    if (actor.role === 'TEACHER') {
+      if (!actor.teacherId || actor.teacherId !== input.teacherId) throw new ForbiddenException('不能为其他教师排课');
+    }
+    const lockedTeacher = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Teacher" WHERE "id" = ${input.teacherId} FOR UPDATE
+    `;
+    if (lockedTeacher.length === 0) throw new NotFoundException('授课教师不存在');
+    const lockedAccount = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "StudentCourseAccount" WHERE "id" = ${input.accountId} FOR UPDATE
+    `;
+    if (lockedAccount.length === 0) throw new NotFoundException('学生课程账户不存在');
+    const account = await tx.studentCourseAccount.findUnique({
+      where: { id: input.accountId },
+      include: { course: true, student: true },
+    });
+    if (!account) throw new NotFoundException('学生课程账户不存在');
+    if (expected && (account.id !== expected.accountId || account.version !== expected.accountVersion)) {
+      throw new ConflictException('排课资源已变化，请重新预览');
+    }
+    const endsAt = this.addDuration(input.startsAt, account.course.defaultDurationMinutes);
+    if (endsAt.getTime() !== input.endsAt.getTime()) throw new ConflictException('课程或排课资源已变化，请重新预览');
+    const conflicts = await tx.lesson.findMany({
+      where: {
+        teacherId: input.teacherId,
+        status: { not: LessonStatus.CANCELLED },
+        startsAt: { lt: endsAt },
+        endsAt: { gt: input.startsAt },
+      },
+      select: { id: true },
+    });
+    if (conflicts.length > 0 || (expected && expected.conflicts.length > 0)) {
+      throw new ConflictException('该教师在此时间段已有排课');
+    }
+    const lesson = await tx.lesson.create({
       data: {
         accountId: input.accountId,
         teacherId: input.teacherId,
@@ -188,6 +432,7 @@ export class LessonsService {
         if (lesson.status !== LessonStatus.SCHEDULED) throw new ConflictException('只有待上课排课可以确认');
         const completedAt = new Date();
         if (completedAt < lesson.endsAt) throw new ConflictException('课程结束后才能确认上课');
+        await this.periods.assertWritableForDate(completedAt, tx);
         if (!lesson.account.currentUnitPrice.gt(0)) throw new BadRequestException('学生课程账户单节收费金额必须大于零');
 
         await this.lockAccount(tx, lesson.accountId);
@@ -254,6 +499,7 @@ export class LessonsService {
         });
         if (existingReversal) throw new ConflictException('该课程确认已撤销');
         const occurredAt = new Date();
+        await this.periods.assertWritableForDate(occurredAt, tx);
         await tx.ledgerEntry.create({
           data: {
             accountId: consumption.accountId,

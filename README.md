@@ -35,20 +35,73 @@
 
 ## 当前状态
 
-阶段 0 已完成一组可运行的技术 Spike：双 PostgreSQL、Core Prisma 初始迁移、LangGraph
-`PostgresSaver` 初始化、Capability 骨架、内部只读工具、技术 Preview、SSE 协议、Core OpenAPI
-导出/生成链路和 Web AI 工作台骨架。阶段 1 已开始：Core 已具备店主/老师账号、bcrypt 登录、JWT、角色 Guard、
-店主创建老师接口，以及店主限定的学生、课程、学生课程账户基础资料接口（含课程默认价填充及个性化单价）。它仍不是可用业务系统：
-课程账户已具备不可变交费/赠送流水、余额查询和单次冲正；单节排课、调课、取消、确认上课和店主撤销确认已具备，确认会固定单价快照并以赠送优先写入不可变流水；按周批量排课、退款、关账、Confirm/Execute/Receipt 和真实 AI 调用仍未完成；Agent HTTP Run/Event 已有 SQL migration、repository 和运行时接线，
-真实 PostgreSQL 测试验证了 Run 进入 `waiting_for_input` 后正常关闭旧实例，再由新实例恢复历史并 Resume。
-当前 Events 接口可在历史补发后持续推送本实例事件，并支持心跳、断开清理和 `Last-Event-ID`；跨实例需重连
-后从 PostgreSQL 补读。租约数据层已经实现，但执行 worker、续租心跳、崩溃自动恢复和公开 Gateway 仍未完成，
-因此这不代表完整业务系统已完成。
+阶段 0 基础设施和当前 MVP 业务链路已经可以运行：双 PostgreSQL、Core Prisma 迁移、LangGraph
+`PostgresSaver`、Capability、内部只读工具、公开 Assistant Gateway、SSE、Core OpenAPI 导出/生成链路和
+Web AI 工作台均已落地。Core 已具备店主/老师账号、JWT/角色鉴权、学生、课程、课程账户、交费、赠送、单节/批量排课、
+调课、请假、课消、退款、工资、手工收支、关账/重开和月度报表；业务 Preview/Confirm 已覆盖排课、交费、赠送和最终退费，
+Confirm 由浏览器携带用户登录态直接调用 Core。
+
+Agent 的 HTTP Start 只创建 `queued` Run，Run Worker 负责领取、执行、续租、过期回收和带租约 fencing 的终态写入；
+Web 已接通登录、Assistant Run、SSE、Workspace 和 Preview 确认，并提供学生、排课、月度报表结构化页面。
+Compose 已包含 Core、Agent、Web 和两套 PostgreSQL，Agent 默认启用 Worker、关闭 Live Model。
+
+当前仍需单独验收或建设：Capability 的 `role`/`teacherId`、跨 Agent 实例实时广播、共享/持久化 nonce 防重放、完整浏览器/HTTP
+业务 smoke、真实 Live Model 验收，以及生产部署、密钥轮换和限流等非 MVP 能力。退款、工资、手工收支、关账和 Preview/Confirm
+虽已有代码与测试，但本次文档同步不把跳过的真实 PostgreSQL 集成测试或未执行的浏览器 E2E 计为全部验收通过。
 
 精确的环境变量名、启动顺序、已实测项和待验收项见
 [`docs/阶段0-开发运行手册.md`](./docs/阶段0-开发运行手册.md)。
 
 ## 快速开始
+
+### 完整本地 Docker 测试环境
+
+需要 Docker Compose 和可访问 npm 镜像源。仓库根目录执行：
+
+```bash
+npm run docker:up
+docker compose ps
+```
+
+Compose 会构建并启动 Core、Agent Runtime、Web 和两套 PostgreSQL。Core 等待 Core PostgreSQL 健康后自动执行 `prisma migrate deploy` 再启动；Agent 等待自己的 PostgreSQL 和 Core 健康后，依次执行 Agent Runtime SQL migration、官方 `PostgresSaver.setup()`，启动 Run Worker 后再提供服务。Web 由 Nginx 提供静态页面，并将 `/api/*` 请求转发到 Core。
+
+服务就绪后：
+
+- Web：<http://localhost:5173>
+- Core 健康检查：<http://localhost:3000/api/health>
+- Core API 文档：<http://localhost:3000/api/docs>
+- Agent 健康检查：<http://localhost:3100/health>
+- Core PostgreSQL：`localhost:5433`（数据库 `piano_core`）
+- Agent PostgreSQL：`localhost:5434`（数据库 `piano_agent`）
+
+本地首次创建店主账号（密码至少 12 位）：
+
+```bash
+printf '店主用户名: '
+IFS= read -r OWNER_BOOTSTRAP_USERNAME
+printf '店主密码（输入不回显）: '
+IFS= read -rs OWNER_BOOTSTRAP_PASSWORD
+printf '\n'
+export OWNER_BOOTSTRAP_USERNAME OWNER_BOOTSTRAP_PASSWORD
+docker compose exec \
+  -e OWNER_BOOTSTRAP_USERNAME \
+  -e OWNER_BOOTSTRAP_PASSWORD \
+  core npm run auth:bootstrap:owner -w @piano/core-api
+unset OWNER_BOOTSTRAP_USERNAME OWNER_BOOTSTRAP_PASSWORD
+```
+
+按提示输入用户名和至少 12 位密码。店主创建成功后，打开 <http://localhost:3000/api/docs>，调用 `POST /api/auth/login` 获取 `accessToken`，再通过 Swagger `Authorize`（如当前页面提供）调用 `GET /api/auth/me` 和店主受限接口；完整操作步骤见[阶段 0 开发运行手册](docs/阶段0-开发运行手册.md#swagger-登录与受限接口测试)。用户名已存在表示数据库中已有该账号。以上数据库密码、JWT/HMAC 密钥均为 Compose 内的本地开发值，只用于隔离的本机测试，不得用于共享、预发布或生产环境。每次 Core 容器启动会生成临时 Ed25519 Capability 私钥。AI 默认关闭，不需要模型密钥。
+
+查看日志或停止容器：
+
+```bash
+npm run docker:logs
+npm run docker:down
+```
+
+`docker:down` 会保留 PostgreSQL 数据卷；需要删除数据卷时，需明确执行 `docker compose down --volumes`。
+
+### 不使用 Docker 的本机开发
 
 ```bash
 npm install
@@ -64,12 +117,11 @@ npm run check
 `apps/agent-runtime/.env.example`；Core 的 Capability 私钥变量名是
 `CAPABILITY_SIGNING_PRIVATE_KEY_B64`，且必须设置独立的 `JWT_SIGNING_SECRET`。首次初始化店主时，临时设置
 `OWNER_BOOTSTRAP_USERNAME` 与 `OWNER_BOOTSTRAP_PASSWORD`，执行 `npm run auth:bootstrap:owner -w @piano/core-api`，
-成功后从环境中移除这两个 bootstrap 变量。然后执行
-`npm run agent:checkpoint:setup` 初始化 Agent PostgreSQL 的官方检查点表。
+成功后从环境中移除这两个 bootstrap 变量。Docker 启动流程会自动执行上述 Core/Agent 数据库初始化步骤；本机开发需手动完成。
 
 当前探活路径为 Core 的 `GET http://localhost:3000/api/health`、助手聚合状态
 `GET http://localhost:3000/api/assistant/status` 和 Agent 的 `GET http://localhost:3100/health`。
-浏览器可通过 Core 的 `POST /api/auth/login` 登录，但尚不能创建 Assistant Run；Web 目前只接通聚合状态检查与结构化降级入口。
+浏览器可通过 Core 的 `POST /api/auth/login` 登录，并通过公开 Gateway 创建 Assistant Run、订阅 SSE；写入类动作仍须在 Workspace 中确认后由浏览器直接调用 Core。Web 的结构化页面与 AI 工作台都读取真实 API，不使用演示业务数据。
 
 ## 约定
 

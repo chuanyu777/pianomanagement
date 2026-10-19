@@ -12,8 +12,13 @@ import {
   verifySignedInternalRequest,
 } from '@piano/assistant-protocol/internal-auth';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildServer } from '../src/server.js';
+import { buildServer as createServer } from '../src/server.js';
 import { RunEventHub } from '../src/events/run-event-hub.js';
+import { createSpikeGraph } from '../src/graph/spike-graph.js';
+import { createBusinessRunExecutor } from '../src/worker/run-executor.js';
+import { RunWorker } from '../src/worker/run-worker.js';
+import { CoreToolClient } from '../src/tools/core-tool-client.js';
+import type { AgentRuntimeRepository } from '../src/persistence/repository.js';
 import { createTestRepository } from './test-repository.js';
 
 const secret = 'stage-0-test-secret-012345678901234567890123';
@@ -40,6 +45,11 @@ function signedHeaders(
 
 const config = {
   AGENT_PORT: 3100,
+  AGENT_WORKER_ENABLED: true,
+  AGENT_WORKER_LEASE_DURATION_MS: 1_000,
+  AGENT_WORKER_RENEW_INTERVAL_MS: 100,
+  AGENT_WORKER_POLL_INTERVAL_MS: 1,
+  AGENT_WORKER_RECOVERY_BATCH_SIZE: 20,
   AI_ENABLED: false,
   AI_PROVIDER: '',
   AI_MODEL: '',
@@ -55,20 +65,79 @@ const config = {
   AI_TRACING_ENABLED: false,
 } as const;
 
-const statusResponse = {
+function buildServer(input: {
+  config: typeof config;
+  checkpointer: MemorySaver;
+  repository: AgentRuntimeRepository;
+  eventHub?: RunEventHub;
+}) {
+  const eventHub = input.eventHub ?? new RunEventHub();
+  const coreTools = new CoreToolClient(
+    input.config.CORE_INTERNAL_API_URL,
+    input.config.AI_REQUEST_TIMEOUT_MS,
+    input.config.INTERNAL_SERVICE_SECRET,
+  );
+  const worker = new RunWorker({
+    repository: input.repository,
+    execute: createBusinessRunExecutor({
+      checkpointer: input.checkpointer,
+      coreTools,
+      runTimeoutMs: input.config.AI_RUN_TIMEOUT_MS,
+    }),
+    leaseDurationMs: input.config.AGENT_WORKER_LEASE_DURATION_MS,
+    renewIntervalMs: input.config.AGENT_WORKER_RENEW_INTERVAL_MS,
+    pollIntervalMs: input.config.AGENT_WORKER_POLL_INTERVAL_MS,
+    recoveryBatchSize: input.config.AGENT_WORKER_RECOVERY_BATCH_SIZE,
+    onEvent: (runId, event) => eventHub.publish(runId, event),
+    onError: () => undefined,
+  });
+  return createServer({ ...input, eventHub, worker });
+}
+
+const dashboardResponse = {
   status: 200,
   ok: true,
   json: async () => ({
-    status: 'available',
-    businessTimezone: 'Asia/Shanghai',
-    serverTime: '2026-10-16T00:00:00.000Z',
+    businessDate: '2026-10-17',
+    highlights: ['今日排课 4 节'],
   }),
 };
+
+async function seedLegacyWaitingRun(input: {
+  checkpointer: MemorySaver;
+  repository: ReturnType<typeof createTestRepository>;
+  runId?: string;
+  threadId?: string;
+}) {
+  const seededRunId = input.runId ?? runId;
+  const seededThreadId = input.threadId ?? threadId;
+  await input.repository.createRun({
+    runId: seededRunId,
+    threadId: seededThreadId,
+    userMessage: '旧版等待中的运行',
+  });
+  const graph = createSpikeGraph({
+    checkpointer: input.checkpointer,
+    fetchSystemStatus: async () => ({
+      status: 'available',
+      businessTimezone: 'Asia/Shanghai',
+      serverTime: '2026-10-16T00:00:00.000Z',
+    }),
+  });
+  await graph.invoke(
+    { runId: seededRunId, threadId: seededThreadId, userMessage: '旧版等待中的运行' },
+    { configurable: { thread_id: `${seededThreadId}:${seededRunId}` } },
+  );
+  await input.repository.updateRunWithEvent(
+    { runId: seededRunId, status: 'waiting_for_input' },
+    { type: 'clarification.requested', question: '历史兼容确认' },
+  );
+}
 
 function readUntilSseEvent(response: IncomingMessage, eventName: string): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = '';
-    const timeout = setTimeout(() => finish(new Error('SSE event timeout')), 1_000);
+    const timeout = setTimeout(() => finish(new Error(`SSE event timeout: ${eventName}`)), 1_000);
     const onData = (chunk: Buffer) => {
       body += chunk.toString('utf8');
       if (body.includes(`event: ${eventName}`)) finish(undefined, body);
@@ -138,8 +207,8 @@ describe('agent runtime Fastify server', () => {
   });
 
   it('rejects a replayed nonce before executing the graph again', async () => {
-    const fetchSystemStatus = vi.fn().mockResolvedValue(statusResponse);
-    vi.stubGlobal('fetch', fetchSystemStatus);
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(dashboardResponse);
+    vi.stubGlobal('fetch', fetchDashboardSummary);
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
     const path = '/internal/assistant/runs/start';
     const body = { runId, threadId, userMessage: '重放验证' };
@@ -150,7 +219,7 @@ describe('agent runtime Fastify server', () => {
 
     expect(first.statusCode).toBe(200);
     expect(replay.statusCode).toBe(401);
-    expect(fetchSystemStatus).toHaveBeenCalledTimes(1);
+    expect(fetchDashboardSummary).toHaveBeenCalledTimes(1);
     await app.close();
   });
 
@@ -167,7 +236,7 @@ describe('agent runtime Fastify server', () => {
   });
 
   it('rejects an idempotent retry whose request content changed', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(dashboardResponse));
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
     const path = '/internal/assistant/runs/start';
     const original = { runId, threadId, userMessage: '原始消息', clientRequestId: 'request-1' };
@@ -191,12 +260,14 @@ describe('agent runtime Fastify server', () => {
     await app.close();
   });
 
-  it('streams waiting and completed SSE events while resuming without a second read', async () => {
-    const fetchSystemStatus = vi.fn().mockResolvedValue(statusResponse);
-    vi.stubGlobal('fetch', fetchSystemStatus);
-    const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
+  it('queues a read-only query and lets the Worker persist its answer and terminal SSE event', async () => {
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(dashboardResponse);
+    vi.stubGlobal('fetch', fetchDashboardSummary);
+    const repository = createTestRepository();
+    const appendMessage = vi.spyOn(repository, 'appendMessage');
+    const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
 
-    const startBody = { runId, threadId, userMessage: '阶段 0' };
+    const startBody = { runId, threadId, userMessage: '今天有几节课？' };
     const start = await app.inject({
       method: 'POST',
       url: '/internal/assistant/runs/start',
@@ -204,10 +275,19 @@ describe('agent runtime Fastify server', () => {
       payload: startBody,
     });
     expect(start.statusCode).toBe(200);
-    expect(start.json()).toMatchObject({ runId, threadId, status: 'waiting_for_input' });
-    expect(fetchSystemStatus).toHaveBeenCalledTimes(1);
-    const [coreUrl, coreInit] = fetchSystemStatus.mock.calls[0]!;
+    expect(start.json()).toMatchObject({ runId, threadId, status: 'queued' });
+    await vi.waitFor(async () => expect((await repository.findRun(runId))?.status).toBe('completed'));
+    expect(fetchDashboardSummary).toHaveBeenCalledTimes(1);
+    expect(appendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      threadId,
+      runId,
+      role: 'assistant',
+      content: '经营摘要（2026-10-17）：今日排课 4 节',
+      leaseOwnerToken: expect.any(String),
+    }));
+    const [coreUrl, coreInit] = fetchDashboardSummary.mock.calls[0]!;
     const coreHeaders = coreInit.headers as Record<string, string>;
+    expect(new URL(coreUrl).pathname).toBe('/tools/dashboard-summary');
     expect(
       verifySignedInternalRequest({
         secret,
@@ -221,17 +301,7 @@ describe('agent runtime Fastify server', () => {
         },
       }),
     ).toBe(true);
-
-    const resumeBody = { threadId, input: { approved: true } };
-    const resume = await app.inject({
-      method: 'POST',
-      url: `/internal/assistant/runs/${runId}/resume`,
-      headers: signedHeaders('POST', `/internal/assistant/runs/${runId}/resume`, resumeBody),
-      payload: resumeBody,
-    });
-    expect(resume.statusCode).toBe(200);
-    expect(resume.json()).toMatchObject({ runId, threadId, status: 'completed' });
-    expect(fetchSystemStatus).toHaveBeenCalledTimes(1);
+    expect(coreHeaders.authorization).toBe(`Bearer ${capability}`);
 
     const completedEvents = await app.inject({
       method: 'GET',
@@ -239,8 +309,19 @@ describe('agent runtime Fastify server', () => {
       headers: signedHeaders('GET', `/internal/assistant/runs/${runId}/events`),
     });
     expect(completedEvents.body).toContain('event: assistant.delta');
+    expect(completedEvents.body).toContain('event: workspace.replace');
+    expect(completedEvents.body).toContain('"type":"metric-grid"');
+    expect(completedEvents.body).toContain('"value":"今日排课 4 节"');
     expect(completedEvents.body).toContain('event: run.completed');
+    expect(completedEvents.body).not.toContain('event: clarification.requested');
+    expect(completedEvents.body.indexOf('event: workspace.replace')).toBeLessThan(
+      completedEvents.body.indexOf('event: assistant.delta'),
+    );
+    expect(completedEvents.body.indexOf('event: assistant.delta')).toBeLessThan(
+      completedEvents.body.indexOf('event: run.completed'),
+    );
 
+    const resumeBody = { threadId, input: { approved: true } };
     const repeatedResume = await app.inject({
       method: 'POST',
       url: `/internal/assistant/runs/${runId}/resume`,
@@ -260,7 +341,14 @@ describe('agent runtime Fastify server', () => {
   });
 
   it('keeps an SSE connection open after history replay and pushes events created later', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
+    let resolveDashboard: ((value: typeof dashboardResponse) => void) | undefined;
+    let signalFetchStarted: (() => void) | undefined;
+    const fetchStarted = new Promise<void>((resolve) => { signalFetchStarted = resolve; });
+    const dashboardPending = new Promise<typeof dashboardResponse>((resolve) => { resolveDashboard = resolve; });
+    vi.stubGlobal('fetch', vi.fn(() => {
+      signalFetchStarted?.();
+      return dashboardPending;
+    }));
     const repository = createTestRepository();
     const eventHub = new RunEventHub();
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository, eventHub });
@@ -269,12 +357,13 @@ describe('agent runtime Fastify server', () => {
     if (!address || typeof address === 'string') throw new Error('测试服务未监听 TCP 端口');
 
     const startBody = { runId, threadId, userMessage: '实时 SSE' };
-    await app.inject({
+    const startPromise = app.inject({
       method: 'POST',
       url: '/internal/assistant/runs/start',
       headers: signedHeaders('POST', '/internal/assistant/runs/start', startBody),
       payload: startBody,
     });
+    await fetchStarted;
 
     const eventsPath = `/internal/assistant/runs/${runId}/events`;
     const response = await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
@@ -290,21 +379,14 @@ describe('agent runtime Fastify server', () => {
     expect(response.statusCode).toBe(200);
 
     try {
-      const history = await readUntilSseEvent(response, 'clarification.requested');
-      expect(history).toContain('event: clarification.requested');
+      const history = await readUntilSseEvent(response, 'run.started');
+      expect(history).toContain('event: run.started');
       expect(response.complete).toBe(false);
-
-      const resumeBody = { threadId, input: { approved: true } };
-      const resumePath = `/internal/assistant/runs/${runId}/resume`;
-      const resumeResponse = await app.inject({
-        method: 'POST',
-        url: resumePath,
-        headers: signedHeaders('POST', resumePath, resumeBody),
-        payload: resumeBody,
-      });
-      expect(resumeResponse.statusCode).toBe(200);
-
-      const pushed = await readUntilSseEvent(response, 'run.completed');
+      const terminalEvent = readUntilSseEvent(response, 'run.completed');
+      resolveDashboard?.(dashboardResponse);
+      await startPromise;
+      const pushed = await terminalEvent;
+      expect(pushed).toContain('event: assistant.delta');
       expect(pushed).toContain('event: run.completed');
     } finally {
       response.destroy();
@@ -315,7 +397,14 @@ describe('agent runtime Fastify server', () => {
   });
 
   it('removes a live SSE subscription when the client disconnects', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
+    let resolveDashboard: ((value: typeof dashboardResponse) => void) | undefined;
+    let signalFetchStarted: (() => void) | undefined;
+    const fetchStarted = new Promise<void>((resolve) => { signalFetchStarted = resolve; });
+    const dashboardPending = new Promise<typeof dashboardResponse>((resolve) => { resolveDashboard = resolve; });
+    vi.stubGlobal('fetch', vi.fn(() => {
+      signalFetchStarted?.();
+      return dashboardPending;
+    }));
     const eventHub = new RunEventHub();
     const app = buildServer({
       config,
@@ -329,12 +418,13 @@ describe('agent runtime Fastify server', () => {
 
     try {
       const startBody = { runId, threadId, userMessage: '断开清理' };
-      await app.inject({
+      const startPromise = app.inject({
         method: 'POST',
         url: '/internal/assistant/runs/start',
         headers: signedHeaders('POST', '/internal/assistant/runs/start', startBody),
         payload: startBody,
       });
+      await fetchStarted;
       const eventsPath = `/internal/assistant/runs/${runId}/events`;
       const response = await new Promise<IncomingMessage>((resolve, reject) => {
         const req = httpRequest({
@@ -346,7 +436,7 @@ describe('agent runtime Fastify server', () => {
         req.once('error', reject);
         req.end();
       });
-      await readUntilSseEvent(response, 'clarification.requested');
+      await readUntilSseEvent(response, 'run.started');
       expect(eventHub.subscriberCount).toBe(1);
 
       const disconnected = once(response, 'close');
@@ -354,25 +444,18 @@ describe('agent runtime Fastify server', () => {
       await disconnected;
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(eventHub.subscriberCount).toBe(0);
+      resolveDashboard?.(dashboardResponse);
+      await startPromise;
     } finally {
       await app.close();
     }
   });
 
   it('restores run status and SSE history through a new server instance', async () => {
-    const fetchSystemStatus = vi.fn().mockResolvedValue(statusResponse);
-    vi.stubGlobal('fetch', fetchSystemStatus);
     const repository = createTestRepository();
     const checkpointer = new MemorySaver();
+    await seedLegacyWaitingRun({ checkpointer, repository });
     const firstApp = buildServer({ config, checkpointer, repository });
-
-    const restartBody = { runId, threadId, userMessage: '重启后恢复' };
-    await firstApp.inject({
-      method: 'POST',
-      url: '/internal/assistant/runs/start',
-      headers: signedHeaders('POST', '/internal/assistant/runs/start', restartBody),
-      payload: restartBody,
-    });
     await firstApp.close();
 
     const secondApp = buildServer({ config, checkpointer, repository });
@@ -406,22 +489,16 @@ describe('agent runtime Fastify server', () => {
     });
     expect(resumedEvents.statusCode).toBe(200);
     expect(resumedEvents.body).not.toContain('id: 1');
-    expect(resumedEvents.body).toContain('event: clarification.requested');
+    expect(resumedEvents.body).toContain('event: assistant.delta');
     expect(resumedEvents.body).toContain('event: run.completed');
-    expect(fetchSystemStatus).toHaveBeenCalledTimes(1);
     await secondApp.close();
   });
 
   it('claims a waiting run once when resume requests arrive concurrently', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
-    const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
-    const startBody = { runId, threadId, userMessage: '并发恢复' };
-    await app.inject({
-      method: 'POST',
-      url: '/internal/assistant/runs/start',
-      headers: signedHeaders('POST', '/internal/assistant/runs/start', startBody),
-      payload: startBody,
-    });
+    const checkpointer = new MemorySaver();
+    const repository = createTestRepository();
+    await seedLegacyWaitingRun({ checkpointer, repository });
+    const app = buildServer({ config, checkpointer, repository });
     const resumePath = `/internal/assistant/runs/${runId}/resume`;
     const resumeBody = { threadId, input: { approved: true } };
 
@@ -451,62 +528,8 @@ describe('agent runtime Fastify server', () => {
     await app.close();
   });
 
-  it('persists clarification before exposing waiting_for_input to a concurrent resume', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
-    const baseRepository = createTestRepository();
-    let exposeWaiting: (() => void) | undefined;
-    let releaseWaiting: (() => void) | undefined;
-    const waitingVisible = new Promise<void>((resolve) => {
-      exposeWaiting = resolve;
-    });
-    const waitingGate = new Promise<void>((resolve) => {
-      releaseWaiting = resolve;
-    });
-    const repository = {
-      ...baseRepository,
-      async updateRunWithEvent(
-        input: Parameters<typeof baseRepository.updateRunWithEvent>[0],
-        event: Parameters<typeof baseRepository.updateRunWithEvent>[1],
-      ) {
-        const updated = await baseRepository.updateRunWithEvent(input, event);
-        if (input.status === 'waiting_for_input') {
-          exposeWaiting?.();
-          await waitingGate;
-        }
-        return updated;
-      },
-    };
-    const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
-    const startBody = { runId, threadId, userMessage: '并发状态顺序' };
-    const startPromise = app.inject({
-      method: 'POST',
-      url: '/internal/assistant/runs/start',
-      headers: signedHeaders('POST', '/internal/assistant/runs/start', startBody),
-      payload: startBody,
-    });
-
-    await waitingVisible;
-    const resumeBody = { threadId, input: { approved: true } };
-    const resumePath = `/internal/assistant/runs/${runId}/resume`;
-    const resume = await app.inject({
-      method: 'POST',
-      url: resumePath,
-      headers: signedHeaders('POST', resumePath, resumeBody),
-      payload: resumeBody,
-    });
-    releaseWaiting?.();
-    await startPromise;
-
-    expect(resume.statusCode).toBe(200);
-    const eventTypes = (await baseRepository.listEvents(runId)).map((event) => event.event.type);
-    expect(eventTypes.indexOf('clarification.requested')).toBeLessThan(
-      eventTypes.indexOf('run.completed'),
-    );
-    await app.close();
-  });
-
   it('does not publish run.completed when the completed state cannot be persisted', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(dashboardResponse));
     const baseRepository = createTestRepository();
     const repository = {
       ...baseRepository,
@@ -520,22 +543,15 @@ describe('agent runtime Fastify server', () => {
     };
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
     const startBody = { runId, threadId, userMessage: '终态一致性' };
-    await app.inject({
+    const start = await app.inject({
       method: 'POST',
       url: '/internal/assistant/runs/start',
       headers: signedHeaders('POST', '/internal/assistant/runs/start', startBody),
       payload: startBody,
     });
-    const resumeBody = { threadId, input: { approved: true } };
-    const resumePath = `/internal/assistant/runs/${runId}/resume`;
-    const resume = await app.inject({
-      method: 'POST',
-      url: resumePath,
-      headers: signedHeaders('POST', resumePath, resumeBody),
-      payload: resumeBody,
-    });
-
-    expect(resume.statusCode).toBe(500);
+    expect(start.statusCode).toBe(200);
+    expect(start.json()).toMatchObject({ runId, threadId, status: 'queued' });
+    await vi.waitFor(async () => expect((await baseRepository.findRun(runId))?.status).toBe('failed'));
     const eventTypes = (await baseRepository.listEvents(runId)).map((event) => event.event.type);
     expect(eventTypes).not.toContain('run.completed');
     expect(eventTypes).toContain('run.failed');
@@ -545,7 +561,8 @@ describe('agent runtime Fastify server', () => {
 
   it('returns a generic 500 response for a tool failure', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('internal tool details')));
-    const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
+    const repository = createTestRepository();
+    const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
 
     const failureBody = { runId, threadId, userMessage: '阶段 0' };
     const response = await app.inject({
@@ -555,15 +572,16 @@ describe('agent runtime Fastify server', () => {
       payload: failureBody,
     });
 
-    expect(response.statusCode).toBe(500);
-    expect(response.json()).toEqual({ message: 'Agent Runtime 内部错误' });
-    expect(response.body).not.toContain('internal tool details');
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ runId, threadId, status: 'queued' });
+    await vi.waitFor(async () => expect((await repository.findRun(runId))?.status).toBe('failed'));
+    expect(JSON.stringify(await repository.findRun(runId))).not.toContain('internal tool details');
     await app.close();
   });
 
   it('rejects a resume request for an unknown run without touching the graph', async () => {
-    const fetchSystemStatus = vi.fn().mockResolvedValue(statusResponse);
-    vi.stubGlobal('fetch', fetchSystemStatus);
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(dashboardResponse);
+    vi.stubGlobal('fetch', fetchDashboardSummary);
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
 
     const knownBody = { runId, threadId, userMessage: '阶段 0' };
@@ -584,12 +602,12 @@ describe('agent runtime Fastify server', () => {
 
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ message: '运行不存在' });
-    expect(fetchSystemStatus).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(fetchDashboardSummary).toHaveBeenCalledTimes(1));
     await app.close();
   });
 
   it('rejects an SSE cursor outside the PostgreSQL bigint range', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(dashboardResponse));
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
     const startBody = { runId, threadId, userMessage: '游标验证' };
     await app.inject({

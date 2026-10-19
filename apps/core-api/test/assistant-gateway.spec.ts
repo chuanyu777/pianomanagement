@@ -52,7 +52,7 @@ describe('AssistantGatewayService', () => {
       expect(payload.runId).toBe(input.runId);
       expect(payload.threadId).toBe(threadId);
       expect(payload.jti).toMatch(/^[0-9a-f-]{36}$/);
-      expect(payload.permissions).toEqual(['READ']);
+      expect(payload.permissions).toEqual(['READ', 'PREVIEW_L1', 'PREVIEW_L2']);
       expect(payload.permissions).not.toContain('confirm');
       expect(payload.permissions).not.toContain('execute');
       expect(payload.exp - payload.iat).toBe(300);
@@ -90,7 +90,7 @@ describe('AssistantGatewayService', () => {
       expect(payload.sub).toBe(userId);
       expect(payload.runId).toBe(runId);
       expect(payload.threadId).toBe(threadId);
-      expect(payload.permissions).toEqual(['READ']);
+      expect(payload.permissions).toEqual(['READ', 'PREVIEW_L1', 'PREVIEW_L2']);
       expect(payload.exp - payload.iat).toBe(300);
       return { runId, threadId, status: 'running' as const };
     });
@@ -271,14 +271,18 @@ describe('Core Gateway ↔ Agent Runtime contract', () => {
   it('accepts the Gateway client start/resume/events requests at the Runtime interface', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () =>
-        response({
+      vi.fn(async (input: string | URL | Request) => {
+        if (String(input).includes('/tools/dashboard-summary')) {
+          return response({ businessDate: '2026-10-16', highlights: [] });
+        }
+        return response({
           status: 'available',
           businessTimezone: 'Asia/Shanghai',
           serverTime: '2026-10-16T00:00:00.000Z',
-        }),
-      ),
+        });
+      }),
     );
+    const repository = createTestRepository();
     const runtime = buildServer({
       config: {
         AGENT_PORT: 3100,
@@ -297,7 +301,7 @@ describe('Core Gateway ↔ Agent Runtime contract', () => {
         AI_TRACING_ENABLED: false,
       },
       checkpointer: new MemorySaver(),
-      repository: createTestRepository(),
+      repository,
     });
 
     const fetchRuntime = vi.fn(async (url: string, init?: RequestInit) => {
@@ -331,7 +335,14 @@ describe('Core Gateway ↔ Agent Runtime contract', () => {
       message: '阶段 0',
       capability: 'short-lived-capability',
     });
-    expect(started).toEqual({ runId, threadId, status: 'waiting_for_input' });
+    expect(started).toEqual({ runId, threadId, status: 'queued' });
+
+    await repository.appendEvent(runId, { type: 'run.started', runId, threadId });
+    await repository.appendEvent(runId, { type: 'assistant.delta', text: '技术验证已完成。' });
+    await repository.updateRunWithEvent(
+      { runId, status: 'completed' },
+      { type: 'run.completed', runId },
+    );
 
     const resumed = await client.resume({
       runId,
@@ -347,7 +358,6 @@ describe('Core Gateway ↔ Agent Runtime contract', () => {
       lastEventId: '1',
     });
     const streamText = await new Response(stream.body).text();
-    expect(streamText).toContain('event: clarification.requested');
     expect(streamText).toContain('event: assistant.delta');
     expect(streamText).toContain('event: run.completed');
 

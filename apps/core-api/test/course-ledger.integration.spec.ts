@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PaymentChannel, Prisma, UserRole } from '../src/generated/prisma/client.js';
 import { CourseLedgerService } from '../src/modules/course-ledger/course-ledger.service.js';
+import { PeriodsService } from '../src/modules/periods/periods.service.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 
 const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
@@ -9,7 +10,7 @@ const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
 if (hasDatabase) {
   describe('CourseLedgerService with real PostgreSQL', () => {
     const prisma = new PrismaService();
-    const service = new CourseLedgerService(prisma);
+    const service = new CourseLedgerService(prisma, new PeriodsService(prisma));
     const userIds: string[] = [];
     const studentIds: string[] = [];
     const courseIds: string[] = [];

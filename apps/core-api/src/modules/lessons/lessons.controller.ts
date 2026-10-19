@@ -8,6 +8,7 @@ import { RolesGuard } from '../auth/roles.guard.js';
 import { LessonsService } from './lessons.service.js';
 import {
   CancelLessonBody,
+  CreateBatchLessonsBody,
   CompleteLessonBody,
   CreateLessonBody,
   LessonResponse,
@@ -21,6 +22,13 @@ const CreateSchema = z.object({
   accountId: IdSchema,
   teacherId: IdSchema.optional(),
   startsAt: DateTimeSchema,
+  note: z.string().trim().min(1).max(2000).optional(),
+}).strict();
+const CreateBatchSchema = z.object({
+  accountId: IdSchema,
+  teacherId: IdSchema,
+  firstStartsAt: DateTimeSchema,
+  weeks: z.number().int().min(1).max(52),
   note: z.string().trim().min(1).max(2000).optional(),
 }).strict();
 const RescheduleSchema = z.object({ startsAt: DateTimeSchema }).strict();
@@ -61,6 +69,22 @@ export class LessonsController {
       startsAt: parsed.data.startsAt,
       ...(parsed.data.note !== undefined ? { note: parsed.data.note } : {}),
     }, actor);
+  }
+
+  @Post('batch')
+  @Roles(UserRole.OWNER)
+  @ApiBody({ type: CreateBatchLessonsBody })
+  @ApiCreatedResponse({ type: LessonResponse, isArray: true })
+  createBatch(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    const parsed = CreateBatchSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    return this.lessons.createBatch({
+      accountId: parsed.data.accountId,
+      teacherId: parsed.data.teacherId,
+      firstStartsAt: parsed.data.firstStartsAt,
+      weeks: parsed.data.weeks,
+      ...(parsed.data.note !== undefined ? { note: parsed.data.note } : {}),
+    }, actorFrom(request));
   }
 
   @Get()

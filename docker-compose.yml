@@ -31,6 +31,106 @@ services:
     volumes:
       - agent-db-data:/var/lib/postgresql/data
 
+  core:
+    build:
+      context: .
+      dockerfile: apps/core-api/Dockerfile
+    environment:
+      CORE_DATABASE_URL: postgresql://piano_core:piano_core_dev@core-db:5432/piano_core
+      CORE_PORT: 3000
+      AGENT_RUNTIME_URL: http://agent:3100
+      INTERNAL_SERVICE_SECRET: piano-local-only-internal-secret-change-me
+      JWT_SIGNING_SECRET: piano-local-only-jwt-secret-change-me-2026
+      JWT_ACCESS_TOKEN_TTL_SECONDS: 900
+      AGENT_REQUEST_TIMEOUT_MS: 15000
+      AGENT_STREAM_IDLE_TIMEOUT_MS: 30000
+      AGENT_STATUS_TIMEOUT_MS: 2000
+    ports:
+      - "3000:3000"
+    depends_on:
+      core-db:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        export CAPABILITY_SIGNING_PRIVATE_KEY_B64="$$(node -e 'const c=require("node:crypto");process.stdout.write(Buffer.from(c.generateKeyPairSync("ed25519").privateKey.export({type:"pkcs8",format:"pem"})).toString("base64"))')"
+        && npm run db:migrate:deploy -w @piano/core-api
+        && npm run start -w @piano/core-api
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  agent:
+    build:
+      context: .
+      dockerfile: apps/agent-runtime/Dockerfile
+    environment:
+      AGENT_PORT: 3100
+      AGENT_WORKER_ENABLED: "true"
+      AGENT_WORKER_LEASE_DURATION_MS: 30000
+      AGENT_WORKER_RENEW_INTERVAL_MS: 10000
+      AGENT_WORKER_POLL_INTERVAL_MS: 1000
+      AGENT_WORKER_RECOVERY_BATCH_SIZE: 100
+      AI_ENABLED: "false"
+      AGENT_DATABASE_URL: postgresql://piano_agent:piano_agent_dev@agent-db:5432/piano_agent
+      CORE_INTERNAL_API_URL: http://core:3000/api/internal
+      INTERNAL_SERVICE_SECRET: piano-local-only-internal-secret-change-me
+      AI_REQUEST_TIMEOUT_MS: 15000
+      AI_RUN_TIMEOUT_MS: 60000
+      AI_MAX_STEPS: 8
+      AI_MAX_TOOL_CALLS: 6
+      AI_MAX_OUTPUT_TOKENS: 1200
+      AI_TRACING_ENABLED: "false"
+    ports:
+      - "3100:3100"
+    depends_on:
+      agent-db:
+        condition: service_healthy
+      core:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        npm run db:migrate -w @piano/agent-runtime
+        && npm run checkpoint:setup -w @piano/agent-runtime
+        && npm run start -w @piano/agent-runtime
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3100/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      core:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   core-db-data:
   agent-db-data:

@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCheckpointer } from '../src/checkpoint/checkpointer.js';
 import { createAgentRuntimeRepository } from '../src/persistence/repository.js';
 import { buildServer } from '../src/server.js';
+import { RunEventHub } from '../src/events/run-event-hub.js';
+import { CoreToolClient } from '../src/tools/core-tool-client.js';
+import { createBusinessRunExecutor } from '../src/worker/run-executor.js';
+import { RunWorker } from '../src/worker/run-worker.js';
 
 const databaseUrl = process.env.AGENT_DATABASE_URL;
 const test = databaseUrl ? it : it.skip;
@@ -17,6 +21,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
     const runId = crypto.randomUUID();
     const threadId = crypto.randomUUID();
     const clientRequestId = crypto.randomUUID();
+    const capability = 'persisted-short-lived-capability';
     const first = createAgentRuntimeRepository({ connectionString: databaseUrl! });
     const second = createAgentRuntimeRepository({ connectionString: databaseUrl! });
     const cleanup = new Pool({ connectionString: databaseUrl });
@@ -27,6 +32,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
         threadId,
         userMessage: 'PostgreSQL 持久化验证',
         clientRequestId,
+        capability,
       });
       expect(created.created).toBe(true);
       const duplicate = await first.createRun({
@@ -44,7 +50,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
       await first.close();
 
       const restored = await second.findRun(runId);
-      expect(restored).toMatchObject({ runId, threadId, status: 'running' });
+      expect(restored).toMatchObject({ runId, threadId, status: 'queued', capability });
       const resumedHistory = await second.listEvents(runId, clarification.eventId);
       expect(resumedHistory).toEqual([]);
       const completeHistory = await second.listEvents(runId, started.eventId);
@@ -266,7 +272,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
     }
   }, 30_000);
 
-  test('restores a run through a new server, repository, and PostgresSaver instance', async () => {
+  test('persists a completed read-only query and SSE history across server and PostgresSaver restart', async () => {
     const schema = `stage0_runtime_${crypto.randomUUID().replaceAll('-', '')}`;
     const runId = crypto.randomUUID();
     const threadId = crypto.randomUUID();
@@ -287,13 +293,12 @@ describe('Agent Runtime PostgreSQL repository', () => {
       AI_MAX_OUTPUT_TOKENS: 1_200,
       AI_TRACING_ENABLED: false,
     } as const;
-    const statusResponse = {
+    const dashboardResponse = {
       status: 200,
       ok: true,
       json: async () => ({
-        status: 'available',
-        businessTimezone: 'Asia/Shanghai',
-        serverTime: '2026-10-16T00:00:00.000Z',
+        businessDate: '2026-10-17',
+        highlights: ['今日排课 4 节'],
       }),
     };
     const firstCheckpointer = createCheckpointer(databaseUrl!, schema);
@@ -306,8 +311,23 @@ describe('Agent Runtime PostgreSQL repository', () => {
 
     try {
       await firstCheckpointer.setup();
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(statusResponse));
-      firstApp = buildServer({ config, checkpointer: firstCheckpointer, repository: firstRepository });
+      const fetchDashboardSummary = vi.fn().mockResolvedValue(dashboardResponse);
+      vi.stubGlobal('fetch', fetchDashboardSummary);
+      const firstEventHub = new RunEventHub();
+      const firstWorker = new RunWorker({
+        repository: firstRepository,
+        execute: createBusinessRunExecutor({
+          checkpointer: firstCheckpointer,
+          coreTools: new CoreToolClient(config.CORE_INTERNAL_API_URL, config.AI_REQUEST_TIMEOUT_MS, config.INTERNAL_SERVICE_SECRET),
+          runTimeoutMs: config.AI_RUN_TIMEOUT_MS,
+        }),
+        leaseDurationMs: 1_000,
+        renewIntervalMs: 100,
+        pollIntervalMs: 1,
+        recoveryBatchSize: 20,
+        onEvent: (id, event) => firstEventHub.publish(id, event),
+      });
+      firstApp = buildServer({ config, checkpointer: firstCheckpointer, repository: firstRepository, eventHub: firstEventHub, worker: firstWorker });
       const startPath = '/internal/assistant/runs/start';
       const startBody = { runId, threadId, userMessage: '真实重启恢复验证' };
       const start = await firstApp.inject({
@@ -326,12 +346,13 @@ describe('Agent Runtime PostgreSQL repository', () => {
         payload: startBody,
       });
       expect(start.statusCode).toBe(200);
-      expect(start.json()).toMatchObject({ runId, threadId, status: 'waiting_for_input' });
+      expect(start.json()).toMatchObject({ runId, threadId, status: 'queued' });
+      await vi.waitFor(() => expect(fetchDashboardSummary).toHaveBeenCalledTimes(1));
       await firstApp.close();
       await firstRepository.close();
       await firstCheckpointer.end();
 
-      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('恢复时不应重新读取 Core')));
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('已完成运行恢复时不应重新读取 Core')));
       secondApp = buildServer({ config, checkpointer: secondCheckpointer, repository: secondRepository });
       const restored = await secondApp.inject({
         method: 'GET',
@@ -347,27 +368,24 @@ describe('Agent Runtime PostgreSQL repository', () => {
         },
       });
       expect(restored.statusCode).toBe(200);
-      expect(restored.json()).toMatchObject({ runId, threadId, status: 'waiting_for_input' });
-
-      const resumePath = `/internal/assistant/runs/${runId}/resume`;
-      const resumeBody = { threadId, input: { approved: true } };
-      const resume = await secondApp.inject({
-        method: 'POST',
-        url: resumePath,
+      expect(restored.json()).toMatchObject({ runId, threadId, status: 'completed' });
+      const eventsPath = `/internal/assistant/runs/${runId}/events`;
+      const events = await secondApp.inject({
+        method: 'GET',
+        url: eventsPath,
         headers: {
           ...createSignedInternalRequestHeaders({
             secret,
-            method: 'POST',
-            path: resumePath,
-            body: resumeBody,
+            method: 'GET',
+            path: eventsPath,
             securityHeaders: { 'x-assistant-capability': 'stage-0-capability' },
           }),
           'x-assistant-capability': 'stage-0-capability',
         },
-        payload: resumeBody,
       });
-      expect(resume.statusCode).toBe(200);
-      expect(resume.json()).toMatchObject({ runId, threadId, status: 'completed' });
+      expect(events.statusCode).toBe(200);
+      expect(events.body).toContain('event: assistant.delta');
+      expect(events.body).toContain('event: run.completed');
     } finally {
       await secondApp?.close().catch(() => undefined);
       await firstApp?.close().catch(() => undefined);

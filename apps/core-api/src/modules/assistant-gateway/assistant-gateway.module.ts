@@ -5,6 +5,7 @@ import {
   HttpAgentRuntimeClient,
 } from './agent-runtime.client.js';
 import { AssistantGatewayService } from './assistant-gateway.service.js';
+import { AssistantGatewayController } from './assistant-gateway.controller.js';
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -35,6 +36,7 @@ function positiveIntegerEnv(name: string, fallback: number): number {
     },
     AssistantGatewayService,
   ],
+  controllers: [AssistantGatewayController],
   exports: [AGENT_RUNTIME_CLIENT, AssistantGatewayService],
 })
 export class AssistantGatewayModule {}

@@ -21,8 +21,12 @@
     "dev:web": "npm run dev -w @piano/web",
     "db:up": "docker compose up -d core-db agent-db",
     "db:down": "docker compose down",
+    "docker:up": "docker compose up --build -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f --tail=100",
     "db:generate": "npm run db:generate -w @piano/core-api",
     "db:migrate": "npm run db:migrate -w @piano/core-api",
+    "db:migrate:deploy": "npm run db:migrate:deploy -w @piano/core-api",
     "agent:db:migrate": "npm run db:migrate -w @piano/agent-runtime",
     "agent:checkpoint:setup": "npm run checkpoint:setup -w @piano/agent-runtime",
     "test:agent:integration": "npm test -w @piano/agent-runtime"

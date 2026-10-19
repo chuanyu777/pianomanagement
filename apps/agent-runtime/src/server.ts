@@ -1,4 +1,4 @@
-import { isInterrupted, type BaseCheckpointSaver } from '@langchain/langgraph';
+import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import {
   ASSISTANT_CAPABILITY_HEADER,
   AssistantResumeRequestSchema,
@@ -16,13 +16,14 @@ import {
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { AgentConfig } from './config/agent-config.js';
+import { createChatModel } from './llm/model-factory.js';
 import { RunEventHub } from './events/run-event-hub.js';
 import { createSpikeGraph, resumeApproval } from './graph/spike-graph.js';
 import type {
   AgentRuntimeRepository,
   PersistedAssistantEvent,
 } from './persistence/repository.js';
-import { CoreToolClient } from './tools/core-tool-client.js';
+import type { RunWorker } from './worker/run-worker.js';
 
 function headerValue(
   request: { headers: Record<string, string | string[] | undefined> },
@@ -91,27 +92,33 @@ export function buildServer(input: {
   checkpointer: BaseCheckpointSaver;
   repository: AgentRuntimeRepository;
   eventHub?: RunEventHub;
+  worker?: Pick<RunWorker, 'start' | 'stop'>;
 }): FastifyInstance {
   const app = Fastify({ logger: true });
-  const coreTools = new CoreToolClient(
-    input.config.CORE_INTERNAL_API_URL,
-    input.config.AI_REQUEST_TIMEOUT_MS,
-    input.config.INTERNAL_SERVICE_SECRET,
-  );
+  const model = createChatModel(input.config);
   const replayProtector = new InternalRequestReplayProtector();
   const eventHub = input.eventHub ?? new RunEventHub();
+  if (input.worker) {
+    app.addHook('onReady', async () => input.worker!.start());
+    app.addHook('onClose', async () => input.worker!.stop());
+  }
   app.addHook('onClose', async () => eventHub.closeAll());
 
-  const appendEvent = async (runId: string, event: Parameters<AgentRuntimeRepository['appendEvent']>[1]) => {
-    const persisted = await input.repository.appendEvent(runId, event);
+  const appendEvent = async (
+    runId: string,
+    event: Parameters<AgentRuntimeRepository['appendEvent']>[1],
+    leaseOwnerToken?: string,
+  ) => {
+    const persisted = await input.repository.appendEvent(runId, event, leaseOwnerToken);
     eventHub.publish(runId, persisted);
     return persisted;
   };
   const updateRunWithEvent = async (
     update: Parameters<AgentRuntimeRepository['updateRunWithEvent']>[0],
     event: Parameters<AgentRuntimeRepository['updateRunWithEvent']>[1],
+    leaseOwnerToken?: string,
   ) => {
-    const committed = await input.repository.updateRunWithEvent(update, event);
+    const committed = await input.repository.updateRunWithEvent({ ...update, ...(leaseOwnerToken ? { leaseOwnerToken } : {}) }, event);
     eventHub.publish(update.runId, committed.event);
     return committed.run;
   };
@@ -156,7 +163,8 @@ export function buildServer(input: {
   app.post('/internal/assistant/runs/start', async (request, reply) => {
     const body = parseBody(AssistantStartRequestSchema, request.body, reply);
     if (!body) return;
-    const persisted = await input.repository.createRun(body);
+    const capability = headerValue(request, ASSISTANT_CAPABILITY_HEADER)!;
+    const persisted = await input.repository.createRun({ ...body, capability });
     if (!persisted.created) {
       if (persisted.run.threadId !== body.threadId) {
         return reply.code(409).send({ message: 'runId 与线程不匹配' });
@@ -171,52 +179,7 @@ export function buildServer(input: {
       return reply.send(AssistantRunSchema.parse(persisted.run));
     }
 
-    const graph = createSpikeGraph({
-      checkpointer: input.checkpointer,
-      fetchSystemStatus: () =>
-        coreTools.getSystemStatus(headerValue(request, ASSISTANT_CAPABILITY_HEADER)!),
-    });
-    try {
-      await appendEvent(body.runId, {
-        type: 'run.started',
-        runId: body.runId,
-        threadId: body.threadId,
-      });
-      const result = await graph.invoke(
-        { runId: body.runId, threadId: body.threadId, userMessage: body.userMessage },
-        {
-          configurable: { thread_id: checkpointThreadId(body.threadId, body.runId) },
-          signal: AbortSignal.timeout(input.config.AI_RUN_TIMEOUT_MS),
-        },
-      );
-      let run;
-      if (isInterrupted(result)) {
-        run = await updateRunWithEvent(
-          { runId: body.runId, status: 'waiting_for_input' },
-          {
-            type: 'clarification.requested',
-            question: '是否继续完成阶段 0 技术验证？',
-          },
-        );
-      } else {
-        run = await updateRunWithEvent(
-          { runId: body.runId, status: 'completed' },
-          { type: 'run.completed', runId: body.runId },
-        );
-      }
-      return reply.send(AssistantRunSchema.parse(run));
-    } catch (error) {
-      await updateRunWithEvent(
-        { runId: body.runId, status: 'failed', errorCode: 'GRAPH_FAILED' },
-        {
-          type: 'run.failed',
-          code: 'GRAPH_FAILED',
-          message: 'Agent 运行失败，请稍后重试',
-          retryable: true,
-        },
-      );
-      throw error;
-    }
+    return reply.send(AssistantRunSchema.parse(persisted.run));
   });
 
   app.post('/internal/assistant/runs/:runId/resume', async (request, reply) => {
@@ -244,6 +207,7 @@ export function buildServer(input: {
     }
     const graph = createSpikeGraph({
       checkpointer: input.checkpointer,
+      ...(model ? { model } : {}),
       fetchSystemStatus: () => Promise.reject(new Error('恢复流程不应重新执行已完成的只读节点')),
     });
     try {

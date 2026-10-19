@@ -109,7 +109,7 @@ describe('CourseLedgerService', () => {
         occurredAt: at, createdById: actorId, commandId: 'lesson-command', reversesEntryId: null,
       },
     );
-    const service = new CourseLedgerService(prisma as never);
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
 
     await expect(service.getBalance(accountId)).resolves.toEqual({
       accountId,
@@ -130,7 +130,7 @@ describe('CourseLedgerService', () => {
 
   it('records a positive payment only in the paid pool using Prisma Decimal and its payment channel', async () => {
     const { prisma, tx, entries, payments } = makePrisma();
-    const service = new CourseLedgerService(prisma as never);
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
 
     const result = await service.recordPayment({
       accountId,
@@ -156,7 +156,7 @@ describe('CourseLedgerService', () => {
 
   it('records a positive gift only in the gift pool, independently of any payment channel', async () => {
     const { prisma, entries, gifts } = makePrisma();
-    const service = new CourseLedgerService(prisma as never);
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
 
     const result = await service.recordGift({
       accountId,
@@ -180,7 +180,7 @@ describe('CourseLedgerService', () => {
 
   it('makes concurrent submissions with the same commandId produce one entry and the same result', async () => {
     const { prisma, entries, payments } = makePrisma();
-    const service = new CourseLedgerService(prisma as never);
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
     const command = {
       accountId,
       amount: new Prisma.Decimal('90.10'),
@@ -208,7 +208,7 @@ describe('CourseLedgerService', () => {
       giftDelta: new Prisma.Decimal('0.00'), occurredAt: at, createdById: actorId,
       commandId: 'original-command', reversesEntryId: null,
     });
-    const service = new CourseLedgerService(prisma as never);
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
 
     const reversal = await service.reverseEntry({
       entryId: 'original-entry',
@@ -243,7 +243,7 @@ describe('CourseLedgerService', () => {
       giftDelta: new Prisma.Decimal('25.00'), occurredAt: at, createdById: actorId,
       commandId: 'gift-original-command', reversesEntryId: null,
     });
-    const service = new CourseLedgerService(prisma as never);
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
     const command = {
       entryId: 'original-gift', occurredAt: at, createdById: actorId, commandId: 'gift-reversal-command',
     };

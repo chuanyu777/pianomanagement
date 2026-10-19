@@ -15,6 +15,23 @@ export class CreateLessonBody {
   note?: string;
 }
 
+export class CreateBatchLessonsBody {
+  @ApiProperty({ type: String, format: 'uuid' })
+  accountId!: string;
+
+  @ApiProperty({ type: String, format: 'uuid' })
+  teacherId!: string;
+
+  @ApiProperty({ type: String, format: 'date-time' })
+  firstStartsAt!: string;
+
+  @ApiProperty({ type: Number, minimum: 1, maximum: 52, description: '连续排课周数，首次排课计为第 1 周' })
+  weeks!: number;
+
+  @ApiPropertyOptional({ type: String, maxLength: 2000 })
+  note?: string;
+}
+
 export class RescheduleLessonBody {
   @ApiProperty({ type: String, format: 'date-time' })
   startsAt!: string;

@@ -41,16 +41,21 @@ function makeService(overrides: Record<string, unknown> = {}) {
   };
   const lesson = {
     create: vi.fn(async () => makeLesson()),
-    findFirst: vi.fn(async () => null),
     findMany: vi.fn(async () => []),
+    findFirst: vi.fn(async () => null),
     findUnique: vi.fn(async () => makeLesson()),
     update: vi.fn(async () => makeLesson()),
     ...overrides,
   };
+  const teacherRecord = { id: teacherId, updatedAt: new Date('2026-10-17T01:00:00.000Z') };
+  const teacherModel = { findUnique: vi.fn(async () => teacherRecord) };
+  const tx = { studentCourseAccount, lesson, teacher: teacherModel, $queryRaw: vi.fn(async (strings: TemplateStringsArray) => strings[0]?.includes('Teacher') ? [{ id: teacherId }] : [{ id: accountId }]) };
+  const transaction = vi.fn(async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx));
   return {
-    service: new LessonsService({ studentCourseAccount, lesson } as never),
+    service: new LessonsService({ studentCourseAccount, lesson, transaction } as never),
     studentCourseAccount,
     lesson,
+    transaction,
   };
 }
 
@@ -65,7 +70,7 @@ describe('LessonsService', () => {
       where: { id: accountId },
       include: expect.objectContaining({ course: true, student: true }),
     }));
-    expect(lesson.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+    expect(lesson.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         teacherId,
         status: { not: 'CANCELLED' },
@@ -90,7 +95,7 @@ describe('LessonsService', () => {
 
     await service.createSingle({ accountId, teacherId, startsAt }, owner);
 
-    expect(lesson.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+    expect(lesson.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         startsAt: { lt: new Date('2026-11-02T03:00:00.000Z') },
         endsAt: { gt: startsAt },
@@ -101,7 +106,7 @@ describe('LessonsService', () => {
 
   it('rejects an overlapping active lesson for the same teacher', async () => {
     const { service, lesson } = makeService({
-      findFirst: vi.fn(async () => makeLesson({ id: 'existing-lesson' })),
+      findMany: vi.fn(async () => [makeLesson({ id: 'existing-lesson' })]),
     });
 
     await expect(service.createSingle({
@@ -110,6 +115,16 @@ describe('LessonsService', () => {
       startsAt: new Date('2026-11-02T01:30:00.000Z'),
     }, owner)).rejects.toMatchObject({ status: 409 });
     expect(lesson.create).not.toHaveBeenCalled();
+  });
+
+  it('allows a teacher to preview only their own lesson and lets the owner choose the teacher', async () => {
+    const { service } = makeService();
+    await expect(service.previewSingle({ accountId, teacherId, startsAt: new Date('2026-11-02T01:00:00.000Z') }, teacher))
+      .resolves.toMatchObject({ normalizedCommand: { teacherId } });
+    await expect(service.previewSingle({ accountId, teacherId, startsAt: new Date('2026-11-02T01:00:00.000Z') }, otherTeacher))
+      .rejects.toMatchObject({ status: 403 });
+    await expect(service.previewSingle({ accountId, teacherId, startsAt: new Date('2026-11-02T01:00:00.000Z') }, owner))
+      .resolves.toMatchObject({ resourceVersions: { teacherId } });
   });
 
   it('reschedules only a scheduled lesson and recalculates its end from the course default duration', async () => {
@@ -196,5 +211,100 @@ describe('LessonsService', () => {
     await expect(service.cancel(lessonId, { note: '请假' }, otherTeacher))
       .rejects.toBeInstanceOf(ForbiddenException);
     expect(lesson.update).not.toHaveBeenCalled();
+  });
+
+  it('creates the requested weekly lessons in one transaction using the course duration', async () => {
+    const startsAt = new Date('2026-11-02T01:00:00.000Z');
+    const { service, lesson, transaction } = makeService({
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => makeLesson(data)),
+    });
+
+    const created = await service.createBatch({
+      accountId,
+      teacherId,
+      firstStartsAt: startsAt,
+      weeks: 3,
+      note: '每周主课',
+    }, owner);
+
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(created).toHaveLength(3);
+    expect(lesson.create).toHaveBeenCalledTimes(3);
+    expect(lesson.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      data: expect.objectContaining({
+        accountId,
+        teacherId,
+        startsAt,
+        endsAt: new Date('2026-11-02T02:00:00.000Z'),
+        status: 'SCHEDULED',
+        note: '每周主课',
+      }),
+      select: expect.any(Object),
+    }));
+    expect(lesson.create).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      data: expect.objectContaining({
+        startsAt: new Date('2026-11-16T01:00:00.000Z'),
+        endsAt: new Date('2026-11-16T02:00:00.000Z'),
+      }),
+    }));
+  });
+
+  it('returns the exact conflicting scheduled time and creates none when an existing lesson overlaps', async () => {
+    const startsAt = new Date('2026-11-02T01:00:00.000Z');
+    const { service, lesson } = makeService({
+      findMany: vi.fn(async () => [makeLesson({
+        id: 'existing-lesson',
+        startsAt: new Date('2026-11-09T01:30:00.000Z'),
+        endsAt: new Date('2026-11-09T02:30:00.000Z'),
+      })]),
+    });
+
+    let response: unknown;
+    try {
+      await service.createBatch({ accountId, teacherId, firstStartsAt: startsAt, weeks: 2 }, owner);
+    } catch (error) {
+      response = (error as { getResponse?: () => unknown }).getResponse?.();
+    }
+
+    expect(response).toMatchObject({
+      message: '批量排课存在时间冲突，未创建任何排课',
+      conflicts: [{
+        startsAt: '2026-11-09T01:00:00.000Z',
+        endsAt: '2026-11-09T02:00:00.000Z',
+        conflictingLessonId: 'existing-lesson',
+      }],
+    });
+    expect(lesson.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects any overlap between generated weekly lessons before writing the batch', async () => {
+    const { service, lesson, studentCourseAccount } = makeService({ findMany: vi.fn(async () => []) });
+    studentCourseAccount.findUnique.mockResolvedValue({
+      id: accountId,
+      studentId,
+      student: { id: studentId, name: '小明' },
+      course: { id: 'course-1', name: '长课', defaultDurationMinutes: 8 * 24 * 60 },
+    });
+
+    await expect(service.createBatch({
+      accountId,
+      teacherId,
+      firstStartsAt: new Date('2026-11-02T01:00:00.000Z'),
+      weeks: 2,
+    }, owner)).rejects.toMatchObject({ status: 409 });
+    expect(lesson.create).not.toHaveBeenCalled();
+  });
+
+  it('does not allow teachers to use owner-only batch scheduling', async () => {
+    const { service, lesson, transaction } = makeService();
+
+    await expect(service.createBatch({
+      accountId,
+      teacherId,
+      firstStartsAt: new Date('2026-11-02T01:00:00.000Z'),
+      weeks: 2,
+    }, teacher)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(lesson.create).not.toHaveBeenCalled();
   });
 });

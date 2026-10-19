@@ -7,6 +7,8 @@ describe('StudentsService', () => {
       id: 'student-1',
       name: data.name,
       notes: data.notes,
+      withdrawnAt: null,
+      courseAccounts: [],
       createdAt: new Date('2026-10-16T00:00:00.000Z'),
       updatedAt: new Date('2026-10-16T00:00:00.000Z'),
     }));
@@ -20,14 +22,17 @@ describe('StudentsService', () => {
         id: true,
         name: true,
         notes: true,
+        withdrawnAt: true,
         createdAt: true,
         updatedAt: true,
+        courseAccounts: { select: { createdAt: true, lessons: { where: { status: 'COMPLETED' }, select: { completedAt: true } } } },
       },
     });
     expect(result).toEqual({
       id: 'student-1',
       name: '林同学',
       notes: null,
+      enrollmentStatus: 'FROZEN',
       createdAt: new Date('2026-10-16T00:00:00.000Z'),
       updatedAt: new Date('2026-10-16T00:00:00.000Z'),
     });
@@ -35,7 +40,7 @@ describe('StudentsService', () => {
 
   it('lists students using the public response fields and stable ordering', async () => {
     const findMany = vi.fn(async () => [
-      { id: 'student-1', name: '林同学', notes: null, createdAt: new Date(0), updatedAt: new Date(0) },
+      { id: 'student-1', name: '林同学', notes: null, withdrawnAt: null, courseAccounts: [], createdAt: new Date(0), updatedAt: new Date(0) },
     ]);
     const service = new StudentsService({ student: { findMany } } as never);
 
@@ -43,16 +48,18 @@ describe('StudentsService', () => {
 
     expect(findMany).toHaveBeenCalledWith({
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
-      select: { id: true, name: true, notes: true, createdAt: true, updatedAt: true },
+      select: expect.objectContaining({ id: true, name: true, notes: true, withdrawnAt: true, courseAccounts: expect.any(Object) }),
     });
     expect(result[0]).not.toHaveProperty('withdrawnAt');
   });
 
   it('updates only supplied fields and supports null to clear notes', async () => {
     const update = vi.fn(async ({ data }) => ({
-      id: 'student-1',
+      id: 'student-1', enrollmentStatus: 'FROZEN',
       name: data.name ?? '林同学',
       notes: data.notes ?? null,
+      withdrawnAt: null,
+      courseAccounts: [],
       createdAt: new Date(0),
       updatedAt: new Date(1),
     }));
@@ -63,7 +70,7 @@ describe('StudentsService', () => {
     expect(update).toHaveBeenCalledWith({
       where: { id: 'student-1' },
       data: { notes: null },
-      select: { id: true, name: true, notes: true, createdAt: true, updatedAt: true },
+      select: expect.objectContaining({ id: true, name: true, notes: true, withdrawnAt: true, courseAccounts: expect.any(Object) }),
     });
   });
 });

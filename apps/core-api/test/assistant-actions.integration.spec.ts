@@ -8,7 +8,7 @@ const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
 if (hasDatabase) {
   describe('AssistantActionsService with real PostgreSQL', () => {
     const prisma = new PrismaService();
-    const service = new AssistantActionsService(prisma);
+    const service = new AssistantActionsService(prisma, {} as never, {} as never);
     const idempotencyKeys: string[] = [];
 
     afterAll(async () => {

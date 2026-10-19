@@ -50,6 +50,35 @@ enum LessonStatus {
   CANCELLED
 }
 
+enum PayrollStatus {
+  UNPAID
+  PAID
+}
+
+enum ManualTransactionKind {
+  INCOME
+  EXPENSE
+}
+
+enum ManualIncomeCategory {
+  BOOK_SALE
+  INSTRUMENT_SALE
+  EXTERNAL_COOPERATION
+  OTHER_INCOME
+}
+
+enum ManualExpenseCategory {
+  RENT_PROPERTY
+  UTILITIES_NETWORK
+  MARKETING
+  OFFICE_SUPPLIES
+  MAINTENANCE
+  BOOK_PURCHASE_COST
+  INSTRUMENT_PURCHASE_COST
+  EXTERNAL_COOPERATION_COST
+  OTHER_EXPENSE
+}
+
 model User {
   id               String          @id @default(uuid())
   username         String          @unique
@@ -63,17 +92,26 @@ model User {
   gifts            GiftRecord[]
   ledgerEntries    LedgerEntry[]
   completedLessons Lesson[]        @relation("LessonCompletedBy")
+  refundsCreated   RefundRecord[]  @relation("RefundCreatedBy")
+  payrollsGenerated Payroll[]      @relation("PayrollGeneratedBy")
+  payrollsPaid      Payroll[]      @relation("PayrollPaidBy")
+  manualTransactions ManualTransaction[]
+  closedPeriods      ClosedPeriod[] @relation("PeriodClosedBy")
+  reopenedPeriods    ClosedPeriod[] @relation("PeriodReopenedBy")
 }
 
 model Teacher {
-  id        String   @id @default(uuid())
-  userId    String   @unique
-  name      String
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  lessons   Lesson[]
+  id                    String    @id @default(uuid())
+  userId                String    @unique
+  name                  String
+  isActive              Boolean   @default(true)
+  defaultBaseSalary     Decimal   @default(0) @db.Decimal(14, 2)
+  defaultCommissionRate Decimal   @default(0) @db.Decimal(7, 4)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  lessons               Lesson[]
+  payrolls              Payroll[]
 }
 
 model Student {
@@ -84,6 +122,7 @@ model Student {
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
   courseAccounts StudentCourseAccount[]
+  refunds        RefundRecord[]
 }
 
 model Course {
@@ -113,6 +152,7 @@ model StudentCourseAccount {
   gifts              GiftRecord[]
   ledgerEntries      LedgerEntry[]
   lessons            Lesson[]
+  refundDetails      RefundDetail[]
 
   @@unique([studentId, courseId])
   @@index([courseId])
@@ -162,6 +202,7 @@ model LedgerEntry {
   paymentId       String?              @unique
   giftId          String?              @unique
   lessonId        String?              @unique
+  refundDetailId  String?
   reversesEntryId String?              @unique
   createdAt       DateTime             @default(now())
   account         StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
@@ -169,11 +210,13 @@ model LedgerEntry {
   payment         PaymentRecord?       @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   gift            GiftRecord?          @relation(fields: [giftId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   lesson          Lesson?              @relation(fields: [lessonId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  refundDetail    RefundDetail?        @relation(fields: [refundDetailId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   reversesEntry   LedgerEntry?         @relation("LedgerEntryReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   reversedBy      LedgerEntry?         @relation("LedgerEntryReversal")
 
   @@index([accountId, occurredAt, id])
   @@index([createdById, createdAt])
+  @@index([refundDetailId])
 }
 
 model Lesson {
@@ -197,6 +240,100 @@ model Lesson {
 
   @@index([accountId, startsAt])
   @@index([teacherId, startsAt])
+}
+
+model RefundRecord {
+  id                 String         @id @default(uuid())
+  studentId          String         @unique
+  totalPaidRefund    Decimal        @db.Decimal(14, 2)
+  feeAmount          Decimal        @db.Decimal(14, 2)
+  feePercentage      Decimal        @db.Decimal(7, 2)
+  actualRefundAmount Decimal        @db.Decimal(14, 2)
+  channel            PaymentChannel
+  occurredAt         DateTime
+  note               String?
+  createdById        String
+  createdAt          DateTime       @default(now())
+  student            Student        @relation(fields: [studentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy          User           @relation("RefundCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  details            RefundDetail[]
+
+  @@index([occurredAt])
+}
+
+model RefundDetail {
+  id                 String               @id @default(uuid())
+  refundId           String
+  accountId          String
+  paidBalanceBefore  Decimal              @db.Decimal(14, 2)
+  giftBalanceBefore  Decimal              @db.Decimal(14, 2)
+  paidRefundAmount   Decimal              @db.Decimal(14, 2)
+  giftClearingAmount Decimal              @db.Decimal(14, 2)
+  refund             RefundRecord         @relation(fields: [refundId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  account            StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntries      LedgerEntry[]
+
+  @@unique([refundId, accountId])
+  @@index([accountId])
+}
+
+model Payroll {
+  id               String         @id @default(uuid())
+  teacherId        String
+  periodStart      DateTime
+  courseRevenue    Decimal        @db.Decimal(14, 2)
+  baseSalary       Decimal        @db.Decimal(14, 2)
+  commissionRate   Decimal        @db.Decimal(7, 4)
+  commissionAmount Decimal        @db.Decimal(14, 2)
+  bonusAmount      Decimal        @default(0) @db.Decimal(14, 2)
+  bonusNote        String?
+  deductionAmount  Decimal        @default(0) @db.Decimal(14, 2)
+  deductionNote    String?
+  grossSalary      Decimal        @db.Decimal(14, 2)
+  netSalary        Decimal        @db.Decimal(14, 2)
+  status           PayrollStatus  @default(UNPAID)
+  paidAt           DateTime?
+  paymentChannel   PaymentChannel?
+  paymentNote      String?
+  generatedById    String
+  paidById         String?
+  version          Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  teacher          Teacher        @relation(fields: [teacherId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  generatedBy      User           @relation("PayrollGeneratedBy", fields: [generatedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  paidBy           User?          @relation("PayrollPaidBy", fields: [paidById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([teacherId, periodStart])
+  @@index([periodStart, status])
+}
+
+model ManualTransaction {
+  id              String                @id @default(uuid())
+  kind            ManualTransactionKind
+  incomeCategory  ManualIncomeCategory?
+  expenseCategory ManualExpenseCategory?
+  amount          Decimal               @db.Decimal(14, 2)
+  channel         PaymentChannel
+  occurredAt      DateTime
+  note            String?
+  createdById     String
+  createdAt       DateTime              @default(now())
+  createdBy       User                  @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([kind, occurredAt])
+}
+
+model ClosedPeriod {
+  id           String    @id @default(uuid())
+  periodStart  DateTime  @unique
+  closedAt     DateTime  @default(now())
+  closedById   String
+  reopenedAt   DateTime?
+  reopenedById String?
+  reopenReason String?
+  closedBy     User      @relation("PeriodClosedBy", fields: [closedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reopenedBy   User?     @relation("PeriodReopenedBy", fields: [reopenedById], references: [id], onDelete: Restrict, onUpdate: Cascade)
 }
 
 model ActionPreview {

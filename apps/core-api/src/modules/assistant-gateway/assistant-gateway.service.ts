@@ -126,7 +126,7 @@ export class AssistantGatewayService {
       threadId,
       runId,
       ttlSeconds: CAPABILITY_TTL_SECONDS,
-      permissions: ['READ'],
+      permissions: ['READ', 'PREVIEW_L1', 'PREVIEW_L2'],
     });
   }
 

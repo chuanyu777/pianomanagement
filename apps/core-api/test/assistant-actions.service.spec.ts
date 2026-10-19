@@ -46,7 +46,7 @@ function audit(id = 'audit-1', previewId = 'preview-1') {
 }
 
 function createService(prisma: object): AssistantActionsService {
-  return new AssistantActionsService(prisma as PrismaService);
+  return new AssistantActionsService(prisma as PrismaService, {} as never, {} as never);
 }
 
 describe('AssistantActionsService', () => {

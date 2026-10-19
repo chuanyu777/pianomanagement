@@ -6,9 +6,12 @@ import { AssistantPreviewConfirmController } from './assistant-actions.controlle
 import { LessonsModule } from '../lessons/lessons.module.js';
 import { CourseLedgerModule } from '../course-ledger/course-ledger.module.js';
 import { RefundsModule } from '../refunds/refunds.module.js';
+import { ManualTransactionsModule } from '../manual-transactions/manual-transactions.module.js';
+import { PayrollModule } from '../payroll/payroll.module.js';
+import { PeriodsModule } from '../periods/periods.module.js';
 
 @Module({
-  imports: [PrismaModule, LessonsModule, CourseLedgerModule, RefundsModule],
+  imports: [PrismaModule, LessonsModule, CourseLedgerModule, RefundsModule, ManualTransactionsModule, PayrollModule, PeriodsModule],
   controllers: [AssistantActionsController, AssistantPreviewConfirmController],
   providers: [AssistantActionsService],
   exports: [AssistantActionsService],

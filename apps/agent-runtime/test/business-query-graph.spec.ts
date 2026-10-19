@@ -251,6 +251,55 @@ describe('read-only business query graph', () => {
     }
   });
 
+  it.each([
+    ['reschedule', '把小明的课调到 2026-10-21 15:00', 'lesson.reschedule'],
+    ['cancel', '给小明请假，取消排课', 'lesson.cancel'],
+    ['complete', '确认小明今天上课', 'lesson.complete'],
+    ['reverse-complete', '撤销小明今天的上课确认', 'lesson.complete.reversal'],
+    ['manual-income', '登记一笔其他经营收入 300 元，微信', 'manual-transaction.create'],
+    ['payroll-generate', '生成王老师 2026-10 工资', 'payroll.generate'],
+    ['period-close', '关账 2026-10', 'period.close'],
+    ['period-reopen', '重开 2026-10，补录遗漏的收支', 'period.reopen'],
+  ])('routes %s to its injected Preview tool and never reads Dashboard', async (_name, userMessage, actionType) => {
+    const fetchDashboardSummary = vi.fn();
+    const findLessonCandidates = vi.fn().mockResolvedValue({
+      candidates: [{ lessonId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', studentName: '小明', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-20T07:00:00.000Z', status: 'SCHEDULED' }],
+    });
+    const findTeacherCandidates = vi.fn().mockResolvedValue({ candidates: [{ teacherId: '6ed41b4d-cad9-42b3-a3ca-6571ce2e033b', name: '王老师' }] });
+    const createActionPreview = vi.fn().mockResolvedValue({
+      previewId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c', actionType,
+      command: {}, display: { title: '操作预览', summary: '确认后才会执行。' }, expiresAt: '2026-10-17T01:05:00.000Z',
+    });
+    const graph = createBusinessQueryGraph({
+      checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary,
+      findLessonCandidates, findTeacherCandidates, createActionPreview,
+    });
+
+    const result = await graph.invoke({
+      runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage,
+    }, { configurable: { thread_id: `structured-action-${_name}` } });
+
+    expect(createActionPreview).toHaveBeenCalledWith('request-capability', expect.objectContaining({ actionType }));
+    expect(fetchDashboardSummary).not.toHaveBeenCalled();
+    expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({ type: 'action-preview', actionType }));
+  });
+
+  it('clarifies structured actions when the lesson object is not unique and never creates a Preview or reads Dashboard', async () => {
+    const fetchDashboardSummary = vi.fn();
+    const findLessonCandidates = vi.fn().mockResolvedValue({ candidates: [
+      { lessonId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', studentName: '小明', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-20T07:00:00.000Z', status: 'SCHEDULED' },
+      { lessonId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c', studentName: '小明', courseName: '陪练', teacherName: '李老师', startsAt: '2026-10-20T08:00:00.000Z', status: 'SCHEDULED' },
+    ] });
+    const createActionPreview = vi.fn();
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary, findLessonCandidates, createActionPreview });
+
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage: '给小明请假，取消排课' }, { configurable: { thread_id: 'structured-action-ambiguous' } });
+
+    expect(result.answer).toContain('唯一');
+    expect(createActionPreview).not.toHaveBeenCalled();
+    expect(fetchDashboardSummary).not.toHaveBeenCalled();
+  });
+
   it('reads the dashboard using the injected capability and answers without interrupting', async () => {
     const fetchDashboardSummary = vi.fn().mockResolvedValue(summary);
     const graph = createBusinessQueryGraph({

@@ -60,6 +60,15 @@ export type BatchLessonPreview = {
   };
 };
 
+export type LessonMutationVersions = {
+  lessonId: string;
+  lessonVersion: number;
+  accountId: string;
+  accountVersion?: number;
+  unitPrice?: string;
+  consumptionEntryId?: string;
+};
+
 const LESSON_SELECT = {
   id: true,
   accountId: true,
@@ -67,6 +76,7 @@ const LESSON_SELECT = {
   startsAt: true,
   endsAt: true,
   status: true,
+  version: true,
   note: true,
   unitPriceSnapshot: true,
   completedAt: true,
@@ -119,6 +129,7 @@ const COMPLETION_LESSON_SELECT = {
       student: { select: { id: true, name: true } },
       course: { select: { id: true, name: true, defaultDurationMinutes: true } },
       currentUnitPrice: true,
+      version: true,
       openingPaidBalance: true,
       openingGiftBalance: true,
     },
@@ -390,147 +401,249 @@ export class LessonsService {
   }
 
   async reschedule(id: string, input: RescheduleLessonInput, actor: AuthenticatedActor): Promise<LessonSummary> {
-    const lesson = await this.getLesson(id);
-    this.assertActorCanManage(actor, lesson.teacherId);
-    this.assertScheduled(lesson.status);
-    const endsAt = this.addDuration(input.startsAt, lesson.account.course.defaultDurationMinutes);
-    await this.assertNoOverlap(lesson.teacherId, input.startsAt, endsAt, id);
-    const updated = await this.repository.lesson.update({
-      where: { id },
-      data: { startsAt: input.startsAt, endsAt, version: { increment: 1 } },
-      select: LESSON_SELECT,
-    });
-    return toSummary(updated);
+    return this.repository.transaction((tx) => this.rescheduleInTransaction(tx, id, input, actor));
   }
 
   async cancel(id: string, input: CancelLessonInput, actor: AuthenticatedActor): Promise<LessonSummary> {
-    const lesson = await this.getLesson(id);
+    return this.repository.transaction((tx) => this.cancelInTransaction(tx, id, input, actor));
+  }
+
+  async previewReschedule(id: string, input: RescheduleLessonInput, actor: AuthenticatedActor) {
+    return this.repository.transaction(async (tx) => {
+      const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+      if (!lesson) throw new NotFoundException('排课不存在');
+      this.assertActorCanManage(actor, lesson.teacherId);
+      this.assertScheduled(lesson.status);
+      const endsAt = this.addDuration(input.startsAt, lesson.account.course.defaultDurationMinutes);
+      const conflict = await tx.lesson.findFirst({ where: {
+        teacherId: lesson.teacherId, status: { not: LessonStatus.CANCELLED },
+        startsAt: { lt: endsAt }, endsAt: { gt: input.startsAt }, id: { not: id },
+      }, select: { id: true } });
+      if (conflict) throw new ConflictException('该教师在此时间段已有排课');
+      return {
+        normalizedCommand: { lessonId: id, startsAt: input.startsAt, endsAt },
+        display: { lessonId: lesson.id, studentName: lesson.account.student.name, courseName: lesson.account.course.name,
+          teacherId: lesson.teacherId, previousStartsAt: lesson.startsAt, previousEndsAt: lesson.endsAt,
+          startsAt: input.startsAt, endsAt },
+        resourceVersions: { lessonId: id, lessonVersion: lesson.version, accountId: lesson.accountId,
+          accountVersion: lesson.account.version, courseDurationMinutes: lesson.account.course.defaultDurationMinutes },
+      };
+    });
+  }
+
+  async rescheduleInTransaction(
+    tx: TransactionClient, id: string, input: RescheduleLessonInput, actor: AuthenticatedActor,
+    expected?: { lessonVersion: number; accountVersion: number; courseDurationMinutes: number; endsAt: Date },
+  ): Promise<LessonSummary> {
+    await this.lockLesson(tx, id);
+    const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+    if (!lesson) throw new NotFoundException('排课不存在');
     this.assertActorCanManage(actor, lesson.teacherId);
     this.assertScheduled(lesson.status);
-    const updated = await this.repository.lesson.update({
-      where: { id },
-      data: {
-        status: LessonStatus.CANCELLED,
-        ...(input.note !== undefined ? { note: input.note.trim() || null } : {}),
-        version: { increment: 1 },
-      },
-      select: LESSON_SELECT,
+    if (expected && (lesson.version !== expected.lessonVersion || lesson.account.version !== expected.accountVersion ||
+      lesson.account.course.defaultDurationMinutes !== expected.courseDurationMinutes)) {
+      throw new ConflictException('排课或课程资料已变化，请重新预览');
+    }
+    const endsAt = this.addDuration(input.startsAt, lesson.account.course.defaultDurationMinutes);
+    if (expected && endsAt.getTime() !== expected.endsAt.getTime()) throw new ConflictException('排课时长已变化，请重新预览');
+    const conflict = await tx.lesson.findFirst({ where: {
+      teacherId: lesson.teacherId, status: { not: LessonStatus.CANCELLED },
+      startsAt: { lt: endsAt }, endsAt: { gt: input.startsAt }, id: { not: id },
+    }, select: { id: true } });
+    if (conflict) throw new ConflictException('该教师在此时间段已有排课');
+    return toSummary(await tx.lesson.update({ where: { id }, data: {
+      startsAt: input.startsAt, endsAt, version: { increment: 1 },
+    }, select: LESSON_SELECT }));
+  }
+
+  async previewCancel(id: string, input: CancelLessonInput, actor: AuthenticatedActor) {
+    return this.repository.transaction(async (tx) => {
+      const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+      if (!lesson) throw new NotFoundException('排课不存在');
+      this.assertActorCanManage(actor, lesson.teacherId);
+      this.assertScheduled(lesson.status);
+      return {
+        normalizedCommand: { lessonId: id, note: input.note?.trim() || null },
+        display: { lessonId: lesson.id, studentName: lesson.account.student.name, courseName: lesson.account.course.name,
+          teacherId: lesson.teacherId, startsAt: lesson.startsAt, endsAt: lesson.endsAt, statusBefore: lesson.status,
+          statusAfter: LessonStatus.CANCELLED, note: input.note?.trim() || null },
+        resourceVersions: { lessonId: id, lessonVersion: lesson.version, accountId: lesson.accountId,
+          accountVersion: lesson.account.version },
+      };
     });
+  }
+
+  async cancelInTransaction(
+    tx: TransactionClient, id: string, input: CancelLessonInput, actor: AuthenticatedActor,
+    expected?: { lessonVersion: number; accountVersion: number },
+  ): Promise<LessonSummary> {
+    await this.lockLesson(tx, id);
+    const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+    if (!lesson) throw new NotFoundException('排课不存在');
+    this.assertActorCanManage(actor, lesson.teacherId);
+    this.assertScheduled(lesson.status);
+    if (expected && (lesson.version !== expected.lessonVersion || lesson.account.version !== expected.accountVersion)) {
+      throw new ConflictException('排课资料已变化，请重新预览');
+    }
+    const updated = await tx.lesson.update({ where: { id }, data: {
+      status: LessonStatus.CANCELLED,
+      ...(input.note !== undefined ? { note: input.note.trim() || null } : {}),
+      version: { increment: 1 },
+    }, select: LESSON_SELECT });
     return toSummary(updated);
   }
 
   async complete(id: string, input: CompleteLessonInput, actor: AuthenticatedActor): Promise<LessonSummary> {
     try {
-      return await this.repository.transaction(async (tx) => {
-        const replay = await this.findCommandLessonId(tx, input.commandId, actor.id);
-        if (replay) return this.getLessonWithClient(tx, replay, id);
-
-        await this.lockLesson(tx, id);
-        const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
-        if (!lesson) throw new NotFoundException('排课不存在');
-        this.assertActorCanManage(actor, lesson.teacherId);
-        if (lesson.status !== LessonStatus.SCHEDULED) throw new ConflictException('只有待上课排课可以确认');
-        const completedAt = new Date();
-        if (completedAt < lesson.endsAt) throw new ConflictException('课程结束后才能确认上课');
-        await this.periods.assertWritableForDate(completedAt, tx);
-        if (!lesson.account.currentUnitPrice.gt(0)) throw new BadRequestException('学生课程账户单节收费金额必须大于零');
-
-        await this.lockAccount(tx, lesson.accountId);
-        const balances = await this.getBalances(tx, lesson);
-        const giftConsumed = balances.gift.gt(0)
-          ? (balances.gift.lt(lesson.account.currentUnitPrice) ? balances.gift : lesson.account.currentUnitPrice)
-          : new Prisma.Decimal(0);
-        const paidConsumed = lesson.account.currentUnitPrice.sub(giftConsumed);
-
-        await tx.ledgerEntry.create({
-          data: {
-            accountId: lesson.accountId,
-            lessonId: lesson.id,
-            kind: LedgerEntryKind.LESSON_CONSUMPTION,
-            paidDelta: paidConsumed.negated(),
-            giftDelta: giftConsumed.negated(),
-            occurredAt: completedAt,
-            note: input.note?.trim() || null,
-            createdById: actor.id,
-            commandId: input.commandId,
-          },
-        });
-        const completed = await tx.lesson.update({
-          where: { id },
-          data: {
-            status: LessonStatus.COMPLETED,
-            unitPriceSnapshot: lesson.account.currentUnitPrice,
-            completedAt,
-            completedById: actor.id,
-            version: { increment: 1 },
-          },
-          select: LESSON_SELECT,
-        });
-        await this.incrementAccountVersion(tx, lesson.accountId);
-        return toSummary(completed);
-      });
+      return await this.repository.transaction((tx) => this.completeInTransaction(tx, id, input, actor));
     } catch (error) {
       if (!this.isUniqueConstraintError(error)) throw error;
       return this.resolveCommandReplay(id, input.commandId, actor.id);
     }
   }
 
+  async previewComplete(id: string, input: Pick<CompleteLessonInput, 'note'>, actor: AuthenticatedActor) {
+    return this.repository.transaction(async (tx) => {
+      const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+      if (!lesson) throw new NotFoundException('排课不存在');
+      this.assertActorCanManage(actor, lesson.teacherId);
+      if (lesson.status !== LessonStatus.SCHEDULED) throw new ConflictException('只有待上课排课可以确认');
+      const occurredAt = new Date();
+      if (occurredAt < lesson.endsAt) throw new ConflictException('课程结束后才能确认上课');
+      await this.periods.assertWritableForDate(occurredAt, tx);
+      if (!lesson.account.currentUnitPrice.gt(0)) throw new BadRequestException('学生课程账户单节收费金额必须大于零');
+      await this.lockAccount(tx, lesson.accountId);
+      const balances = await this.getBalances(tx, lesson);
+      const giftConsumed = balances.gift.gt(0)
+        ? (balances.gift.lt(lesson.account.currentUnitPrice) ? balances.gift : lesson.account.currentUnitPrice)
+        : new Prisma.Decimal(0);
+      const paidConsumed = lesson.account.currentUnitPrice.sub(giftConsumed);
+      return {
+        normalizedCommand: { lessonId: id, note: input.note?.trim() || null },
+        display: {
+          lessonId: id, studentName: lesson.account.student.name, courseName: lesson.account.course.name,
+          startsAt: lesson.startsAt, endsAt: lesson.endsAt, unitPrice: lesson.account.currentUnitPrice.toFixed(2),
+          paidBalanceBefore: balances.paid.toFixed(2), giftBalanceBefore: balances.gift.toFixed(2),
+          paidConsumed: paidConsumed.toFixed(2), giftConsumed: giftConsumed.toFixed(2),
+          paidBalanceAfter: balances.paid.sub(paidConsumed).toFixed(2), giftBalanceAfter: balances.gift.sub(giftConsumed).toFixed(2),
+        },
+        resourceVersions: { lessonId: id, lessonVersion: lesson.version, accountId: lesson.accountId,
+          accountVersion: lesson.account.version, unitPrice: lesson.account.currentUnitPrice.toFixed(2) },
+      };
+    });
+  }
+
+  async completeInTransaction(
+    tx: TransactionClient, id: string, input: CompleteLessonInput, actor: AuthenticatedActor,
+    expected?: LessonMutationVersions,
+  ): Promise<LessonSummary> {
+    const replay = await this.findCommandLessonId(tx, input.commandId, actor.id);
+    if (replay) return this.getLessonWithClient(tx, replay, id);
+    await this.lockLesson(tx, id);
+    let lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+    if (!lesson) throw new NotFoundException('排课不存在');
+    this.assertActorCanManage(actor, lesson.teacherId);
+    if (lesson.status !== LessonStatus.SCHEDULED) throw new ConflictException('只有待上课排课可以确认');
+    if (expected && (lesson.version !== expected.lessonVersion || lesson.account.version !== expected.accountVersion)) {
+      throw new ConflictException('排课或课程账户已变化，请重新预览');
+    }
+    const completedAt = new Date();
+    if (completedAt < lesson.endsAt) throw new ConflictException('课程结束后才能确认上课');
+    await this.periods.assertWritableForDate(completedAt, tx);
+    await this.lockAccount(tx, lesson.accountId);
+    const account = await tx.studentCourseAccount.findUnique({ where: { id: lesson.accountId }, select: {
+      version: true, currentUnitPrice: true,
+    } });
+    if (!account || (expected && (account.version !== expected.accountVersion || account.currentUnitPrice.toFixed(2) !== expected.unitPrice))) {
+      throw new ConflictException('课程账户已变化，请重新预览');
+    }
+    if (!account.currentUnitPrice.gt(0)) throw new BadRequestException('学生课程账户单节收费金额必须大于零');
+    lesson = { ...lesson, account: { ...lesson.account, currentUnitPrice: account.currentUnitPrice } };
+    const balances = await this.getBalances(tx, lesson);
+    const giftConsumed = balances.gift.gt(0)
+      ? (balances.gift.lt(account.currentUnitPrice) ? balances.gift : account.currentUnitPrice)
+      : new Prisma.Decimal(0);
+    const paidConsumed = account.currentUnitPrice.sub(giftConsumed);
+    await tx.ledgerEntry.create({ data: {
+      accountId: lesson.accountId, lessonId: lesson.id, kind: LedgerEntryKind.LESSON_CONSUMPTION,
+      paidDelta: paidConsumed.negated(), giftDelta: giftConsumed.negated(), occurredAt: completedAt,
+      note: input.note?.trim() || null, createdById: actor.id, commandId: input.commandId,
+    } });
+    const completed = await tx.lesson.update({ where: { id }, data: {
+      status: LessonStatus.COMPLETED, unitPriceSnapshot: account.currentUnitPrice, completedAt,
+      completedById: actor.id, version: { increment: 1 },
+    }, select: LESSON_SELECT });
+    await this.incrementAccountVersion(tx, lesson.accountId);
+    return toSummary(completed);
+  }
+
   async reverseCompletion(id: string, input: CompleteLessonInput, actor: AuthenticatedActor): Promise<LessonSummary> {
     if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以撤销上课确认');
     try {
-      return await this.repository.transaction(async (tx) => {
-        const replay = await this.findCommandLessonId(tx, input.commandId, actor.id);
-        if (replay) return this.getLessonWithClient(tx, replay, id);
-
-        await this.lockLesson(tx, id);
-        const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
-        if (!lesson) throw new NotFoundException('排课不存在');
-        if (lesson.status !== LessonStatus.COMPLETED) throw new ConflictException('只有已完成排课可以撤销确认');
-        const consumption = await tx.ledgerEntry.findUnique({
-          where: { lessonId: id },
-          select: { id: true, accountId: true, paidDelta: true, giftDelta: true },
-        });
-        if (!consumption) throw new ConflictException('课程消费流水不存在');
-
-        await this.lockAccount(tx, lesson.accountId);
-        const existingReversal = await tx.ledgerEntry.findUnique({
-          where: { reversesEntryId: consumption.id },
-          select: { id: true },
-        });
-        if (existingReversal) throw new ConflictException('该课程确认已撤销');
-        const occurredAt = new Date();
-        await this.periods.assertWritableForDate(occurredAt, tx);
-        await tx.ledgerEntry.create({
-          data: {
-            accountId: consumption.accountId,
-            kind: LedgerEntryKind.LESSON_CONSUMPTION_REVERSAL,
-            paidDelta: consumption.paidDelta.negated(),
-            giftDelta: consumption.giftDelta.negated(),
-            occurredAt,
-            note: input.note?.trim() || null,
-            createdById: actor.id,
-            commandId: input.commandId,
-            reversesEntryId: consumption.id,
-          },
-        });
-        const restored = await tx.lesson.update({
-          where: { id },
-          data: {
-            status: LessonStatus.SCHEDULED,
-            unitPriceSnapshot: null,
-            completedAt: null,
-            completedById: null,
-            version: { increment: 1 },
-          },
-          select: LESSON_SELECT,
-        });
-        await this.incrementAccountVersion(tx, lesson.accountId);
-        return toSummary(restored);
-      });
+      return await this.repository.transaction((tx) => this.reverseCompletionInTransaction(tx, id, input, actor));
     } catch (error) {
       if (!this.isUniqueConstraintError(error)) throw error;
       return this.resolveCommandReplay(id, input.commandId, actor.id);
     }
+  }
+
+  async previewReverseCompletion(id: string, input: Pick<CompleteLessonInput, 'note'>, actor: AuthenticatedActor) {
+    if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以撤销上课确认');
+    return this.repository.transaction(async (tx) => {
+      const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+      if (!lesson) throw new NotFoundException('排课不存在');
+      if (lesson.status !== LessonStatus.COMPLETED) throw new ConflictException('只有已完成排课可以撤销确认');
+      const consumption = await tx.ledgerEntry.findUnique({ where: { lessonId: id },
+        select: { id: true, accountId: true, paidDelta: true, giftDelta: true } });
+      if (!consumption) throw new ConflictException('课程消费流水不存在');
+      const existingReversal = await tx.ledgerEntry.findUnique({ where: { reversesEntryId: consumption.id }, select: { id: true } });
+      if (existingReversal) throw new ConflictException('该课程确认已撤销');
+      return {
+        normalizedCommand: { lessonId: id, note: input.note?.trim() || null },
+        display: { lessonId: id, studentName: lesson.account.student.name, courseName: lesson.account.course.name,
+          startsAt: lesson.startsAt, endsAt: lesson.endsAt, paidRestore: consumption.paidDelta.negated().toFixed(2),
+          giftRestore: consumption.giftDelta.negated().toFixed(2), statusBefore: lesson.status, statusAfter: LessonStatus.SCHEDULED },
+        resourceVersions: { lessonId: id, lessonVersion: lesson.version, accountId: lesson.accountId,
+          accountVersion: lesson.account.version, consumptionEntryId: consumption.id },
+      };
+    });
+  }
+
+  async reverseCompletionInTransaction(
+    tx: TransactionClient, id: string, input: CompleteLessonInput, actor: AuthenticatedActor,
+    expected?: LessonMutationVersions,
+  ): Promise<LessonSummary> {
+    if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以撤销上课确认');
+    const replay = await this.findCommandLessonId(tx, input.commandId, actor.id);
+    if (replay) return this.getLessonWithClient(tx, replay, id);
+    await this.lockLesson(tx, id);
+    const lesson = await tx.lesson.findUnique({ where: { id }, select: COMPLETION_LESSON_SELECT });
+    if (!lesson) throw new NotFoundException('排课不存在');
+    if (lesson.status !== LessonStatus.COMPLETED) throw new ConflictException('只有已完成排课可以撤销确认');
+    if (expected && (lesson.version !== expected.lessonVersion || lesson.account.version !== expected.accountVersion)) {
+      throw new ConflictException('课程状态或账户余额已变化，请重新预览');
+    }
+    const consumption = await tx.ledgerEntry.findUnique({ where: { lessonId: id },
+      select: { id: true, accountId: true, paidDelta: true, giftDelta: true } });
+    if (!consumption || (expected && consumption.id !== expected.consumptionEntryId)) {
+      throw new ConflictException('课程消费流水已变化，请重新预览');
+    }
+    await this.lockAccount(tx, lesson.accountId);
+    const existingReversal = await tx.ledgerEntry.findUnique({ where: { reversesEntryId: consumption.id }, select: { id: true } });
+    if (existingReversal) throw new ConflictException('该课程确认已撤销');
+    const occurredAt = new Date();
+    await this.periods.assertWritableForDate(occurredAt, tx);
+    await tx.ledgerEntry.create({ data: {
+      accountId: consumption.accountId, kind: LedgerEntryKind.LESSON_CONSUMPTION_REVERSAL,
+      paidDelta: consumption.paidDelta.negated(), giftDelta: consumption.giftDelta.negated(), occurredAt,
+      note: input.note?.trim() || null, createdById: actor.id, commandId: input.commandId, reversesEntryId: consumption.id,
+    } });
+    const restored = await tx.lesson.update({ where: { id }, data: {
+      status: LessonStatus.SCHEDULED, unitPriceSnapshot: null, completedAt: null, completedById: null,
+      version: { increment: 1 },
+    }, select: LESSON_SELECT });
+    await this.incrementAccountVersion(tx, lesson.accountId);
+    return toSummary(restored);
   }
 
   private async resolveCommandReplay(id: string, commandId: string, actorId: string): Promise<LessonSummary> {

@@ -58,6 +58,24 @@ const BatchLessonPreviewSchema = z.object({
   idempotencyKey: z.string().uuid(),
   requestId: z.string().uuid(),
 }).strict();
+const LessonMutationPreviewBaseSchema = z.object({
+  lessonId: z.string().uuid(),
+  note: z.string().trim().min(1).max(2000).optional(),
+  idempotencyKey: z.string().uuid(),
+  requestId: z.string().uuid(),
+}).strict();
+const ReschedulePreviewSchema = LessonMutationPreviewBaseSchema.extend({
+  startsAt: z.string().datetime({ offset: true }).transform((value) => new Date(value)),
+}).strict();
+const StructuredActionPreviewSchema = z.object({
+  actionType: z.enum([
+    'lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal',
+    'manual-transaction.create', 'payroll.generate', 'payroll.pay', 'period.close', 'period.reopen',
+  ]),
+  command: z.record(z.string(), z.unknown()),
+  idempotencyKey: z.string().uuid(),
+  requestId: z.string().uuid(),
+}).strict();
 
 const MoneyPreviewBaseSchema = z.object({
   accountId: z.string().uuid(),
@@ -158,6 +176,66 @@ export class AssistantActionsController {
     const capability = request.capability;
     if (!capability) throw new UnauthorizedException('缺少 Capability');
     return this.service.createBatchLessonPreview({ ...parsed.data, actorUserId: capability.sub, runId: capability.runId });
+  }
+
+  @Post('lessons/reschedule/preview')
+  @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'startsAt', 'idempotencyKey', 'requestId'] } })
+  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @RequiresCapability('PREVIEW_L1')
+  createReschedulePreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
+    const parsed = ReschedulePreviewSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    const capability = request.capability;
+    if (!capability) throw new UnauthorizedException('缺少 Capability');
+    return this.service.createReschedulePreview({ ...parsed.data, actorUserId: capability.sub, runId: capability.runId });
+  }
+
+  @Post('lessons/cancel/preview')
+  @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'idempotencyKey', 'requestId'] } })
+  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @RequiresCapability('PREVIEW_L1')
+  createCancelPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
+    const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    const capability = request.capability;
+    if (!capability) throw new UnauthorizedException('缺少 Capability');
+    return this.service.createCancelPreview({ ...parsed.data, actorUserId: capability.sub, runId: capability.runId });
+  }
+
+  @Post('lessons/complete/preview')
+  @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'idempotencyKey', 'requestId'] } })
+  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @RequiresCapability('PREVIEW_L1')
+  createCompletionPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
+    const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    const capability = request.capability;
+    if (!capability) throw new UnauthorizedException('缺少 Capability');
+    return this.service.createCompletionPreview({ ...parsed.data, actorUserId: capability.sub, runId: capability.runId });
+  }
+
+  @Post('lessons/complete/reversal/preview')
+  @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'idempotencyKey', 'requestId'] } })
+  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @RequiresCapability('PREVIEW_L1')
+  createCompletionReversalPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
+    const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    const capability = request.capability;
+    if (!capability) throw new UnauthorizedException('缺少 Capability');
+    return this.service.createCompletionReversalPreview({ ...parsed.data, actorUserId: capability.sub, runId: capability.runId });
+  }
+
+  @Post('structured-action/preview')
+  @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['actionType', 'command', 'idempotencyKey', 'requestId'] } })
+  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @RequiresCapability('PREVIEW_L2')
+  createStructuredActionPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
+    const parsed = StructuredActionPreviewSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    const capability = request.capability;
+    if (!capability) throw new UnauthorizedException('缺少 Capability');
+    return this.service.createStructuredActionPreview({ ...parsed.data, actorUserId: capability.sub, runId: capability.runId });
   }
 
   @Post('course-accounts/payment/preview')

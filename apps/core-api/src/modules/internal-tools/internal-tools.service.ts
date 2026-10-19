@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { LessonStatus, PayrollStatus, UserRole } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 
@@ -37,6 +37,23 @@ export type TeacherCandidate = {
 export type StudentCandidate = {
   studentId: string;
   name: string;
+};
+
+export type LessonCandidate = {
+  lessonId: string;
+  studentName: string;
+  courseName: string;
+  teacherName: string;
+  startsAt: Date;
+  status: LessonStatus;
+};
+
+export type PayrollCandidate = {
+  payrollId: string;
+  teacherId: string;
+  teacherName: string;
+  period: string;
+  status: PayrollStatus;
 };
 
 function businessDateParts(value: Date): { date: string; year: number; month: number } {
@@ -177,6 +194,66 @@ export class InternalToolsService {
       select: { id: true, name: true },
     });
     return { candidates: students.map((student) => ({ studentId: student.id, name: student.name })) };
+  }
+
+  async lessonCandidates(
+    subjectId: string,
+    input: { studentName: string; date?: string | undefined },
+  ): Promise<{ candidates: LessonCandidate[] }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: subjectId },
+      select: { role: true, isActive: true, teacher: { select: { id: true, isActive: true } } },
+    });
+    if (!user?.isActive || ![UserRole.OWNER, UserRole.TEACHER].includes(user.role)) {
+      throw new ForbiddenException('Capability 用户角色不可用');
+    }
+    const where = {
+      student: { name: input.studentName.trim() },
+      ...(input.date ? {
+        startsAt: {
+          gte: new Date(`${input.date}T00:00:00+08:00`),
+          lt: new Date(new Date(`${input.date}T00:00:00+08:00`).getTime() + 24 * 60 * 60 * 1000),
+        },
+      } : {}),
+      ...(user.role === UserRole.TEACHER ? { teacherId: user.teacher?.id ?? '__none__' } : {}),
+    };
+    const lessons = await this.prisma.lesson.findMany({
+      where,
+      orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true, startsAt: true, status: true,
+        account: { select: { student: { select: { name: true } }, course: { select: { name: true } } } },
+        teacher: { select: { name: true } },
+      },
+    });
+    return { candidates: lessons.map((lesson) => ({
+      lessonId: lesson.id,
+      studentName: lesson.account.student.name,
+      courseName: lesson.account.course.name,
+      teacherName: lesson.teacher.name,
+      startsAt: lesson.startsAt,
+      status: lesson.status,
+    })) };
+  }
+
+  async payrollCandidates(
+    subjectId: string,
+    input: { teacherName: string; period: string },
+  ): Promise<{ candidates: PayrollCandidate[] }> {
+    const user = await this.prisma.user.findUnique({ where: { id: subjectId }, select: { role: true, isActive: true } });
+    if (!user?.isActive || user.role !== UserRole.OWNER) throw new ForbiddenException('仅启用中的店主可查询工资候选');
+    const match = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(input.period);
+    if (!match) throw new BadRequestException('工资月份格式不合法');
+    const periodStart = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
+    const payrolls = await this.prisma.payroll.findMany({
+      where: { periodStart, teacher: { name: input.teacherName.trim() } },
+      orderBy: [{ teacher: { name: 'asc' } }, { id: 'asc' }],
+      select: { id: true, teacherId: true, periodStart: true, status: true, teacher: { select: { name: true } } },
+    });
+    return { candidates: payrolls.map((payroll) => ({
+      payrollId: payroll.id, teacherId: payroll.teacherId, teacherName: payroll.teacher.name,
+      period: input.period, status: payroll.status,
+    })) };
   }
 
   async dashboardSummary(subjectId: string, now = new Date()): Promise<DashboardSummary> {

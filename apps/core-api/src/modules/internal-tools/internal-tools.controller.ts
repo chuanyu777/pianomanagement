@@ -30,6 +30,14 @@ const TeacherCandidatesQuerySchema = z.object({
 const StudentCandidatesQuerySchema = z.object({
   studentName: z.string().trim().min(1).max(100),
 }).strict();
+const LessonCandidatesQuerySchema = z.object({
+  studentName: z.string().trim().min(1).max(100),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+}).strict();
+const PayrollCandidatesQuerySchema = z.object({
+  teacherName: z.string().trim().min(1).max(100),
+  period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+}).strict();
 
 @ApiTags('InternalTools')
 @ApiHeader({ name: 'authorization', required: true, description: 'Bearer Capability' })
@@ -97,5 +105,33 @@ export class InternalToolsController {
     const parsed = StudentCandidatesQuerySchema.safeParse(query);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
     return this.tools.studentCandidates(request.capability!.sub, parsed.data);
+  }
+
+  @Get('lesson-candidates')
+  @ApiOkResponse({ description: '按学生和可选业务日期查询排课候选' })
+  @ApiQuery({ name: 'studentName', required: true, type: String, maxLength: 100 })
+  @ApiQuery({ name: 'date', required: false, type: String, example: '2026-10-19' })
+  @RequiresCapability('READ')
+  lessonCandidates(
+    @Query() query: unknown,
+    @Req() request: CapabilityRequest,
+  ) {
+    const parsed = LessonCandidatesQuerySchema.safeParse(query);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    return this.tools.lessonCandidates(request.capability!.sub, parsed.data);
+  }
+
+  @Get('payroll-candidates')
+  @ApiOkResponse({ description: '按老师和业务月份查询工资候选，仅包含安全选择所需字段' })
+  @ApiQuery({ name: 'teacherName', required: true, type: String, maxLength: 100 })
+  @ApiQuery({ name: 'period', required: true, type: String, example: '2026-10' })
+  @RequiresCapability('READ')
+  payrollCandidates(
+    @Query() query: unknown,
+    @Req() request: CapabilityRequest,
+  ) {
+    const parsed = PayrollCandidatesQuerySchema.safeParse(query);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    return this.tools.payrollCandidates(request.capability!.sub, parsed.data);
   }
 }

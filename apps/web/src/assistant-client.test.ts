@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createAssistantIds,
+  confirmAssistantPreview,
   parseAssistantRun,
   parseAssistantSseFrame,
   startAssistantRun,
@@ -9,6 +10,7 @@ import {
 
 const runId = '4f229d18-5a0f-4ec2-904d-c522927d8d0c';
 const threadId = '9eb3b8c3-b730-4e49-baa0-0b4de36b9345';
+const previewId = '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d';
 
 describe('assistant client', () => {
   it('creates secure UUIDs for the thread and idempotent client request', () => {
@@ -44,6 +46,23 @@ describe('assistant client', () => {
         type: 'workspace.replace',
         document: { protocolVersion: '1.0', title: document.title, blocks: document.blocks.slice(0, 3) },
       });
+  });
+
+  it('parses a generic receipt workspace block without coupling to a business action type', () => {
+    const receipt = {
+      type: 'receipt',
+      receiptId: 'core-receipt-001',
+      title: '收款已登记',
+      status: 'succeeded',
+      occurredAt: '2026-10-19T02:00:00.000Z',
+    };
+    expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({
+      type: 'workspace.replace',
+      document: { protocolVersion: '1.0', title: '确认结果', blocks: [receipt] },
+    })}`)).toEqual({
+      type: 'workspace.replace',
+      document: { protocolVersion: '1.0', title: '确认结果', blocks: [receipt] },
+    });
   });
 
   it('rejects malformed workspace envelopes and supported blocks', () => {
@@ -114,5 +133,31 @@ describe('assistant client', () => {
       fetchImpl: vi.fn(async () => new Response(null, { status: 503 })),
       onEvent: () => undefined,
     })).rejects.toThrow('HTTP 503');
+  });
+
+  it('confirms with the logged-in JWT and preserves arbitrary Core receipt fields', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      previewId,
+      status: 'EXECUTED',
+      receipt: { actionType: 'course-account.payment', paymentId: 'payment-001', amount: '120.00', details: { channel: 'WECHAT' } },
+    }), { status: 200 }));
+    const result = await confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl: fetchMock });
+
+    expect(result.receipt).toEqual({ actionType: 'course-account.payment', paymentId: 'payment-001', amount: '120.00', details: { channel: 'WECHAT' } });
+    expect(fetchMock).toHaveBeenCalledWith(`/api/assistant/previews/${previewId}/confirm`, expect.objectContaining({
+      method: 'POST',
+      headers: expect.objectContaining({ Authorization: 'Bearer jwt', 'Idempotency-Key': runId }),
+    }));
+  });
+
+  it('turns Core conflict and malformed confirmation responses into safe UI errors', async () => {
+    await expect(confirmAssistantPreview({
+      token: 'jwt', previewId, idempotencyKey: runId,
+      fetchImpl: vi.fn(async () => new Response(null, { status: 409 })),
+    })).rejects.toThrow('预览已失效或已被其他请求确认');
+    await expect(confirmAssistantPreview({
+      token: 'jwt', previewId, idempotencyKey: runId,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({ previewId, status: 'EXECUTED', receipt: [] }), { status: 200 })),
+    })).rejects.toThrow('确认响应格式无效');
   });
 });

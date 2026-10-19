@@ -103,6 +103,14 @@ button { cursor: pointer; }
 .workspace-summary { padding: 13px; border: 1px solid #edf0f4; border-radius: 12px; background: #fff; }
 .workspace-summary strong { color: #555d70; font-size: 11px; }
 .workspace-summary p { margin: 7px 0 0; color: #858c9c; font-size: 11px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-alert { margin-top: 10px; border-radius: 10px; }
+.receipt-result { margin-top: 12px; padding-top: 12px; border-top: 1px solid #edf0f4; }
+.receipt-result strong { color: #555d70; font-size: 11px; }
+.receipt-result p { margin: 7px 0 0; color: #858c9c; font-size: 11px; }
+.receipt-result dl { margin: 8px 0 0; }
+.receipt-row { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 10px; padding: 6px 0; border-top: 1px solid #f1f2f5; font-size: 10px; }
+.receipt-row dt { color: #9299a8; overflow-wrap: anywhere; }
+.receipt-row dd { margin: 0; color: #555d70; overflow-wrap: anywhere; white-space: pre-wrap; }
 .workspace-alerts { display: grid; gap: 8px; }
 .workspace-alerts .ant-alert { padding: 9px 10px; border-radius: 11px; }
 .workspace-alerts .ant-alert-message { font-size: 11px; }

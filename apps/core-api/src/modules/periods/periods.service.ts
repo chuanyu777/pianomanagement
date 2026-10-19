@@ -26,8 +26,16 @@ export class PeriodsService {
   }
 
   async close(periodStart: Date, actorId: string): Promise<ClosedPeriodSummary> {
+    return this.prisma.$transaction((tx) => this.closeInTransaction(tx, periodStart, actorId));
+  }
+
+  async closeInTransaction(
+    tx: Prisma.TransactionClient,
+    periodStart: Date,
+    actorId: string,
+  ): Promise<ClosedPeriodSummary> {
     try {
-      const closed = await this.prisma.closedPeriod.create({
+      const closed = await tx.closedPeriod.create({
         data: { periodStart, closedById: actorId },
         select: { periodStart: true, closedAt: true, reopenedAt: true, reopenReason: true },
       });
@@ -41,25 +49,46 @@ export class PeriodsService {
   }
 
   async reopen(periodStart: Date, reason: string, actorId: string): Promise<ClosedPeriodSummary> {
-    return this.prisma.$transaction(async (tx) => {
-      const target = await tx.closedPeriod.findUnique({
-        where: { periodStart },
-        select: { id: true, reopenedAt: true },
-      });
-      if (!target) throw new NotFoundException('该月份尚未关账');
-      if (target.reopenedAt) throw new ConflictException('该月份已经重新打开');
-      const latest = await tx.closedPeriod.findFirst({
-        where: { reopenedAt: null },
-        orderBy: { closedAt: 'desc' },
-        select: { id: true },
-      });
-      if (latest?.id !== target.id) throw new ConflictException('只能重新打开最近一次关账的月份');
-      return tx.closedPeriod.update({
-        where: { id: target.id },
-        data: { reopenedAt: new Date(), reopenedById: actorId, reopenReason: reason.trim() },
-        select: { periodStart: true, closedAt: true, reopenedAt: true, reopenReason: true },
-      });
+    return this.prisma.$transaction((tx) => this.reopenInTransaction(tx, periodStart, reason, actorId));
+  }
+
+  async reopenInTransaction(
+    tx: Prisma.TransactionClient,
+    periodStart: Date,
+    reason: string,
+    actorId: string,
+  ): Promise<ClosedPeriodSummary> {
+    const normalizedReason = reason.trim();
+    if (!normalizedReason) throw new ConflictException('重开关账月份必须填写原因');
+    const target = await this.getReopenableInTransaction(tx, periodStart);
+    return tx.closedPeriod.update({
+      where: { id: target.id },
+      data: { reopenedAt: new Date(), reopenedById: actorId, reopenReason: normalizedReason },
+      select: { periodStart: true, closedAt: true, reopenedAt: true, reopenReason: true },
     });
+  }
+
+  async previewReopen(periodStart: Date): Promise<{ closedPeriodId: string; closedAt: Date }> {
+    return this.prisma.$transaction(async (tx) => {
+      const target = await this.getReopenableInTransaction(tx, periodStart);
+      return { closedPeriodId: target.id, closedAt: target.closedAt };
+    });
+  }
+
+  private async getReopenableInTransaction(tx: Prisma.TransactionClient, periodStart: Date) {
+    const target = await tx.closedPeriod.findUnique({
+      where: { periodStart },
+      select: { id: true, closedAt: true, reopenedAt: true },
+    });
+    if (!target) throw new NotFoundException('该月份尚未关账');
+    if (target.reopenedAt) throw new ConflictException('该月份已经重新打开');
+    const latest = await tx.closedPeriod.findFirst({
+      where: { reopenedAt: null },
+      orderBy: { closedAt: 'desc' },
+      select: { id: true },
+    });
+    if (latest?.id !== target.id) throw new ConflictException('只能重新打开最近一次关账的月份');
+    return target;
   }
 
   list(): Promise<ClosedPeriodSummary[]> {

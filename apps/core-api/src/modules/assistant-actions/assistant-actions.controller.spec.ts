@@ -15,6 +15,7 @@ describe('Assistant Actions controllers', () => {
     expect(Reflect.getMetadata(CAPABILITY_PERMISSION, AssistantActionsController.prototype.createPaymentPreview)).toBe('PREVIEW_L2');
     expect(Reflect.getMetadata(CAPABILITY_PERMISSION, AssistantActionsController.prototype.createGiftPreview)).toBe('PREVIEW_L2');
     expect(Reflect.getMetadata(CAPABILITY_PERMISSION, AssistantActionsController.prototype.previewFinalRefund)).toBe('PREVIEW_L2');
+    expect(Reflect.getMetadata(CAPABILITY_PERMISSION, AssistantActionsController.prototype.createStructuredActionPreview)).toBe('PREVIEW_L2');
     expect(Reflect.getMetadata('__guards__', AssistantPreviewConfirmController)).toEqual([JwtAuthGuard, RolesGuard]);
     expect(Reflect.getMetadata(REQUIRED_ROLES, AssistantPreviewConfirmController)).toEqual(['OWNER', 'TEACHER']);
   });
@@ -86,5 +87,18 @@ describe('Assistant Actions controllers', () => {
     expect(() => controller.createSingleLessonPreview({}, { capability: { sub: 'owner', runId: 'run' } } as never))
       .toThrow('请求参数不合法');
     expect(service.createSingleLessonPreview).not.toHaveBeenCalled();
+  });
+
+  it('binds the unified structured action Preview to the Capability subject and run', async () => {
+    const service = { createStructuredActionPreview: vi.fn(async (input) => input) };
+    const controller = new AssistantActionsController(service as never);
+    const result = await controller.createStructuredActionPreview({
+      actionType: 'manual-transaction.create',
+      command: { kind: 'INCOME', incomeCategory: 'BOOK_SALE', amount: '100.00', channel: 'CASH', occurredAt: '2026-11-02T09:00:00+08:00' },
+      idempotencyKey: '392c6583-b831-4073-bb34-f3f923c3590b',
+      requestId: 'e795886b-4024-4758-94f1-19a90e03914e',
+    }, { capability: { sub: 'owner-1', runId: 'run-1' } } as never);
+    expect(result).toMatchObject({ actionType: 'manual-transaction.create', actorUserId: 'owner-1', runId: 'run-1' });
+    expect(service.createStructuredActionPreview).toHaveBeenCalledOnce();
   });
 });

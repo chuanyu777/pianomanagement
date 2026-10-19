@@ -11,6 +11,7 @@ export type WorkspaceBlock =
   | { type: 'alert-list'; alerts: { severity: 'info' | 'warning' | 'error'; title: string; detail?: string }[] }
   | { type: 'metric-grid'; metrics: { label: string; value: string; tone: 'neutral' | 'positive' | 'warning' }[] }
   | { type: 'calculation-breakdown'; title: string; lines: { label: string; amount: string }[]; total: string }
+  | { type: 'receipt'; receiptId: string; title: string; status: 'succeeded' | 'failed'; occurredAt: string }
   | { type: 'action-preview'; previewId: string; actionType: string; schemaVersion: string; title: string; riskLevel: 'L1' | 'L2'; expiresAt: string };
 
 export type WorkspaceDocument = { protocolVersion: '1.0'; title: string; blocks: WorkspaceBlock[] };
@@ -78,6 +79,13 @@ function parseWorkspaceDocument(value: unknown): WorkspaceDocument | null {
         lines.push({ label: rawLine.label, amount: rawLine.amount });
       }
       blocks.push({ type: 'calculation-breakdown', title: rawBlock.title, lines, total: rawBlock.total });
+    } else if (rawBlock.type === 'receipt') {
+      if (typeof rawBlock.receiptId !== 'string' || rawBlock.receiptId.trim().length === 0 ||
+          typeof rawBlock.title !== 'string' || rawBlock.title.trim().length === 0 ||
+          !['succeeded', 'failed'].includes(String(rawBlock.status)) || typeof rawBlock.occurredAt !== 'string' ||
+          Number.isNaN(Date.parse(rawBlock.occurredAt))) return null;
+      blocks.push({ type: 'receipt', receiptId: rawBlock.receiptId, title: rawBlock.title,
+        status: rawBlock.status as 'succeeded' | 'failed', occurredAt: rawBlock.occurredAt });
     } else if (rawBlock.type === 'action-preview') {
       if (typeof rawBlock.previewId !== 'string' || !UUID_PATTERN.test(rawBlock.previewId) ||
           typeof rawBlock.actionType !== 'string' || rawBlock.actionType.trim().length === 0 ||

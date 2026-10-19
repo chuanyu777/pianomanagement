@@ -329,7 +329,9 @@ function ContextPanel({ onClear, workspace }: { onClear: () => void; workspace: 
           {block.metrics.map((metric, metricIndex) => <div className={`workspace-metric tone-${metric.tone}`} key={`${metric.label}-${metricIndex}`}><span>{metric.label}</span><strong>{metric.value}</strong></div>)}
         </div>;
         if (block.type === 'calculation-breakdown') return <section aria-label="金额计算" className="workspace-summary" key={`calculation-${index}`}><strong>{block.title}</strong>{block.lines.map((line) => <p key={line.label}>{line.label}：¥{line.amount}</p>)}<p><strong>合计：¥{block.total}</strong></p></section>;
-        return <PreviewConfirmationCard key={`preview-${index}`} preview={block} />;
+        if (block.type === 'receipt') return <ReceiptBlockView block={block} key={`receipt-${index}`} />;
+        if (block.type === 'action-preview') return <PreviewConfirmationCard key={`preview-${index}`} preview={block} />;
+        return null;
       })}
       {workspace.blocks.length === 0 && <p className="workspace-empty">当前结果没有可展示的工作区内容。</p>}
     </div> : <div className="empty-context"><span className="empty-orbit" aria-hidden="true">＋</span><strong>还没有工作区内容</strong><span>向助手提问后，真实返回的摘要、提醒和指标会显示在这里。</span></div>}
@@ -341,32 +343,76 @@ function ContextPanel({ onClear, workspace }: { onClear: () => void; workspace: 
 function PreviewConfirmationCard({ preview }: { preview: Extract<WorkspaceBlock, { type: 'action-preview' }> }) {
   const [status, setStatus] = useState<'idle' | 'confirming' | 'confirmed' | 'failed'>('idle');
   const [message, setMessage] = useState('');
+  const [receipt, setReceipt] = useState<Record<string, unknown> | null>(null);
+  const [expired, setExpired] = useState(() => Date.parse(preview.expiresAt) <= Date.now());
+  useEffect(() => {
+    const expiresAt = Date.parse(preview.expiresAt);
+    const remaining = expiresAt - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      setExpired(true);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setExpired(true), Math.min(remaining, 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  }, [preview.expiresAt]);
+
   const confirm = async () => {
-    if (status !== 'idle' || typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') return;
+    if (expired || status === 'confirming' || status === 'confirmed' || typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') return;
     setStatus('confirming');
     setMessage('');
     try {
       const result = await confirmAssistantPreview({ token: getToken(), previewId: preview.previewId, idempotencyKey: crypto.randomUUID() });
-      const receiptId = typeof result.receipt?.['refundId'] === 'string' ? result.receipt['refundId'] :
-        typeof result.receipt?.['ledgerEntryId'] === 'string' ? result.receipt['ledgerEntryId'] :
-        typeof result.receipt?.['lessonId'] === 'string' ? result.receipt['lessonId'] : result.previewId;
+      setReceipt(result.receipt);
       setStatus('confirmed');
-      setMessage(`已确认并执行，回执编号：${receiptId}`);
+      setMessage('已确认并执行。');
     } catch (cause) {
       setStatus('failed');
       setMessage(cause instanceof Error ? cause.message : '确认失败，请稍后重试。');
     }
   };
-  const expired = Date.parse(preview.expiresAt) <= Date.now();
   return <section aria-label="操作预览" className="workspace-summary">
-    <strong>{preview.title}</strong><p>风险等级：{preview.riskLevel} · 有效至 {formatDateTime(preview.expiresAt)}</p>
+    <strong>{preview.title}</strong>
+    <p>动作类型：{preview.actionType} · 版本：{preview.schemaVersion}</p>
+    <p>风险等级：{preview.riskLevel} · 有效至 {formatDateTime(preview.expiresAt)}</p>
     <p>预览编号：{preview.previewId}</p>
-    {status === 'confirmed' ? <Alert message={message} showIcon type="success" /> : <>
-      {message && <Alert message={message} showIcon type="error" />}
+    {expired && status !== 'confirmed' && <Alert className="preview-alert" message="预览已过期，未执行任何操作。请重新生成预览。" showIcon type="warning" />}
+    {status === 'confirmed' ? <>
+      <Alert message={message} showIcon type="success" />
+      <ReceiptResult receipt={receipt} />
+    </> : <>
+      {message && <Alert className="preview-alert" message={message} showIcon type="error" />}
       <Button danger={preview.riskLevel === 'L2'} disabled={expired || status === 'confirming'} loading={status === 'confirming'} onClick={confirm} type="primary">
-        {expired ? '预览已过期' : preview.riskLevel === 'L2' ? '确认并登记' : '确认执行'}
+        {expired ? '预览已过期' : status === 'failed' ? '重试确认' : preview.riskLevel === 'L2' ? '确认并登记' : '确认执行'}
       </Button>
     </>}
+  </section>;
+}
+
+function ReceiptBlockView({ block }: { block: Extract<WorkspaceBlock, { type: 'receipt' }> }) {
+  return <section aria-label="业务回执" className="workspace-summary receipt-block">
+    <strong>{block.title}</strong>
+    <p>回执编号：{block.receiptId}</p>
+    <p>状态：{block.status === 'succeeded' ? '成功' : '失败'} · 时间：{formatDateTime(block.occurredAt)}</p>
+  </section>;
+}
+
+function receiptValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? String(value) : serialized;
+  } catch {
+    return '[无法展示]';
+  }
+}
+
+function ReceiptResult({ receipt }: { receipt: Record<string, unknown> | null }) {
+  if (!receipt) return <Alert className="preview-alert" message="Core 已确认，但未返回回执明细。" showIcon type="info" />;
+  const entries = Object.entries(receipt);
+  return <section aria-label="Core 回执明细" className="receipt-result">
+    <strong>Core 回执明细</strong>
+    {entries.length === 0 ? <p>Core 返回了空回执。</p> : <dl>{entries.map(([key, value]) => <div className="receipt-row" key={key}><dt>{key}</dt><dd>{receiptValue(value)}</dd></div>)}</dl>}
   </section>;
 }
 

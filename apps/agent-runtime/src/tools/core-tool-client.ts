@@ -111,6 +111,7 @@ const PREVIEW_PATHS = {
   payment: '/assistant-actions/course-accounts/payment/preview',
   gift: '/assistant-actions/course-accounts/gift/preview',
   finalRefund: '/assistant-actions/students/final-refund/preview',
+  structuredAction: '/assistant-actions/structured-action/preview',
 } as const;
 
 type PreviewRequestPath = (typeof PREVIEW_PATHS)[keyof typeof PREVIEW_PATHS];
@@ -231,6 +232,36 @@ const StudentCandidatesSchema = z.object({
 }).strict();
 
 export type StudentCandidates = z.infer<typeof StudentCandidatesSchema>;
+
+const LessonCandidatesSchema = z.object({
+  candidates: z.array(z.object({
+    lessonId: z.uuid(), studentName: z.string().trim().min(1), courseName: z.string().trim().min(1),
+    teacherName: z.string().trim().min(1), startsAt: z.iso.datetime(), status: z.string().trim().min(1),
+  }).strict()),
+}).strict();
+
+export type LessonCandidates = z.infer<typeof LessonCandidatesSchema>;
+
+const PayrollCandidatesSchema = z.object({
+  candidates: z.array(z.object({
+    payrollId: z.uuid(), teacherId: z.uuid(), teacherName: z.string().trim().min(1), period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/), status: z.string().trim().min(1),
+  }).strict()),
+}).strict();
+export type PayrollCandidates = z.infer<typeof PayrollCandidatesSchema>;
+
+const StructuredActionPreviewRequestSchema = z.object({
+  actionType: z.string().trim().min(1), command: z.record(z.string(), z.unknown()),
+  idempotencyKey: z.uuid(), requestId: z.uuid(),
+}).strict();
+
+const StructuredActionPreviewResponseSchema = z.object({
+  previewId: z.uuid(), actionType: z.string().trim().min(1), command: z.record(z.string(), z.unknown()),
+  display: z.object({ title: z.string().min(1), summary: z.string().min(1) }).strict(),
+  expiresAt: z.iso.datetime(), auditEventId: z.uuid().optional(),
+}).strict();
+
+export type StructuredActionPreviewRequest = z.infer<typeof StructuredActionPreviewRequestSchema>;
+export type StructuredActionPreviewResponse = z.infer<typeof StructuredActionPreviewResponseSchema>;
 
 export class CoreToolClient {
   constructor(
@@ -353,6 +384,52 @@ export class CoreToolClient {
     });
     if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
     return StudentCandidatesSchema.parse(await response.json());
+  }
+
+  async getLessonCandidates(
+    capabilityToken: string,
+    input: { studentName: string; date?: string },
+  ): Promise<LessonCandidates> {
+    const studentName = z.string().trim().min(1).max(100).parse(input.studentName);
+    const query = new URLSearchParams({ studentName });
+    if (input.date) query.set('date', z.string().regex(/^\d{4}-\d{2}-\d{2}$/).parse(input.date));
+    const url = `${this.baseUrl}/tools/lesson-candidates?${query.toString()}`;
+    const target = new URL(url);
+    const authorization = `Bearer ${capabilityToken}`;
+    const response = await fetch(url, {
+      headers: {
+        authorization,
+        ...createSignedInternalRequestHeaders({ secret: this.serviceSecret, method: 'GET', path: `${target.pathname}${target.search}`, securityHeaders: { authorization } }),
+      },
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    return LessonCandidatesSchema.parse(await response.json());
+  }
+
+  async createStructuredActionPreview(
+    capabilityToken: string,
+    request: StructuredActionPreviewRequest,
+  ): Promise<StructuredActionPreviewResponse> {
+    const parsedRequest = StructuredActionPreviewRequestSchema.parse(request);
+    return this.postPreviewRequest(PREVIEW_PATHS.structuredAction, capabilityToken, parsedRequest, StructuredActionPreviewResponseSchema);
+  }
+
+  async getPayrollCandidates(
+    capabilityToken: string,
+    input: { teacherName: string; period: string },
+  ): Promise<PayrollCandidates> {
+    const teacherName = z.string().trim().min(1).max(100).parse(input.teacherName);
+    const period = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).parse(input.period);
+    const url = `${this.baseUrl}/tools/payroll-candidates?${new URLSearchParams({ teacherName, period }).toString()}`;
+    const target = new URL(url);
+    const authorization = `Bearer ${capabilityToken}`;
+    const response = await fetch(url, {
+      headers: { authorization, ...createSignedInternalRequestHeaders({ secret: this.serviceSecret, method: 'GET', path: `${target.pathname}${target.search}`, securityHeaders: { authorization } }) },
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    return PayrollCandidatesSchema.parse(await response.json());
   }
 
   async createSingleLessonPreview(

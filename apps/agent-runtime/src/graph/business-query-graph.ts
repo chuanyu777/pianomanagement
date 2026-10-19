@@ -9,8 +9,11 @@ import type {
   BatchLessonPreviewResponse,
   FinalRefundPreviewResponse,
   GiftPreviewResponse,
+  LessonCandidates,
+  PayrollCandidates,
   PaymentPreviewResponse,
   SingleLessonPreviewResponse,
+  StructuredActionPreviewResponse,
   StudentCandidates,
   TeacherCandidates,
 } from '../tools/core-tool-client.js';
@@ -21,10 +24,16 @@ type MoneyPreview = PaymentPreviewResponse | GiftPreviewResponse;
 type LessonIntent = { studentName: string; courseName: string; teacherName: string; startsAt: string };
 type BatchLessonIntent = LessonIntent & { weeks: number };
 type RefundIntent = { studentName: string; feeAmount: string; channel: PaymentChannel; note?: string };
+type StructuredActionKind = 'lesson.reschedule' | 'lesson.cancel' | 'lesson.complete' | 'lesson.complete.reversal' | 'manual-transaction.create' | 'payroll.generate' | 'payroll.pay' | 'period.close' | 'period.reopen';
+type StructuredActionIntent = {
+  kind: StructuredActionKind; studentName?: string; teacherName?: string; date?: string; targetStartsAt?: string;
+  amount?: string; channel?: PaymentChannel; category?: string; transactionKind?: 'INCOME' | 'EXPENSE'; period?: string; reason?: string;
+};
 
 const QueryState = Annotation.Root({
   runId: Annotation<string>(), threadId: Annotation<string>(), userMessage: Annotation<string>(),
   dashboardSummary: Annotation<DashboardSummary | undefined>(), moneyIntent: Annotation<MoneyIntent | undefined>(), lessonIntent: Annotation<LessonIntent | undefined>(), batchLessonIntent: Annotation<BatchLessonIntent | undefined>(), refundIntent: Annotation<RefundIntent | undefined>(),
+  actionIntent: Annotation<StructuredActionIntent | undefined>(), lessonActionCandidates: Annotation<LessonCandidates | undefined>(), payrollCandidates: Annotation<PayrollCandidates | undefined>(), structuredActionPreview: Annotation<StructuredActionPreviewResponse | undefined>(),
   clarification: Annotation<string | undefined>(), accountCandidates: Annotation<CourseAccountCandidates | undefined>(), studentCandidates: Annotation<StudentCandidates | undefined>(),
   teacherCandidates: Annotation<TeacherCandidates | undefined>(), moneyPreview: Annotation<MoneyPreview | undefined>(), lessonPreview: Annotation<SingleLessonPreviewResponse | undefined>(), batchLessonPreview: Annotation<BatchLessonPreviewResponse | undefined>(), refundPreview: Annotation<FinalRefundPreviewResponse | undefined>(), workspace: Annotation<WorkspaceDocument | undefined>(), answer: Annotation<string | undefined>(),
 });
@@ -83,25 +92,44 @@ function parseMoneyIntent(message: string): { moneyIntent?: MoneyIntent; clarifi
   } };
 }
 
-function parseUnsupportedWriteIntent(message: string): { clarification?: string } {
+function parseStructuredActionIntent(message: string): { actionIntent?: StructuredActionIntent; clarification?: string } {
   const text = message.trim();
-  if (/调课|改课|更改上课时间/u.test(text)) {
-    return { clarification: '我识别到这是调课请求。当前 Core 只有直接调课接口，没有 Assistant Preview，也没有供 Agent 唯一定位现有课程的内部查询接口；请先在课程页面处理，Agent 不会直接改排课。' };
+  const directCompletion = /^(?<operation>撤销|确认)\s*(?<student>[^的，,\s]+).*?(?<completion>上课|课消|确认)/u.exec(text);
+  const lesson = directCompletion ?? /^(?:(?:把|给)\s*)?(?<student>[^的，,\s]+)(?:的)?[^，,]*?(?<operation>调课|改课|调到|更改上课时间|请假|取消排课|取消课程|取消这节课|撤销确认|撤销课消|确认上课|上课确认|消课)[^\d]*(?:(?<date>\d{4}-\d{2}-\d{2})\s+(?<time>\d{2}:\d{2}))?/u.exec(text);
+  if (lesson?.groups) {
+    const operation = directCompletion ? lesson.groups['operation']! : lesson.groups['operation']!;
+    const kind: StructuredActionKind = /调课|改课|调到|更改/u.test(operation) ? 'lesson.reschedule'
+      : /请假|取消/u.test(operation) ? 'lesson.cancel'
+        : /撤销/u.test(operation) ? 'lesson.complete.reversal' : 'lesson.complete';
+    if (kind === 'lesson.reschedule' && (!lesson.groups['date'] || !lesson.groups['time'])) {
+      return { clarification: '我识别到这是调课请求，但目标时间不足；当前没有 Assistant Preview，不会直接改课。请补充目标时间，例如：把小明的课调到 2026-10-21 15:00。' };
+    }
+    return { actionIntent: { kind, studentName: lesson.groups['student']!.trim(), ...(lesson.groups['date'] && lesson.groups['time'] ? { date: lesson.groups['date'], targetStartsAt: `${lesson.groups['date']}T${lesson.groups['time']}:00+08:00` } : {}) } };
   }
-  if (/请假|取消排课|取消课程|取消这节课/u.test(text)) {
-    return { clarification: '我识别到这是取消排课（请假）请求。当前 Core 没有 Assistant Preview，也没有供 Agent 唯一定位现有课程的内部查询接口；Agent 暂不能安全取消课程。' };
+  const manual = /^(?:登记|记录|记一笔|录入|新增)\s*(?<category>[^\d，,]+?)?\s*(?<kind>收入|支出)\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?:元|块)?(?:[，,]\s*(?<channel>现金|微信|支付宝|银行卡|其他))?/u.exec(text);
+  if (manual?.groups) {
+    const amount = toPositiveMoneyString(manual.groups['amount']!);
+    if (!amount) return { clarification: '手工收支金额需要是大于零的正数，最多保留两位小数。' };
+    if (!manual.groups['channel']) return { clarification: '我识别到这是手工收支登记，但当前没有 Assistant Preview；还需要渠道：现金、微信、支付宝、银行卡或其他。' };
+    const category = manual.groups['category']?.trim();
+    return { actionIntent: { kind: 'manual-transaction.create', amount, channel: CHANNELS[manual.groups['channel']!]!, transactionKind: manual.groups['kind'] === '收入' ? 'INCOME' : 'EXPENSE', ...(category ? { category } : {}) } };
   }
-  if (/确认上课|上课确认|消课|确认.*(?:上课|课程)/u.test(text)) {
-    return { clarification: '我识别到这是确认上课请求。当前 Core 只有直接确认/冲正接口，没有 Assistant Preview，也没有供 Agent 唯一定位现有课程的内部查询接口；Agent 不会直接确认或扣减课程余额。' };
+  const payroll = /^(?:生成|核算)\s*(?<teacher>[^\s，,]+)\s*(?<period>\d{4}-\d{2})\s*(?:工资|薪资|课时费)/u.exec(text);
+  if (payroll?.groups) return { actionIntent: { kind: 'payroll.generate', teacherName: payroll.groups['teacher']!.replace(/老师$/u, ''), period: payroll.groups['period']! } };
+  const payrollPay = /^(?:支付|发放|登记支付)\s*(?<teacher>[^\s，,]+)\s*(?<period>\d{4}-\d{2})\s*(?:工资|薪资|课时费)\s*(?:[，,]\s*(?<channel>现金|微信|支付宝|银行卡|其他))?/u.exec(text);
+  if (payrollPay?.groups) {
+    if (!payrollPay.groups['channel']) return { clarification: '登记工资支付还需要渠道：现金、微信、支付宝、银行卡或其他。' };
+    return { actionIntent: { kind: 'payroll.pay', teacherName: payrollPay.groups['teacher']!.replace(/老师$/u, ''), period: payrollPay.groups['period']!, channel: CHANNELS[payrollPay.groups['channel']!]! } };
   }
-  if (/(?:登记|记录|记一笔|录入|新增).*(?:收入|支出)|(?:收入|支出).*(?:登记|记录|记一笔|录入)/u.test(text)) {
-    return { clarification: '我识别到这是手工收支登记。当前 Core 只有直接登记接口，没有 Assistant Preview；要安全支持还需要先补 Preview/Confirm 链路。现在不会写入收支。' };
+  const period = /^(?<operation>关账|结账|关闭账期|重开|重开账期|重新开账)\s*(?<period>\d{4}-\d{2})(?:[，,]\s*(?<reason>.+))?$/u.exec(text);
+  if (period?.groups) {
+    const kind: StructuredActionKind = /重开|重新/u.test(period.groups['operation']!) ? 'period.reopen' : 'period.close';
+    if (kind === 'period.reopen' && !period.groups['reason']?.trim()) return { clarification: '重开账期需要说明原因，例如：重开 2026-10，补录遗漏的收支。' };
+    return { actionIntent: { kind, period: period.groups['period']!, ...(period.groups['reason'] ? { reason: period.groups['reason'].trim() } : {}) } };
   }
-  if (/(?:生成|发(?:放)?|支付|核算|修改|调整|取消).*(?:工资|薪资|课时费)|(?:工资|薪资|课时费).*(?:生成|发(?:放)?|支付|核算|修改|调整|取消)/u.test(text)) {
-    return { clarification: '我识别到这是工资操作。当前 Core 的生成、调整、支付和撤销支付都是直接写接口，没有 Assistant Preview；现在不会生成工资或登记支付。' };
-  }
-  if (/关账|结账|关闭账期|重开账期|重新开账/u.test(text)) {
-    return { clarification: '我识别到这是关账或重开账期请求。当前 Core 只有直接关账/重开接口，没有 Assistant Preview；请先补齐账期与原因等信息，并由 Core 提供 Preview/Confirm 后再通过 Agent 操作。现在不会改变账期状态。' };
+  if (/调课|改课|更改上课时间|请假|取消排课|取消课程|确认上课|上课确认|消课|撤销确认|撤销课消|收入|支出|工资|薪资|课时费|关账|结账|重开账期|重新开账/u.test(text)) {
+    const label = /工资|薪资|课时费/u.test(text) ? '工资操作' : /关账|结账|重开/u.test(text) ? '关账或重开账期' : /收入|支出/u.test(text) ? '手工收支' : /请假|取消/u.test(text) ? '取消排课' : /确认|消课|撤销/u.test(text) ? '确认上课' : '调课';
+    return { clarification: `我识别到这是${label}，但对象或字段不足；当前没有 Assistant Preview。请补充学生/教师、目标时间、月份、金额、渠道或重开原因。当前不会进入经营摘要，也不会直接写入。` };
   }
   return {};
 }
@@ -134,13 +162,13 @@ function parseLessonIntent(message: string): { lessonIntent?: LessonIntent; batc
     : { lessonIntent };
 }
 
-function parseBusinessIntent(message: string): { moneyIntent?: MoneyIntent; lessonIntent?: LessonIntent; batchLessonIntent?: BatchLessonIntent; refundIntent?: RefundIntent; clarification?: string } {
+function parseBusinessIntent(message: string): { moneyIntent?: MoneyIntent; lessonIntent?: LessonIntent; batchLessonIntent?: BatchLessonIntent; refundIntent?: RefundIntent; actionIntent?: StructuredActionIntent; clarification?: string } {
   const refund = parseRefundIntent(message);
   if (refund.refundIntent || refund.clarification) return refund;
   const money = parseMoneyIntent(message);
   if (money.moneyIntent || money.clarification) return money;
-  const unsupportedWrite = parseUnsupportedWriteIntent(message);
-  if (unsupportedWrite.clarification) return unsupportedWrite;
+  const structuredAction = parseStructuredActionIntent(message);
+  if (structuredAction.actionIntent || structuredAction.clarification) return structuredAction;
   return parseLessonIntent(message);
 }
 
@@ -229,6 +257,14 @@ function createRefundWorkspace(intent: RefundIntent, preview: FinalRefundPreview
   ], sources: [{ type: 'student', id: preview.display.studentId, label: preview.display.studentName }] });
 }
 
+function createStructuredActionWorkspace(intent: StructuredActionIntent, preview: StructuredActionPreviewResponse): WorkspaceDocument {
+  const riskLevel = intent.kind.startsWith('lesson.') ? 'L1' : 'L2';
+  return WorkspaceDocumentSchema.parse({ protocolVersion, title: `操作预览 · ${preview.display.title}`, blocks: [
+    { type: 'summary', title: '等待你的严格确认', text: `${preview.display.summary} 预览已生成，尚未执行任何业务写入。` },
+    { type: 'action-preview', previewId: preview.previewId, actionType: preview.actionType, schemaVersion: `${preview.actionType}.v1`, title: preview.display.title, riskLevel, expiresAt: preview.expiresAt },
+  ], sources: [] });
+}
+
 const ACTION_CLAIM_PATTERN = /已(?:经)?(?:为你|帮(?:你|您))?(?:创建|新增|添加|更新|修改|删除|执行|完成|确认|安排|取消|退款|退费|收费|排课|记账|冻结|解冻|提交|撤销|支付|发放|结算)|(?:我)?(?:已(?:经)?|已经)?帮(?:你|您)(?:创建|新增|添加|更新|修改|删除|完成|确认|安排|取消|退款|退费|收费|排课|记账|冻结|解冻|提交|撤销|支付|发放|结算)|(?:操作|办理|提交|创建|修改|删除|安排|排课|退款|退费|收费|记账)(?:成功|完成)|操作成功/;
 function extractText(content: unknown): string {
   if (typeof content === 'string') return content.trim();
@@ -241,12 +277,15 @@ export function createBusinessQueryGraph(input: {
   fetchDashboardSummary: (capability: string) => Promise<DashboardSummary>;
   findCourseAccountCandidates?: (capability: string, query: { studentName: string; courseName: string }) => Promise<CourseAccountCandidates>;
   findStudentCandidates?: (capability: string, query: { studentName: string }) => Promise<StudentCandidates>;
+  findLessonCandidates?: (capability: string, query: { studentName: string; date?: string }) => Promise<LessonCandidates>;
+  findPayrollCandidates?: (capability: string, query: { teacherName: string; period: string }) => Promise<PayrollCandidates>;
   findTeacherCandidates?: (capability: string, query: { teacherName: string }) => Promise<TeacherCandidates>;
   createSingleLessonPreview?: (capability: string, request: { accountId: string; teacherId: string; startsAt: string; idempotencyKey: string; requestId: string }) => Promise<SingleLessonPreviewResponse>;
   createBatchLessonPreview?: (capability: string, request: { accountId: string; teacherId: string; firstStartsAt: string; weeks: number; idempotencyKey: string; requestId: string }) => Promise<BatchLessonPreviewResponse>;
   createFinalRefundPreview?: (capability: string, request: { studentId: string; feeAmount: string; channel: PaymentChannel; occurredAt: string; note?: string; idempotencyKey: string; requestId: string }) => Promise<FinalRefundPreviewResponse>;
   createPaymentPreview?: (capability: string, request: { accountId: string; amount: string; channel: PaymentChannel; occurredAt: string; note?: string; idempotencyKey: string; requestId: string }) => Promise<PaymentPreviewResponse>;
   createGiftPreview?: (capability: string, request: { accountId: string; amount: string; occurredAt: string; note?: string; idempotencyKey: string; requestId: string }) => Promise<GiftPreviewResponse>;
+  createActionPreview?: (capability: string, request: { actionType: StructuredActionKind; command: Record<string, unknown>; idempotencyKey: string; requestId: string }) => Promise<StructuredActionPreviewResponse>;
   model?: BaseChatModel;
 }) {
   return new StateGraph(QueryState)
@@ -297,6 +336,38 @@ export function createBusinessQueryGraph(input: {
       if (teacherCandidates.candidates.length === 1) return { teacherCandidates };
       const prefix = teacherCandidates.candidates.length === 0 ? '没有找到精确匹配的启用教师。' : `找到了 ${teacherCandidates.candidates.length} 位同名教师。`;
       return { teacherCandidates, clarification: `${prefix} 请补充能够唯一识别教师的信息后再试；在对象唯一前不会生成预览。` };
+    })
+    .addNode('resolveStructuredAction', async (state: QueryStateValue) => {
+      const intent = state.actionIntent;
+      if (!intent) throw new Error('STRUCTURED_ACTION_INTENT_MISSING');
+      if (intent.studentName && intent.kind.startsWith('lesson.')) {
+        if (!input.findLessonCandidates) return { clarification: `我识别到这是${intent.kind === 'lesson.cancel' ? '取消排课' : intent.kind === 'lesson.complete.reversal' ? '撤销确认' : intent.kind === 'lesson.complete' ? '确认上课' : '调课'}，但当前 Core 没有 Assistant Preview 或排课候选查询，无法安全唯一定位课程；因此不会创建预览或调用直接接口。` };
+        const candidates = await input.findLessonCandidates(input.capability, { studentName: intent.studentName, ...(intent.date ? { date: intent.date } : {}) });
+        if (candidates.candidates.length !== 1) {
+          const prefix = candidates.candidates.length === 0 ? '没有找到匹配的排课。' : `找到了 ${candidates.candidates.length} 条可能的排课。`;
+          return { lessonActionCandidates: candidates, clarification: `${prefix} 请补充课程、老师或具体日期，使排课对象唯一；在对象唯一前不会生成预览。` };
+        }
+        return { lessonActionCandidates: candidates };
+      }
+      if (intent.teacherName && intent.kind === 'payroll.generate') {
+        if (!input.findTeacherCandidates) return { clarification: '当前 Core 尚未提供教师候选查询，无法安全唯一定位工资对象；不会创建预览。' };
+        const candidates = await input.findTeacherCandidates(input.capability, { teacherName: intent.teacherName });
+        if (candidates.candidates.length !== 1) {
+          const prefix = candidates.candidates.length === 0 ? '没有找到匹配的启用教师。' : `找到了 ${candidates.candidates.length} 位同名教师。`;
+          return { clarification: `${prefix} 请补充教师信息；在对象唯一前不会生成工资预览。` };
+        }
+        return { teacherCandidates: candidates };
+      }
+      if (intent.teacherName && intent.kind === 'payroll.pay') {
+        if (!input.findPayrollCandidates) return { clarification: '当前 Core 尚未提供工资候选查询，无法安全唯一定位工资记录；不会创建预览。' };
+        const candidates = await input.findPayrollCandidates(input.capability, { teacherName: intent.teacherName, period: intent.period! });
+        if (candidates.candidates.length !== 1) {
+          const prefix = candidates.candidates.length === 0 ? '没有找到匹配的未支付工资记录。' : `找到了 ${candidates.candidates.length} 条可能的工资记录。`;
+          return { payrollCandidates: candidates, clarification: `${prefix} 请补充教师或月份，使工资记录唯一；在对象唯一前不会生成预览。` };
+        }
+        return { payrollCandidates: candidates };
+      }
+      return {};
     })
     .addNode('buildClarificationWorkspace', async (state: QueryStateValue) => {
       const question = state.clarification ?? '请补充操作所需信息。';
@@ -368,12 +439,43 @@ export function createBusinessQueryGraph(input: {
       });
       return { refundPreview };
     })
+    .addNode('createStructuredActionPreview', async (state: QueryStateValue) => {
+      const intent = state.actionIntent;
+      if (!intent) throw new Error('STRUCTURED_ACTION_INTENT_MISSING');
+      if (!input.createActionPreview) {
+        const label = intent.kind.startsWith('period.') ? '关账或重开账期' : intent.kind.startsWith('payroll.') ? '工资操作' : intent.kind === 'manual-transaction.create' ? '手工收支' : intent.kind === 'lesson.cancel' ? '取消排课' : intent.kind === 'lesson.complete' ? '确认上课' : intent.kind === 'lesson.complete.reversal' ? '撤销确认' : '调课';
+        return { clarification: `当前没有 Assistant Preview（${label}）；Core 尚未提供安全预览接口。Agent 不会回退到 Dashboard，也不会调用 Confirm/Execute 或直接写入。` };
+      }
+      const command: Record<string, unknown> = { ...intent };
+      delete command.kind;
+      if (intent.kind === 'manual-transaction.create') {
+        const category = intent.category ?? '';
+        const incomeCategory = /书/u.test(category) ? 'BOOK_SALE' : /琴|乐器/u.test(category) ? 'INSTRUMENT_SALE' : /外部|合作/u.test(category) ? 'EXTERNAL_COOPERATION' : 'OTHER_INCOME';
+        const expenseCategory = /房租|租金|物业/u.test(category) ? 'RENT_PROPERTY' : /水电|网络/u.test(category) ? 'UTILITIES_NETWORK' : /营销|推广/u.test(category) ? 'MARKETING' : /办公/u.test(category) ? 'OFFICE_SUPPLIES' : /维修/u.test(category) ? 'MAINTENANCE' : /书/u.test(category) ? 'BOOK_PURCHASE_COST' : /琴|乐器/u.test(category) ? 'INSTRUMENT_PURCHASE_COST' : /外部|合作/u.test(category) ? 'EXTERNAL_COOPERATION_COST' : 'OTHER_EXPENSE';
+        command.kind = intent.transactionKind ?? 'INCOME';
+        if (command.kind === 'INCOME') command.incomeCategory = incomeCategory;
+        else command.expenseCategory = expenseCategory;
+        command.occurredAt = new Date().toISOString();
+        delete command.transactionKind;
+        delete command.category;
+      }
+      if (state.lessonActionCandidates?.candidates.length === 1) command.lessonId = state.lessonActionCandidates.candidates[0]!.lessonId;
+      if (state.teacherCandidates?.candidates.length === 1) command.teacherId = state.teacherCandidates.candidates[0]!.teacherId;
+      if (state.payrollCandidates?.candidates.length === 1) command.payrollId = state.payrollCandidates.candidates[0]!.payrollId;
+      const structuredActionPreview = await input.createActionPreview(input.capability, { actionType: intent.kind, command, idempotencyKey: state.runId, requestId: state.runId });
+      return { structuredActionPreview };
+    })
+    .addNode('buildStructuredActionWorkspace', async (state: QueryStateValue) => {
+      if (!state.actionIntent || !state.structuredActionPreview) throw new Error('STRUCTURED_ACTION_PREVIEW_MISSING');
+      return { workspace: createStructuredActionWorkspace(state.actionIntent, state.structuredActionPreview), answer: '已生成操作预览，尚未执行。请在工作区核对对象和变更内容后，再由你确认。' };
+    })
     .addNode('buildRefundWorkspace', async (state: QueryStateValue) => {
       if (!state.refundIntent || !state.refundPreview) throw new Error('REFUND_PREVIEW_MISSING');
       return { workspace: createRefundWorkspace(state.refundIntent, state.refundPreview), answer: '已生成退学退款预览，尚未登记退款或变更学生状态。请在工作区核对逐课程金额、手续费和实际退款后，再由你确认。' };
     })
     .addEdge(START, 'classifyIntent')
-    .addConditionalEdges('classifyIntent', (state) => state.clarification ? 'buildClarificationWorkspace' : state.refundIntent ? 'resolveStudent' : (state.moneyIntent || state.lessonIntent || state.batchLessonIntent) ? 'resolveCourseAccount' : 'readDashboardSummary')
+    .addConditionalEdges('classifyIntent', (state) => state.clarification ? 'buildClarificationWorkspace' : state.refundIntent ? 'resolveStudent' : state.actionIntent ? 'resolveStructuredAction' : (state.moneyIntent || state.lessonIntent || state.batchLessonIntent) ? 'resolveCourseAccount' : 'readDashboardSummary')
+    .addConditionalEdges('resolveStructuredAction', (state) => state.clarification ? 'buildClarificationWorkspace' : 'createStructuredActionPreview')
     .addConditionalEdges('resolveCourseAccount', (state) => state.clarification ? 'buildClarificationWorkspace' : (state.lessonIntent || state.batchLessonIntent) ? 'resolveTeacher' : 'createMoneyPreview')
     .addConditionalEdges('resolveStudent', (state) => state.clarification ? 'buildClarificationWorkspace' : 'createFinalRefundPreview')
     .addConditionalEdges('resolveTeacher', (state) => state.clarification ? 'buildClarificationWorkspace' : state.batchLessonIntent ? 'createBatchLessonPreview' : 'createLessonPreview')
@@ -381,10 +483,12 @@ export function createBusinessQueryGraph(input: {
     .addEdge('createLessonPreview', 'buildLessonWorkspace')
     .addEdge('createBatchLessonPreview', 'buildBatchLessonWorkspace')
     .addEdge('createFinalRefundPreview', 'buildRefundWorkspace')
+    .addConditionalEdges('createStructuredActionPreview', (state) => state.clarification ? 'buildClarificationWorkspace' : 'buildStructuredActionWorkspace')
     .addEdge('buildMoneyWorkspace', END)
     .addEdge('buildLessonWorkspace', END)
     .addEdge('buildBatchLessonWorkspace', END)
     .addEdge('buildRefundWorkspace', END)
+    .addEdge('buildStructuredActionWorkspace', END)
     .addEdge('buildClarificationWorkspace', END)
     .addEdge('readDashboardSummary', 'buildDashboardWorkspace')
     .addEdge('buildDashboardWorkspace', 'answerQuery')

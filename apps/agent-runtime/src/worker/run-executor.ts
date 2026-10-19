@@ -25,11 +25,14 @@ export function createBusinessRunExecutor(input: {
       findCourseAccountCandidates: (value, query) => input.coreTools.getCourseAccountCandidates(value, query),
       findStudentCandidates: (value, query) => input.coreTools.getStudentCandidates(value, query),
       findTeacherCandidates: (value, query) => input.coreTools.getTeacherCandidates(value, query),
+      findLessonCandidates: (value, query) => input.coreTools.getLessonCandidates(value, query),
+      findPayrollCandidates: (value, query) => input.coreTools.getPayrollCandidates(value, query),
       createSingleLessonPreview: (value, request) => input.coreTools.createSingleLessonPreview(value, request),
       createBatchLessonPreview: (value, request) => input.coreTools.createBatchLessonPreview(value, request),
       createFinalRefundPreview: (value, request) => input.coreTools.createFinalRefundPreview(value, request),
       createPaymentPreview: (value, request) => input.coreTools.createPaymentPreview(value, request),
       createGiftPreview: (value, request) => input.coreTools.createGiftPreview(value, request),
+      createActionPreview: (value, request) => input.coreTools.createStructuredActionPreview(value, request),
     });
     await context.appendEvent({
       type: 'run.started',

@@ -54,27 +54,46 @@ export class ManualTransactionsService {
   ) {}
 
   async create(input: CreateManualTransactionInput): Promise<ManualTransactionSummary> {
+    const transaction = await this.prisma.$transaction((tx) => this.createInTransaction(tx, input));
+    return toSummary(transaction);
+  }
+
+  async createInTransaction(
+    client: Prisma.TransactionClient,
+    input: CreateManualTransactionInput,
+  ): Promise<{
+    id: string;
+    kind: ManualTransactionKind;
+    incomeCategory: ManualIncomeCategory | null;
+    expenseCategory: ManualExpenseCategory | null;
+    amount: Prisma.Decimal;
+    channel: PaymentChannel;
+    occurredAt: Date;
+    note: string | null;
+    createdAt: Date;
+  }> {
+    this.validateInput(input);
+    await this.periods.assertWritableForDate(input.occurredAt, client);
+    return client.manualTransaction.create({
+      data: {
+        kind: input.kind,
+        incomeCategory: input.incomeCategory ?? null,
+        expenseCategory: input.expenseCategory ?? null,
+        amount: input.amount,
+        channel: input.channel,
+        occurredAt: input.occurredAt,
+        note: input.note?.trim() || null,
+        createdById: input.createdById,
+      },
+    });
+  }
+
+  validateInput(input: CreateManualTransactionInput): void {
     if (!input.amount.isFinite() || !input.amount.gt(0)) throw new BadRequestException('金额必须大于零');
     if (input.channel === 'OTHER' && !input.note?.trim()) {
       throw new BadRequestException('选择其他渠道时必须填写备注');
     }
     this.assertCategory(input);
-    const transaction = await this.prisma.$transaction(async (tx) => {
-      await this.periods.assertWritableForDate(input.occurredAt, tx);
-      return tx.manualTransaction.create({
-        data: {
-          kind: input.kind,
-          incomeCategory: input.incomeCategory ?? null,
-          expenseCategory: input.expenseCategory ?? null,
-          amount: input.amount,
-          channel: input.channel,
-          occurredAt: input.occurredAt,
-          note: input.note?.trim() || null,
-          createdById: input.createdById,
-        },
-      });
-    });
-    return toSummary(transaction);
   }
 
   async list(from?: Date, to?: Date): Promise<ManualTransactionSummary[]> {

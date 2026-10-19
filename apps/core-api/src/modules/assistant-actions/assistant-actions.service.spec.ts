@@ -17,7 +17,7 @@ function setup(overrides: Record<string, unknown> = {}) {
   };
   const tx = {
     actionPreview: {
-      create: vi.fn(async () => previewRow),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...previewRow, ...data })),
       findUnique: vi.fn(async () => previewRow),
       update: vi.fn(async ({ data }: { data: object }) => ({ ...previewRow, ...data, status: 'EXECUTED' })),
     },
@@ -40,6 +40,8 @@ function setup(overrides: Record<string, unknown> = {}) {
     createSingleInTransaction: vi.fn(async () => ({ id: 'lesson-1' })),
     createBatch: vi.fn(async () => [{ id: 'lesson-1' }, { id: 'lesson-2' }]),
     createBatchInTransaction: vi.fn(async () => [{ id: 'lesson-1' }, { id: 'lesson-2' }]),
+    previewReschedule: vi.fn(async () => ({ normalizedCommand: {}, display: {}, resourceVersions: {} })),
+    rescheduleInTransaction: vi.fn(async () => ({ id: 'lesson-1' })),
   };
   return { service: new AssistantActionsService(prisma as never, lessons as never, {} as never), prisma, tx, lessons, previewRow, ...overrides };
 }
@@ -94,6 +96,46 @@ describe('AssistantActionsService single lesson preview/confirm', () => {
     await expect(context.service.confirmSingleLessonPreview('preview-1', owner, 'key'))
       .rejects.toMatchObject({ status: 409 });
     expect(context.lessons.createSingleInTransaction).not.toHaveBeenCalled();
+  });
+
+  it('creates a reschedule Preview with domain display and version snapshot, without executing a mutation', async () => {
+    const context = setup();
+    Object.assign(context.lessons, {
+      previewReschedule: vi.fn(async () => ({
+        normalizedCommand: { lessonId: 'lesson-1', startsAt: new Date('2026-11-03T01:00:00.000Z'), endsAt: new Date('2026-11-03T01:45:00.000Z') },
+        display: { previousStartsAt: new Date('2026-11-02T01:00:00.000Z'), startsAt: new Date('2026-11-03T01:00:00.000Z') },
+        resourceVersions: { lessonId: 'lesson-1', lessonVersion: 4, accountId: 'account-1', accountVersion: 3, courseDurationMinutes: 45 },
+      })),
+    });
+    const result = await context.service.createReschedulePreview({
+      actorUserId: owner.id, runId: 'run-1', requestId: 'request-1', idempotencyKey: 'preview-key',
+      lessonId: 'lesson-1', startsAt: new Date('2026-11-03T01:00:00.000Z'),
+    });
+    expect(result).toMatchObject({ actionType: 'lesson.reschedule', command: {
+      lessonId: 'lesson-1', startsAt: '2026-11-03T01:00:00.000Z', endsAt: '2026-11-03T01:45:00.000Z',
+    }, resourceVersions: { lessonVersion: 4, accountVersion: 3, courseDurationMinutes: 45 } });
+    expect(context.lessons.previewReschedule).toHaveBeenCalledOnce();
+    expect(context.lessons.rescheduleInTransaction).not.toHaveBeenCalled();
+  });
+
+  it('confirms a reschedule using the saved versions and returns a replayable receipt', async () => {
+    const context = setup();
+    Object.assign(context.previewRow, {
+      actionType: 'lesson.reschedule',
+      normalizedCommandJson: { lessonId: 'lesson-1', startsAt: '2026-11-03T01:00:00.000Z', endsAt: '2026-11-03T01:45:00.000Z', note: null },
+      resourceVersionsJson: { lessonId: 'lesson-1', lessonVersion: 4, accountId: 'account-1', accountVersion: 3, courseDurationMinutes: 45 },
+    });
+    Object.assign(context.lessons, {
+      rescheduleInTransaction: vi.fn(async () => ({ id: 'lesson-1', status: 'SCHEDULED',
+        startsAt: new Date('2026-11-03T01:00:00.000Z'), endsAt: new Date('2026-11-03T01:45:00.000Z') })),
+    });
+    const result = await context.service.confirmPreview('preview-1', owner, 'confirm-key');
+    expect(result).toMatchObject({ status: 'EXECUTED', receipt: { actionType: 'lesson.reschedule', lessonId: 'lesson-1', idempotencyKey: 'confirm-key' } });
+    expect(context.lessons.rescheduleInTransaction).toHaveBeenCalledWith(context.tx, 'lesson-1',
+      { startsAt: new Date('2026-11-03T01:00:00.000Z') }, owner,
+      { lessonVersion: 4, accountVersion: 3, courseDurationMinutes: 45, endsAt: new Date('2026-11-03T01:45:00.000Z') });
+    expect(context.tx.actionPreview.update).toHaveBeenCalledOnce();
+    expect(context.tx.businessAuditEvent.create).toHaveBeenCalledOnce();
   });
 });
 

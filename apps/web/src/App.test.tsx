@@ -169,4 +169,78 @@ describe('AI workspace', () => {
     expect(new Headers(eventsCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
     expect(new Headers(eventsCall?.[1]?.headers).get('x-thread-id')).toBe(startBody.threadId);
   });
+
+  it('renders a generic action preview, retries a failed JWT confirmation, and shows arbitrary receipt fields', async () => {
+    const user = userEvent.setup();
+    const runId = '4f229d18-5a0f-4ec2-904d-c522927d8d0c';
+    const previewId = '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d';
+    const encoder = new TextEncoder();
+    let confirmations = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/auth/login') return new Response(JSON.stringify({ accessToken: 'jwt-test', user: { id: 'u1', username: 'owner', role: 'OWNER' } }), { status: 200 });
+      if (path === '/api/assistant/status') return new Response(JSON.stringify({ available: true, core: { available: true }, agentRuntime: { available: true }, checkedAt: '2026-10-16T01:02:03.000Z', message: 'AI 助手已连接' }), { status: 200 });
+      if (path === '/api/assistant/runs') {
+        const body = JSON.parse(String(init?.body)) as { threadId: string };
+        return new Response(JSON.stringify({ runId, threadId: body.threadId, status: 'queued' }), { status: 200 });
+      }
+      if (path === `/api/assistant/runs/${runId}/events`) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(`event: workspace.replace\ndata: ${JSON.stringify({ type: 'workspace.replace', document: { protocolVersion: '1.0', title: '需要确认的操作', blocks: [{ type: 'action-preview', previewId, actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', title: '预览收款', riskLevel: 'L2', expiresAt: '2099-10-19T02:00:00.000Z' }] } })}\n\n`));
+            controller.enqueue(encoder.encode(`event: run.completed\ndata: {"type":"run.completed","runId":"${runId}"}\n\n`));
+            controller.close();
+          },
+        }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      }
+      if (path === `/api/assistant/previews/${previewId}/confirm`) {
+        confirmations += 1;
+        if (confirmations === 1) return new Response(null, { status: 409 });
+        return new Response(JSON.stringify({ previewId, status: 'EXECUTED', receipt: { actionType: 'course-account.payment', paymentId: 'payment-001', amount: '120.00', details: { channel: 'WECHAT' } } }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderApp();
+    await user.type(screen.getByLabelText('用户名'), 'owner');
+    await user.type(screen.getByLabelText('密码'), 'correct-password');
+    await user.click(screen.getByRole('button', { name: /登\s*录/ }));
+    await user.type(await screen.findByLabelText('经营问题'), '预览收款');
+    await user.click(screen.getByRole('button', { name: /发送消息/ }));
+    await user.click(await screen.findByRole('button', { name: '确认并登记' }));
+    expect(await screen.findByText(/预览已失效或已被其他请求确认/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重试确认' }));
+    expect(await screen.findByText('Core 回执明细')).toBeInTheDocument();
+    expect(screen.getByText('payment-001')).toBeInTheDocument();
+    expect(screen.getByText('120.00')).toBeInTheDocument();
+    const confirmCall = fetchMock.mock.calls.find(([path]) => String(path) === `/api/assistant/previews/${previewId}/confirm`);
+    expect(new Headers(confirmCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
+    expect(new Headers(confirmCall?.[1]?.headers).get('Idempotency-Key')).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it('disables confirmation for an expired preview without calling Core', async () => {
+    const user = userEvent.setup();
+    const runId = '4f229d18-5a0f-4ec2-904d-c522927d8d0c';
+    const previewId = '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d';
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/assistant/status') return new Response(JSON.stringify({ available: true, core: { available: true }, agentRuntime: { available: true }, checkedAt: '2026-10-16T01:02:03.000Z', message: 'AI 助手已连接' }), { status: 200 });
+      if (path === '/api/assistant/runs') {
+        const body = JSON.parse(String(init?.body)) as { threadId: string };
+        return new Response(JSON.stringify({ runId, threadId: body.threadId, status: 'queued' }), { status: 200 });
+      }
+      if (path === `/api/assistant/runs/${runId}/events`) return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(`event: workspace.replace\ndata: ${JSON.stringify({ type: 'workspace.replace', document: { protocolVersion: '1.0', title: '过期预览', blocks: [{ type: 'action-preview', previewId, actionType: 'new.action.type', schemaVersion: 'new.action.type.v1', title: '过期操作', riskLevel: 'L1', expiresAt: '2020-01-01T00:00:00.000Z' }] } })}\n\n`)); controller.enqueue(encoder.encode(`event: run.completed\ndata: {"type":"run.completed","runId":"${runId}"}\n\n`)); controller.close(); } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
+    renderApp();
+    await user.type(await screen.findByLabelText('经营问题'), '查看过期预览');
+    await user.click(screen.getByRole('button', { name: /发送消息/ }));
+    const expiredButton = await screen.findByRole('button', { name: '预览已过期' });
+    expect(expiredButton).toBeDisabled();
+    expect(screen.getByText('预览已过期，未执行任何操作。请重新生成预览。')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([path]) => String(path).includes(`/api/assistant/previews/${previewId}/confirm`))).toBe(false);
+  });
 });

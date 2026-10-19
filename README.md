@@ -38,7 +38,7 @@
 阶段 0 基础设施和当前 MVP 业务链路已经可以运行：双 PostgreSQL、Core Prisma 迁移、LangGraph
 `PostgresSaver`、Capability、内部只读工具、公开 Assistant Gateway、SSE、Core OpenAPI 导出/生成链路和
 Web AI 工作台均已落地。Core 已具备店主/老师账号、JWT/角色鉴权、学生、课程、课程账户、交费、赠送、单节/批量排课、
-调课、请假、课消、退款、工资、手工收支、关账/重开和月度报表；业务 Preview/Confirm 已覆盖排课、交费、赠送和最终退费，
+调课、请假、课消、退款、工资、手工收支、关账/重开和月度报表；业务 Preview/Confirm 已覆盖排课变更、交费、赠送、最终退费、手工收支、工资和关账操作，
 Confirm 由浏览器携带用户登录态直接调用 Core。
 
 Agent 的 HTTP Start 只创建 `queued` Run，Run Worker 负责领取、执行、续租、过期回收和带租约 fencing 的终态写入；
@@ -46,8 +46,8 @@ Web 已接通登录、Assistant Run、SSE、Workspace 和 Preview 确认，并�
 Compose 已包含 Core、Agent、Web 和两套 PostgreSQL，Agent 默认启用 Worker、关闭 Live Model。
 
 当前仍需单独验收或建设：Capability 的 `role`/`teacherId`、跨 Agent 实例实时广播、共享/持久化 nonce 防重放、完整浏览器/HTTP
-业务 smoke、真实 Live Model 验收，以及生产部署、密钥轮换和限流等非 MVP 能力。退款、工资、手工收支、关账和 Preview/Confirm
-虽已有代码与测试，但本次文档同步不把跳过的真实 PostgreSQL 集成测试或未执行的浏览器 E2E 计为全部验收通过。
+业务 smoke、真实 Live Model 验收，以及生产部署、密钥轮换和限流等非 MVP 能力。Core 结构化业务 Preview/Confirm 已有真实 PostgreSQL
+集成测试，但完整浏览器/HTTP 端到端覆盖仍需继续补齐。
 
 精确的环境变量名、启动顺序、已实测项和待验收项见
 [`docs/阶段0-开发运行手册.md`](./docs/阶段0-开发运行手册.md)。

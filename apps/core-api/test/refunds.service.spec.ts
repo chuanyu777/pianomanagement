@@ -202,6 +202,18 @@ describe('RefundsService', () => {
     expect(fixture.ledger).toHaveLength(0);
   });
 
+  it('rejects a negative gift balance instead of leaving the account uncleared', async () => {
+    const fixture = makeService({
+      accounts: [account(accountA, '10.00', '0.00')],
+      entries: [{ id: 'negative-gift-entry', accountId: accountA, paidDelta: new Prisma.Decimal(0), giftDelta: new Prisma.Decimal('-1.00') }],
+    });
+
+    await expect(fixture.service.refund(refundCommand({ feeAmount: new Prisma.Decimal('0.00') }), owner))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(fixture.refunds).toHaveLength(0);
+    expect(fixture.ledger).toHaveLength(0);
+  });
+
   it('rejects a fee larger than the total paid refund', async () => {
     const fixture = makeService();
 

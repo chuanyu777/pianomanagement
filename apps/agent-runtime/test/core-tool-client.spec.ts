@@ -329,3 +329,46 @@ describe('CoreToolClient course account Preview', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('CoreToolClient final refund Preview', () => {
+  it('posts the typed per-course refund request to the L2 endpoint with a signed body', async () => {
+    const secret = 'unit-test-secret-012345678901234567890123';
+    const request = {
+      studentId: '49fbcf47-c616-468a-a058-cdca1ee66025', feeAmount: '10.00', channel: 'WECHAT' as const,
+      occurredAt: '2026-11-02T09:00:00+08:00', idempotencyKey: 'e244c3d5-6a58-4d4d-bc8f-f181cd3ab0aa',
+      requestId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c',
+    };
+    const response = {
+      previewId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', actionType: 'student.final-refund' as const,
+      command: { studentId: request.studentId, feeAmount: request.feeAmount, channel: request.channel, occurredAt: '2026-11-02T01:00:00.000Z', note: null },
+      display: {
+        title: '最终退学退款', summary: '共 1 门课程，实际退款 ¥90.00', studentId: request.studentId, studentName: '小明',
+        studentStatusBefore: '在读', studentStatusAfter: '退学', totalPaidRefund: '100.00', feeAmount: '10.00',
+        feePercentage: '10.00', actualRefundAmount: '90.00',
+        courses: [{ accountId: '6ed41b4d-cad9-42b3-a3ca-6571ce2e033b', courseName: '主课', paidBalanceBefore: '100.00', giftBalanceBefore: '20.00', paidRefundAmount: '100.00', giftClearingAmount: '20.00' }],
+      },
+      resourceVersions: { studentId: request.studentId, studentUpdatedAt: '2026-11-01T01:00:00.000Z', accountVersions: [] },
+      expiresAt: '2026-11-02T01:05:00.000Z', auditEventId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c',
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(response), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new CoreToolClient('http://core.test/api/internal', 1_000, secret);
+
+    await expect(client.createFinalRefundPreview('short-lived-capability', request)).resolves.toEqual(response);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    const headers = init?.headers as Record<string, string>;
+    const body = JSON.parse(String(init?.body));
+    const path = '/api/internal/assistant-actions/students/final-refund/preview';
+    expect(String(url)).toBe(`http://core.test${path}`);
+    expect(init?.method).toBe('POST');
+    expect(body).toEqual(request);
+    expect(verifySignedInternalRequest({
+      secret,
+      timestamp: headers[INTERNAL_REQUEST_TIMESTAMP_HEADER]!,
+      nonce: headers[INTERNAL_REQUEST_NONCE_HEADER]!,
+      signature: headers[INTERNAL_REQUEST_SIGNATURE_HEADER]!,
+      method: 'POST', path, body,
+      securityHeaders: { authorization: 'Bearer short-lived-capability' },
+    })).toBe(true);
+  });
+});

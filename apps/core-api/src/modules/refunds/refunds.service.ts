@@ -98,170 +98,191 @@ export class RefundsService {
   ) {}
 
   async refund(input: CreateRefundInput, actor: AuthenticatedActor): Promise<RefundSummary> {
-    if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以登记退费');
-    const feeAmount = this.parseFee(input.feeAmount);
-    const note = input.note?.trim() || null;
-    if (input.channel === 'OTHER' && !note) throw new BadRequestException('选择其他渠道时必须填写备注');
-    if (!Number.isFinite(input.occurredAt.getTime())) throw new BadRequestException('退费时间无效');
-
     try {
-      return await this.repository.transaction(async (tx) => {
-        const replay = await this.findReplay(tx, input.commandId, input.studentId, actor.id);
-        if (replay) return replay;
-
-        await this.periods.assertWritableForDate(input.occurredAt, tx);
-        await this.lockStudent(tx, input.studentId);
-
-        const afterLockReplay = await this.findReplay(tx, input.commandId, input.studentId, actor.id);
-        if (afterLockReplay) return afterLockReplay;
-        const existingRefund = await tx.refundRecord.findUnique({
-          where: { studentId: input.studentId },
-          select: { id: true },
-        });
-        if (existingRefund) throw new ConflictException('该学生已登记退费');
-
-        const accountIds = await this.lockStudentAccounts(tx, input.studentId);
-        const accounts = accountIds.length === 0
-          ? []
-          : await tx.studentCourseAccount.findMany({
-            where: { id: { in: accountIds } },
-            orderBy: { id: 'asc' },
-            select: { id: true, openingPaidBalance: true, openingGiftBalance: true },
-          });
-        const balances = new Map<string, RefundBalance>(accounts.map((account) => [account.id, {
-          paid: account.openingPaidBalance,
-          gift: account.openingGiftBalance,
-        }]));
-        if (accountIds.length > 0) {
-          const entries = await tx.ledgerEntry.findMany({
-            where: { accountId: { in: accountIds } },
-            select: { accountId: true, paidDelta: true, giftDelta: true },
-          });
-          for (const entry of entries) {
-            const balance = balances.get(entry.accountId);
-            if (!balance) continue;
-            balance.paid = balance.paid.add(entry.paidDelta);
-            balance.gift = balance.gift.add(entry.giftDelta);
-          }
-        }
-
-        for (const account of accounts) {
-          const balance = balances.get(account.id)!;
-          if (balance.paid.isNegative()) {
-            throw new BadRequestException(`课程账户 ${account.id} 的实收余额为负数，不能办理退费`);
-          }
-        }
-        const zero = new Prisma.Decimal(0);
-        const totalPaidRefund = accounts.reduce((sum, account) => {
-          const paid = balances.get(account.id)!.paid;
-          return sum.add(paid.gt(0) ? paid : zero);
-        }, zero);
-        if (feeAmount.gt(totalPaidRefund)) throw new BadRequestException('手续费不能大于实收退费总额');
-        const actualRefundAmount = totalPaidRefund.sub(feeAmount);
-        const feePercentage = totalPaidRefund.isZero()
-          ? zero
-          : feeAmount.div(totalPaidRefund).mul(100).toDecimalPlaces(2);
-
-        const refund = await tx.refundRecord.create({
-          data: {
-            id: input.commandId,
-            studentId: input.studentId,
-            totalPaidRefund,
-            feeAmount,
-            feePercentage,
-            actualRefundAmount,
-            channel: input.channel,
-            occurredAt: input.occurredAt,
-            note,
-            createdById: actor.id,
-          },
-          select: { id: true },
-        });
-        const createdDetails: RefundSummary['details'] = [];
-
-        for (const account of accounts) {
-          const balance = balances.get(account.id)!;
-          const paidRefundAmount = balance.paid.gt(0) ? balance.paid : zero;
-          const giftClearingAmount = balance.gift.gt(0) ? balance.gift : zero;
-          const detail = await tx.refundDetail.create({
-            data: {
-              refundId: refund.id,
-              accountId: account.id,
-              paidBalanceBefore: balance.paid,
-              giftBalanceBefore: balance.gift,
-              paidRefundAmount,
-              giftClearingAmount,
-            },
-            select: {
-              id: true,
-              accountId: true,
-              paidBalanceBefore: true,
-              giftBalanceBefore: true,
-              paidRefundAmount: true,
-              giftClearingAmount: true,
-            },
-          });
-          if (paidRefundAmount.gt(0)) {
-            await this.createRefundLedgerEntry(tx, {
-              accountId: account.id,
-              refundDetailId: detail.id,
-              kind: LedgerEntryKind.REFUND_PAID,
-              paidDelta: paidRefundAmount.negated(),
-              giftDelta: zero,
-              occurredAt: input.occurredAt,
-              note,
-              createdById: actor.id,
-            });
-          }
-          if (giftClearingAmount.gt(0)) {
-            await this.createRefundLedgerEntry(tx, {
-              accountId: account.id,
-              refundDetailId: detail.id,
-              kind: LedgerEntryKind.REFUND_GIFT_CLEARING,
-              paidDelta: zero,
-              giftDelta: giftClearingAmount.negated(),
-              occurredAt: input.occurredAt,
-              note,
-              createdById: actor.id,
-            });
-          }
-          await tx.studentCourseAccount.update({
-            where: { id: account.id },
-            data: { version: { increment: 1 } },
-            select: { id: true },
-          });
-          createdDetails.push({
-            id: detail.id,
-            accountId: detail.accountId,
-            paidBalanceBefore: detail.paidBalanceBefore.toFixed(2),
-            giftBalanceBefore: detail.giftBalanceBefore.toFixed(2),
-            paidRefundAmount: detail.paidRefundAmount.toFixed(2),
-            giftClearingAmount: detail.giftClearingAmount.toFixed(2),
-          });
-        }
-
-        await tx.student.update({
-          where: { id: input.studentId },
-          data: { withdrawnAt: input.occurredAt },
-          select: { id: true },
-        });
-        return {
-          id: refund.id,
-          studentId: input.studentId,
-          totalPaidRefund: totalPaidRefund.toFixed(2),
-          feeAmount: feeAmount.toFixed(2),
-          feePercentage: feePercentage.toFixed(2),
-          actualRefundAmount: actualRefundAmount.toFixed(2),
-          channel: input.channel,
-          occurredAt: input.occurredAt,
-          note,
-          details: createdDetails,
-        };
-      });
+      this.validateInput(input, actor);
+      return await this.repository.transaction((tx) => this.refundInTransaction(tx, input, actor));
     } catch (error) {
       if (!isUniqueConstraintError(error)) throw error;
       return this.resolveUniqueConflict(input, actor.id);
     }
+  }
+
+  /**
+   * Executes the complete refund mutation on the caller's transaction.
+   * Assistant Preview/Confirm uses this method so the refund, ledger reversal,
+   * withdrawal state, Preview status and receipt audit commit atomically.
+   */
+  async refundInTransaction(
+    tx: RefundTransaction,
+    input: CreateRefundInput,
+    actor: AuthenticatedActor,
+  ): Promise<RefundSummary> {
+    this.validateInput(input, actor);
+
+    const replay = await this.findReplay(tx, input.commandId, input.studentId, actor.id);
+    if (replay) return replay;
+
+    await this.periods.assertWritableForDate(input.occurredAt, tx);
+    await this.lockStudent(tx, input.studentId);
+
+    const afterLockReplay = await this.findReplay(tx, input.commandId, input.studentId, actor.id);
+    if (afterLockReplay) return afterLockReplay;
+    const existingRefund = await tx.refundRecord.findUnique({
+      where: { studentId: input.studentId },
+      select: { id: true },
+    });
+    if (existingRefund) throw new ConflictException('该学生已登记退费');
+
+    const feeAmount = this.parseFee(input.feeAmount);
+    const note = input.note?.trim() || null;
+    const accountIds = await this.lockStudentAccounts(tx, input.studentId);
+    const accounts = accountIds.length === 0
+      ? []
+      : await tx.studentCourseAccount.findMany({
+        where: { id: { in: accountIds } },
+        orderBy: { id: 'asc' },
+        select: { id: true, openingPaidBalance: true, openingGiftBalance: true },
+      });
+    const balances = new Map<string, RefundBalance>(accounts.map((account) => [account.id, {
+      paid: account.openingPaidBalance,
+      gift: account.openingGiftBalance,
+    }]));
+    if (accountIds.length > 0) {
+      const entries = await tx.ledgerEntry.findMany({
+        where: { accountId: { in: accountIds } },
+        select: { accountId: true, paidDelta: true, giftDelta: true },
+      });
+      for (const entry of entries) {
+        const balance = balances.get(entry.accountId);
+        if (!balance) continue;
+        balance.paid = balance.paid.add(entry.paidDelta);
+        balance.gift = balance.gift.add(entry.giftDelta);
+      }
+    }
+
+    for (const account of accounts) {
+      const balance = balances.get(account.id)!;
+      if (balance.paid.isNegative()) {
+        throw new BadRequestException(`课程账户 ${account.id} 的实收余额为负数，不能办理退费`);
+      }
+      if (balance.gift.isNegative()) {
+        throw new BadRequestException(`课程账户 ${account.id} 的赠送余额为负数，不能办理退费`);
+      }
+    }
+    const zero = new Prisma.Decimal(0);
+    const totalPaidRefund = accounts.reduce((sum, account) => {
+      const paid = balances.get(account.id)!.paid;
+      return sum.add(paid.gt(0) ? paid : zero);
+    }, zero);
+    if (feeAmount.gt(totalPaidRefund)) throw new BadRequestException('手续费不能大于实收退费总额');
+    const actualRefundAmount = totalPaidRefund.sub(feeAmount);
+    const feePercentage = totalPaidRefund.isZero()
+      ? zero
+      : feeAmount.div(totalPaidRefund).mul(100).toDecimalPlaces(2);
+
+    const refund = await tx.refundRecord.create({
+      data: {
+        id: input.commandId,
+        studentId: input.studentId,
+        totalPaidRefund,
+        feeAmount,
+        feePercentage,
+        actualRefundAmount,
+        channel: input.channel,
+        occurredAt: input.occurredAt,
+        note,
+        createdById: actor.id,
+      },
+      select: { id: true },
+    });
+    const createdDetails: RefundSummary['details'] = [];
+
+    for (const account of accounts) {
+      const balance = balances.get(account.id)!;
+      const paidRefundAmount = balance.paid.gt(0) ? balance.paid : zero;
+      const giftClearingAmount = balance.gift.gt(0) ? balance.gift : zero;
+      const detail = await tx.refundDetail.create({
+        data: {
+          refundId: refund.id,
+          accountId: account.id,
+          paidBalanceBefore: balance.paid,
+          giftBalanceBefore: balance.gift,
+          paidRefundAmount,
+          giftClearingAmount,
+        },
+        select: {
+          id: true,
+          accountId: true,
+          paidBalanceBefore: true,
+          giftBalanceBefore: true,
+          paidRefundAmount: true,
+          giftClearingAmount: true,
+        },
+      });
+      if (paidRefundAmount.gt(0)) {
+        await this.createRefundLedgerEntry(tx, {
+          accountId: account.id,
+          refundDetailId: detail.id,
+          kind: LedgerEntryKind.REFUND_PAID,
+          paidDelta: paidRefundAmount.negated(),
+          giftDelta: zero,
+          occurredAt: input.occurredAt,
+          note,
+          createdById: actor.id,
+        });
+      }
+      if (giftClearingAmount.gt(0)) {
+        await this.createRefundLedgerEntry(tx, {
+          accountId: account.id,
+          refundDetailId: detail.id,
+          kind: LedgerEntryKind.REFUND_GIFT_CLEARING,
+          paidDelta: zero,
+          giftDelta: giftClearingAmount.negated(),
+          occurredAt: input.occurredAt,
+          note,
+          createdById: actor.id,
+        });
+      }
+      await tx.studentCourseAccount.update({
+        where: { id: account.id },
+        data: { version: { increment: 1 } },
+        select: { id: true },
+      });
+      createdDetails.push({
+        id: detail.id,
+        accountId: detail.accountId,
+        paidBalanceBefore: detail.paidBalanceBefore.toFixed(2),
+        giftBalanceBefore: detail.giftBalanceBefore.toFixed(2),
+        paidRefundAmount: detail.paidRefundAmount.toFixed(2),
+        giftClearingAmount: detail.giftClearingAmount.toFixed(2),
+      });
+    }
+
+    await tx.student.update({
+      where: { id: input.studentId },
+      data: { withdrawnAt: input.occurredAt },
+      select: { id: true },
+    });
+    return {
+      id: refund.id,
+      studentId: input.studentId,
+      totalPaidRefund: totalPaidRefund.toFixed(2),
+      feeAmount: feeAmount.toFixed(2),
+      feePercentage: feePercentage.toFixed(2),
+      actualRefundAmount: actualRefundAmount.toFixed(2),
+      channel: input.channel,
+      occurredAt: input.occurredAt,
+      note,
+      details: createdDetails,
+    };
+  }
+
+  private validateInput(input: CreateRefundInput, actor: AuthenticatedActor): void {
+    if (actor.role !== 'OWNER') throw new ForbiddenException('只有店主可以登记退费');
+    this.parseFee(input.feeAmount);
+    const note = input.note?.trim() || null;
+    if (input.channel === 'OTHER' && !note) throw new BadRequestException('选择其他渠道时必须填写备注');
+    if (!Number.isFinite(input.occurredAt.getTime())) throw new BadRequestException('退费时间无效');
   }
 
   private parseFee(feeAmount: Prisma.Decimal | string): Prisma.Decimal {

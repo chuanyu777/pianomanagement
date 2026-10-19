@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { AssistantActionsService } from './assistant-actions.service.js';
 
@@ -65,7 +66,7 @@ function setup() {
     $transaction: vi.fn(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
   };
   const refunds = {
-    refund: vi.fn(async () => ({
+    refundInTransaction: vi.fn(async () => ({
       id: 'refund-1', studentId, totalPaidRefund: '100.00', feeAmount: '10.00',
       feePercentage: '10.00', actualRefundAmount: '90.00', channel: 'BANK_TRANSFER',
       occurredAt: new Date('2026-10-19T01:00:00.000Z'), note: null,
@@ -97,7 +98,7 @@ describe('AssistantActionsService final refund L2 preview/confirm', () => {
     });
     expect(tx.actionPreview.create).toHaveBeenCalledOnce();
     expect(tx.businessAuditEvent.create).toHaveBeenCalledOnce();
-    expect(refunds.refund).not.toHaveBeenCalled();
+    expect(refunds.refundInTransaction).not.toHaveBeenCalled();
   });
 
   it('confirms the action type through RefundsService and records the receipt', async () => {
@@ -105,7 +106,7 @@ describe('AssistantActionsService final refund L2 preview/confirm', () => {
 
     await expect(service.confirmPreview('preview-refund-1', owner, 'confirm-1'))
       .resolves.toMatchObject({ status: 'EXECUTED', receipt: { refundId: 'refund-1', actualRefundAmount: '90.00' } });
-    expect(refunds.refund).toHaveBeenCalledWith(expect.objectContaining({
+    expect(refunds.refundInTransaction).toHaveBeenCalledWith(tx, expect.objectContaining({
       studentId, feeAmount: '10.00', commandId: 'confirm-1',
     }), owner);
     expect(tx.actionPreview.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -121,7 +122,28 @@ describe('AssistantActionsService final refund L2 preview/confirm', () => {
 
     await expect(service.confirmPreview('preview-refund-1', owner, 'confirm-stale'))
       .rejects.toThrow('学生资料已变化，请重新预览');
-    expect(refunds.refund).not.toHaveBeenCalled();
+    expect(refunds.refundInTransaction).not.toHaveBeenCalled();
     expect(tx.actionPreview.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a refund Preview for a closed business month', async () => {
+    const context = setup();
+    const periods = { assertWritableForDate: vi.fn().mockRejectedValue(new ConflictException('该业务月份已关账')) };
+    const service = new (AssistantActionsService as unknown as new (...args: unknown[]) => AssistantActionsService)(
+      context.prisma, {}, {}, context.refunds, undefined, undefined, periods,
+    );
+
+    await expect(service.previewFinalRefund({
+      actorUserId: owner.id,
+      runId: 'run-refund-closed',
+      requestId: 'request-refund-closed',
+      idempotencyKey: 'preview-key-closed',
+      studentId,
+      feeAmount: '10.00',
+      channel: 'CASH',
+      occurredAt: new Date('2026-10-19T01:00:00.000Z'),
+    })).rejects.toThrow('该业务月份已关账');
+    expect(periods.assertWritableForDate).toHaveBeenCalledOnce();
+    expect(context.tx.actionPreview.create).not.toHaveBeenCalled();
   });
 });

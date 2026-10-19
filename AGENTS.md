@@ -108,7 +108,7 @@ npm run typecheck && npm run lint && npm test && npm run build
 - 当前已从阶段 0 技术 Spike 进入阶段 1 的业务内核，但尚未形成可用业务系统。Core 数据库已有
   `User`、`Teacher`、`Student`、`Course`、`StudentCourseAccount`、`PaymentRecord`、`GiftRecord`、`LedgerEntry`、`Lesson` 及两张
   Spike 表；课程账户的期初金额、交费、赠送、余额查询和一次冲正已实现。单节排课、调课、取消、上课确认及店主撤销确认已实现；
-  按周批量排课、退款、工资、收支和关账模型仍未实现。
+  按周批量排课、工资、收支和关账模型仍未实现；最终退学退款已形成 Core 领域实现与 AI Preview/Confirm 闭环。
 - `assistant-protocol`、Core Capability、Agent Runtime、Core 内部 Gateway、技术 Preview、
   OpenAPI 导出/生成链路和 Web 工作台骨架已经落地；完整门禁和阶段 0 退出条件仍需以本次实测为准，
   不能据此宣称业务系统已完成。
@@ -121,7 +121,7 @@ npm run typecheck && npm run lint && npm test && npm run build
   冲正接口使用 `Idempotency-Key`，追加不可变 `LedgerEntry`，并在账户行锁内增加版本；当前仅支持交费/赠送的冲正。
   密码仅存 bcrypt hash，响应统一走 `PUBLIC_USER_SELECT`。没有公开注册；初始店主仅能通过 `auth:bootstrap:owner` 命令
   创建。单节排课、调课、取消、确认上课和店主撤销确认均为公开受限接口；确认上课在账户行锁内固定单价快照、赠送优先扣减并追加不可变流水，
-  撤销确认追加反向流水。按周批量排课、退款等业务接口尚未实现。内部工具和技术 Preview 仍同时校验短期 Capability 与带时间戳、nonce 的 HMAC。公开 Assistant
+  撤销确认追加反向流水。按周批量排课等业务接口尚未实现。内部工具和技术 Preview 仍同时校验短期 Capability 与带时间戳、nonce 的 HMAC。公开 Assistant
   Gateway Controller 仍未实现，Web 不能创建会话。
 - Agent 的 LangGraph `interrupt`/`Command(resume)` 和官方 `PostgresSaver` 已有真实 PostgreSQL
   集成测试。HTTP Run/Event 持久化的 SQL migration、repository 和运行时接线已经出现在代码中，

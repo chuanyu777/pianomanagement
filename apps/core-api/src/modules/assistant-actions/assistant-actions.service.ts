@@ -195,6 +195,7 @@ export class AssistantActionsService {
     if (actor.role !== 'OWNER') throw new ForbiddenException('仅店主可预览退学退款');
     const feeAmount = this.parseRefundFee(input.feeAmount);
     if (!Number.isFinite(input.occurredAt.getTime())) throw new BadRequestException('退费时间无效');
+    if (this.periods) await this.periods.assertWritableForDate(input.occurredAt);
     const actionType = 'student.final-refund';
     const normalizedCommand = {
       studentId: input.studentId,
@@ -958,7 +959,7 @@ export class AssistantActionsService {
       })) {
         throw new ConflictException('课程账户余额已变化，请重新预览');
       }
-      const refund = await refunds.refund({
+      const refund = await refunds.refundInTransaction(tx, {
         studentId: command.studentId,
         feeAmount: command.feeAmount,
         channel: command.channel,

@@ -93,9 +93,10 @@ function parseMoneyIntent(message: string): { moneyIntent?: MoneyIntent; clarifi
   } };
 }
 
-function parseStructuredActionIntent(message: string): { actionIntent?: StructuredActionIntent; clarification?: string } {
+export function parseStructuredActionIntent(message: string): { actionIntent?: StructuredActionIntent; clarification?: string } {
   const text = message.trim();
-  const directCompletion = /^(?<operation>撤销|确认)\s*(?<student>[^的，,\s]+).*?(?<completion>上课|课消|确认)/u.exec(text);
+  const directCompletion = /^(?<operation>撤销|确认)\s*(?<student>[^的，,\s]+?)(?:在(?<date>\d{4}-\d{2}-\d{2}))?的(?<completion>上课|课消|确认)/u.exec(text)
+    ?? /^(?<operation>撤销|确认)\s*(?<student>[^的，,\s]+).*?(?<completion>上课|课消|确认)/u.exec(text);
   const lesson = directCompletion ?? /^(?:(?:把|给)\s*)?(?<student>[^的，,\s]+)(?:的)?[^，,]*?(?<operation>调课|改课|调到|更改上课时间|请假|取消排课|取消课程|取消这节课|撤销确认|撤销课消|确认上课|上课确认|消课)[^\d]*(?:(?<date>\d{4}-\d{2}-\d{2})\s+(?<time>\d{2}:\d{2}))?/u.exec(text);
   if (lesson?.groups) {
     const operation = directCompletion ? lesson.groups['operation']! : lesson.groups['operation']!;
@@ -105,7 +106,7 @@ function parseStructuredActionIntent(message: string): { actionIntent?: Structur
     if (kind === 'lesson.reschedule' && (!lesson.groups['date'] || !lesson.groups['time'])) {
       return { clarification: '我识别到这是调课请求，但目标时间不足；当前没有 Assistant Preview，不会直接改课。请补充目标时间，例如：把小明的课调到 2026-10-21 15:00。' };
     }
-    return { actionIntent: { kind, studentName: lesson.groups['student']!.trim(), ...(lesson.groups['date'] && lesson.groups['time'] ? { date: lesson.groups['date'], targetStartsAt: `${lesson.groups['date']}T${lesson.groups['time']}:00+08:00` } : {}) } };
+    return { actionIntent: { kind, studentName: lesson.groups['student']!.trim(), ...(lesson.groups['date'] ? { date: lesson.groups['date'] } : {}), ...(lesson.groups['date'] && lesson.groups['time'] ? { targetStartsAt: `${lesson.groups['date']}T${lesson.groups['time']}:00+08:00` } : {}) } };
   }
   const manual = /^(?:登记|记录|记一笔|录入|新增)\s*(?<category>[^\d，,]+?)?\s*(?<kind>收入|支出)\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?:元|块)?(?:[，,]\s*(?<channel>现金|微信|支付宝|银行卡|其他))?/u.exec(text);
   if (manual?.groups) {
@@ -271,9 +272,16 @@ function createRefundWorkspace(intent: RefundIntent, preview: FinalRefundPreview
 
 function createStructuredActionWorkspace(intent: StructuredActionIntent, preview: StructuredActionPreviewResponse): WorkspaceDocument {
   const riskLevel = intent.kind.startsWith('lesson.') ? 'L1' : 'L2';
-  return WorkspaceDocumentSchema.parse({ protocolVersion, title: `操作预览 · ${preview.display.title}`, blocks: [
-    { type: 'summary', title: '等待你的严格确认', text: `${preview.display.summary} 预览已生成，尚未执行任何业务写入。` },
-    { type: 'action-preview', previewId: preview.previewId, actionType: preview.actionType, schemaVersion: `${preview.actionType}.v1`, title: preview.display.title, riskLevel, expiresAt: preview.expiresAt },
+  const title = preview.display.title ?? ({
+    'lesson.reschedule': '调课',
+    'lesson.cancel': '取消排课',
+    'lesson.complete': '确认上课',
+    'lesson.complete.reversal': '撤销上课确认',
+  } as Record<string, string>)[intent.kind] ?? '结构化业务操作';
+  const summary = preview.display.summary ?? '已生成操作预览，尚未执行任何业务写入。';
+  return WorkspaceDocumentSchema.parse({ protocolVersion, title: `操作预览 · ${title}`, blocks: [
+    { type: 'summary', title: '等待你的严格确认', text: `${summary} 预览已生成，尚未执行任何业务写入。` },
+    { type: 'action-preview', previewId: preview.previewId, actionType: preview.actionType, schemaVersion: `${preview.actionType}.v1`, title, riskLevel, expiresAt: preview.expiresAt },
   ], sources: [] });
 }
 

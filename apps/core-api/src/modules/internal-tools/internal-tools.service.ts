@@ -208,7 +208,7 @@ export class InternalToolsService {
       throw new ForbiddenException('Capability 用户角色不可用');
     }
     const where = {
-      student: { name: input.studentName.trim() },
+      account: { student: { name: input.studentName.trim() } },
       ...(input.date ? {
         startsAt: {
           gte: new Date(`${input.date}T00:00:00+08:00`),

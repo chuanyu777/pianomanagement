@@ -26,6 +26,11 @@ export type AssistantUiEvent =
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TERMINAL_RUN_STATUSES = new Set<AssistantRunStatus>(['completed', 'failed']);
+export const AUTH_EXPIRED_EVENT = 'pianomanager.authExpired';
+
+export function notifyAuthExpired(): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -178,14 +183,21 @@ export async function startAssistantRun(input: {
   clientRequestId: string;
   fetchImpl?: typeof fetch;
 }): Promise<AssistantRun> {
-  if (!input.token) throw new Error('登录状态已失效，请重新登录后再试。');
+  if (!input.token) {
+    notifyAuthExpired();
+    throw new Error('登录状态已失效，请重新登录后再试。');
+  }
   const response = await (input.fetchImpl ?? fetch)('/api/assistant/runs', {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${input.token}` },
     body: JSON.stringify({ message: input.message, threadId: input.threadId, clientRequestId: input.clientRequestId }),
   });
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403) throw new Error('登录状态已失效，请重新登录后再试。');
+    if (response.status === 401) {
+      notifyAuthExpired();
+      throw new Error('登录状态已失效，请重新登录后再试。');
+    }
+    if (response.status === 403) throw new Error('当前账号无权执行此操作。');
     throw new Error(`无法创建 AI 运行（HTTP ${response.status}），请检查连接后重试。`);
   }
   let payload: unknown;
@@ -206,7 +218,10 @@ export async function streamAssistantEvents(input: {
   onEvent: (event: AssistantUiEvent) => boolean | void;
   fetchImpl?: typeof fetch;
 }): Promise<void> {
-  if (!input.token) throw new Error('登录状态已失效，请重新登录后再试。');
+  if (!input.token) {
+    notifyAuthExpired();
+    throw new Error('登录状态已失效，请重新登录后再试。');
+  }
   const response = await (input.fetchImpl ?? fetch)(`/api/assistant/runs/${input.run.runId}/events`, {
     headers: {
       Accept: 'text/event-stream',
@@ -216,7 +231,11 @@ export async function streamAssistantEvents(input: {
     signal: input.signal,
   });
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403) throw new Error('登录状态已失效，请重新登录后再试。');
+    if (response.status === 401) {
+      notifyAuthExpired();
+      throw new Error('登录状态已失效，请重新登录后再试。');
+    }
+    if (response.status === 403) throw new Error('当前账号无权执行此操作。');
     throw new Error(`AI 事件连接失败（HTTP ${response.status}），请稍后重试。`);
   }
   if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') || !response.body) {
@@ -279,14 +298,21 @@ export async function confirmAssistantPreview(input: {
   idempotencyKey: string;
   fetchImpl?: typeof fetch;
 }): Promise<AssistantPreviewConfirmation> {
-  if (!input.token) throw new Error('登录状态已失效，请重新登录后再试。');
+  if (!input.token) {
+    notifyAuthExpired();
+    throw new Error('登录状态已失效，请重新登录后再试。');
+  }
   if (!UUID_PATTERN.test(input.previewId) || !UUID_PATTERN.test(input.idempotencyKey)) throw new Error('预览或确认标识无效，请重新生成预览。');
   const response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.previewId}/confirm`, {
     method: 'POST',
     headers: { Accept: 'application/json', Authorization: `Bearer ${input.token}`, 'Idempotency-Key': input.idempotencyKey },
   });
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403) throw new Error('登录状态已失效或无权确认该预览。');
+    if (response.status === 401) {
+      notifyAuthExpired();
+      throw new Error('登录状态已失效，请重新登录后再试。');
+    }
+    if (response.status === 403) throw new Error('当前账号无权确认该预览。');
     if (response.status === 409) throw new Error('预览已失效或已被其他请求确认，请重新生成预览。');
     throw new Error(`确认失败（HTTP ${response.status}），请稍后重试。`);
   }

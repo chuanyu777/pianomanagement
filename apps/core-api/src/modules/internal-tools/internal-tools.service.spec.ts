@@ -6,7 +6,7 @@ import { InternalToolsService } from './internal-tools.service.js';
 function mockPrisma() {
   return {
     user: { findUnique: vi.fn() },
-    lesson: { groupBy: vi.fn(), count: vi.fn() },
+    lesson: { groupBy: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     student: { findMany: vi.fn() },
     studentCourseAccount: { findMany: vi.fn() },
     teacher: { findMany: vi.fn() },
@@ -167,6 +167,33 @@ describe('InternalToolsService.studentCandidates', () => {
       await expect(service.studentCandidates(subject, { studentName: '小明' })).rejects.toBeInstanceOf(ForbiddenException);
     }
     expect(prisma.student.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('InternalToolsService.lessonCandidates', () => {
+  it('queries lessons through the account student relation and supports a Shanghai business date', async () => {
+    const prisma = mockPrisma();
+    const service = new InternalToolsService(prisma as never);
+    prisma.user.findUnique.mockResolvedValue({ role: UserRole.OWNER, isActive: true, teacher: null });
+    prisma.lesson.findMany.mockResolvedValue([
+      { id: 'lesson-1', startsAt: new Date('2026-10-18T02:00:00.000Z'), status: 'COMPLETED', account: { student: { name: '小明' }, course: { name: '主课' } }, teacher: { name: '王老师' } },
+    ]);
+
+    await expect(service.lessonCandidates('owner-1', { studentName: '小明', date: '2026-10-18' })).resolves.toEqual({ candidates: [
+      { lessonId: 'lesson-1', studentName: '小明', courseName: '主课', teacherName: '王老师', startsAt: new Date('2026-10-18T02:00:00.000Z'), status: 'COMPLETED' },
+    ] });
+    expect(prisma.lesson.findMany).toHaveBeenCalledWith({
+      where: {
+        account: { student: { name: '小明' } },
+        startsAt: { gte: new Date('2026-10-17T16:00:00.000Z'), lt: new Date('2026-10-18T16:00:00.000Z') },
+      },
+      orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true, startsAt: true, status: true,
+        account: { select: { student: { select: { name: true } }, course: { select: { name: true } } } },
+        teacher: { select: { name: true } },
+      },
+    });
   });
 });
 

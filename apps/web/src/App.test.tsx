@@ -68,6 +68,19 @@ describe('AI workspace', () => {
     expect(screen.getByText('真实学生')).toBeInTheDocument();
   });
 
+  it('returns to login when a stored token is rejected by Core API', async () => {
+    window.localStorage.setItem('pianomanager.accessToken', 'expired-jwt');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input) === '/api/assistant/status') return Promise.resolve(new Response(JSON.stringify({ available: false, core: { available: false }, agentRuntime: { available: false }, checkedAt: '2026-10-16T01:02:03.000Z', message: 'AI 助手暂不可用' }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ message: 'Unauthorized' }), { status: 401 }));
+    }));
+
+    renderApp('/structured/students');
+
+    expect(await screen.findByRole('heading', { name: '登录工作台' })).toBeInTheDocument();
+    expect(window.localStorage.getItem('pianomanager.accessToken')).toBeNull();
+  });
+
   it('loads and displays monthly report values from Core API', async () => {
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
     const report = { periodStart: '2026-10-01T00:00:00.000Z', cashIncome: '1200.00', cashExpense: '300.00', cashNet: '900.00', lessonIncome: '800.00', refundFeeIncome: '0.00', manualIncome: '400.00', payrollCost: '100.00', giftCost: '50.00', manualExpense: '200.00', operatingProfit: '850.00' };

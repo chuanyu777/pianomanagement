@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Card, Input, Tag, Typography } from 'antd';
 import { Link, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext } from 'react-router-dom';
-import { confirmAssistantPreview, createAssistantIds, isTerminalAssistantEvent, startAssistantRun, streamAssistantEvents, type AssistantRunStatus, type AssistantUiEvent, type WorkspaceBlock, type WorkspaceDocument } from './assistant-client.js';
+import { AUTH_EXPIRED_EVENT, confirmAssistantPreview, createAssistantIds, isTerminalAssistantEvent, notifyAuthExpired, startAssistantRun, streamAssistantEvents, type AssistantRunStatus, type AssistantUiEvent, type WorkspaceBlock, type WorkspaceDocument } from './assistant-client.js';
 import { StructuredWorkbench } from './structured-workbench.js';
 
 const { Text, Title } = Typography;
@@ -52,7 +52,14 @@ async function apiRequest<T>(path: string, validate: (value: unknown) => value i
   headers.set('Accept', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(path, { ...init, headers });
-  if (!response.ok) throw new Error(`请求失败 (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthExpired();
+      throw new Error('登录状态已失效，请重新登录后再试。');
+    }
+    if (response.status === 403) throw new Error('当前账号无权执行此操作。');
+    throw new Error(`请求失败 (${response.status})`);
+  }
   const payload: unknown = await response.json();
   if (!validate(payload)) throw new Error('服务返回的数据格式无效');
   return payload;
@@ -79,6 +86,11 @@ export function App() {
     setToken(null);
     setUser(null);
   };
+  useEffect(() => {
+    const handleAuthExpired = () => onLogout();
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+  });
 
   if (!token) return <LoginPage onLogin={onLogin} />;
   return (

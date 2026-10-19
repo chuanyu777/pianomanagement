@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Card, Empty, Input, Select, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
+import { notifyAuthExpired } from './assistant-client.js';
 
 const { Text, Title } = Typography;
 const TOKEN_KEY = 'pianomanager.accessToken';
@@ -37,7 +38,11 @@ async function request<T>(path: string, validate: (value: unknown) => value is T
   if (init?.body) headers.set('Content-Type', 'application/json');
   const response = await fetch(path, { ...init, headers });
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403) throw new Error('登录状态已失效或当前账号无权执行此操作');
+    if (response.status === 401) {
+      notifyAuthExpired();
+      throw new Error('登录状态已失效，请重新登录后再试。');
+    }
+    if (response.status === 403) throw new Error('当前账号无权执行此操作。');
     throw new Error(`请求失败（HTTP ${response.status}）`);
   }
   if (response.status === 204) return undefined as T;

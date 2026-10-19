@@ -37,7 +37,10 @@ const worker = config.AGENT_WORKER_ENABLED
       pollIntervalMs: config.AGENT_WORKER_POLL_INTERVAL_MS,
       recoveryBatchSize: config.AGENT_WORKER_RECOVERY_BATCH_SIZE,
       onEvent: (runId, event) => eventHub.publish(runId, event),
-      onError: () => console.error('Agent Run Worker 执行失败'),
+      onError: (error) => {
+        const message = error instanceof Error ? error.message : '未知错误';
+        console.error(`Agent Run Worker 执行失败：${message}`);
+      },
     })
   : undefined;
 

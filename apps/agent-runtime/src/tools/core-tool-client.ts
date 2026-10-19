@@ -256,7 +256,8 @@ const StructuredActionPreviewRequestSchema = z.object({
 
 const StructuredActionPreviewResponseSchema = z.object({
   previewId: z.uuid(), actionType: z.string().trim().min(1), command: z.record(z.string(), z.unknown()),
-  display: z.object({ title: z.string().min(1), summary: z.string().min(1) }).strict(),
+  display: z.object({ title: z.string().min(1).optional(), summary: z.string().min(1).optional() }).passthrough(),
+  resourceVersions: z.record(z.string(), z.unknown()).optional(),
   expiresAt: z.iso.datetime(), auditEventId: z.uuid().optional(),
 }).strict();
 

@@ -25,6 +25,9 @@ describe('InternalToolsService.dashboardSummary', () => {
       { status: 'COMPLETED', _count: { _all: 2 } },
       { status: 'CANCELLED', _count: { _all: 1 } },
     ]);
+    prisma.lesson.findMany.mockResolvedValue([
+      { id: 'lesson-1', startsAt: new Date('2026-11-01T01:00:00.000Z'), endsAt: new Date('2026-11-01T01:45:00.000Z'), status: 'SCHEDULED', account: { student: { name: '小明' }, course: { name: '主课' } }, teacher: { name: '王老师' } },
+    ]);
     prisma.student.findMany.mockResolvedValue([
       { withdrawnAt: null, courseAccounts: [{ createdAt: new Date('2026-09-01T00:00:00Z'), lessons: [] }] },
       { withdrawnAt: null, courseAccounts: [{ createdAt: new Date('2026-10-02T00:00:00Z'), lessons: [] }] },
@@ -41,6 +44,8 @@ describe('InternalToolsService.dashboardSummary', () => {
     expect(summary).toEqual({
       role: 'OWNER', businessDate: '2026-11-01', period: '2026-11',
       todayLessons: { total: 6, scheduled: 3, completed: 2, cancelled: 1 },
+      todayLessonItems: [{ lessonId: 'lesson-1', startsAt: '2026-11-01T01:00:00.000Z', endsAt: '2026-11-01T01:45:00.000Z', startTime: '09:00', studentName: '小明', courseName: '主课', teacherName: '王老师', statusLabel: '待上课' }],
+      monthlyOperatingIncome: null,
       frozenStudentCount: 1, studentsWithNegativeBalanceCount: 1, unpaidPayrollCount: 4,
       highlights: [
         '今日课程 6 节（待上 3、已完成 2、已取消 1）',
@@ -53,6 +58,10 @@ describe('InternalToolsService.dashboardSummary', () => {
       by: ['status'],
       where: { startsAt: { gte: new Date('2026-10-31T16:00:00.000Z'), lt: new Date('2026-11-01T16:00:00.000Z') } },
     }));
+    expect(prisma.lesson.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { startsAt: { gte: new Date('2026-10-31T16:00:00.000Z'), lt: new Date('2026-11-01T16:00:00.000Z') } },
+      orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+    }));
     expect(prisma.payroll.count).toHaveBeenCalledWith(expect.objectContaining({
       where: { status: 'UNPAID', periodStart: new Date('2026-10-31T16:00:00.000Z') },
     }));
@@ -63,11 +72,13 @@ describe('InternalToolsService.dashboardSummary', () => {
     const service = new InternalToolsService(prisma as never);
     prisma.user.findUnique.mockResolvedValue({ id: 'teacher-user', role: UserRole.TEACHER, teacher: { id: 'teacher-1' }, isActive: true });
     prisma.lesson.count.mockResolvedValueOnce(2).mockResolvedValueOnce(5);
+    prisma.lesson.findMany.mockResolvedValue([{ id: 'own-lesson', startsAt: new Date('2026-10-17T03:00:00.000Z'), endsAt: new Date('2026-10-17T03:45:00.000Z'), status: 'SCHEDULED', account: { student: { name: '小红' }, course: { name: '陪练' } }, teacher: { name: '李老师' } }]);
 
     const summary = await service.dashboardSummary('teacher-user', new Date('2026-10-17T04:00:00.000Z'));
 
     expect(summary).toEqual({
       role: 'TEACHER', businessDate: '2026-10-17', todayScheduledCount: 2, futureScheduledCount: 5,
+      todayLessonItems: [{ lessonId: 'own-lesson', startsAt: '2026-10-17T03:00:00.000Z', endsAt: '2026-10-17T03:45:00.000Z', startTime: '11:00', studentName: '小红', courseName: '陪练', teacherName: '李老师', statusLabel: '待上课' }],
       highlights: ['今日排课 2 节', '后续排课 5 节'],
     });
     expect(prisma.lesson.count).toHaveBeenNthCalledWith(1, {
@@ -78,6 +89,9 @@ describe('InternalToolsService.dashboardSummary', () => {
     });
     expect(prisma.student.findMany).not.toHaveBeenCalled();
     expect(prisma.payroll.count).not.toHaveBeenCalled();
+    expect(prisma.lesson.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { teacherId: 'teacher-1', status: 'SCHEDULED', startsAt: { gte: new Date('2026-10-16T16:00:00.000Z'), lt: new Date('2026-10-17T16:00:00.000Z') } },
+    }));
   });
 
   it('includes monthly operating income when the reports service is available', async () => {
@@ -86,6 +100,7 @@ describe('InternalToolsService.dashboardSummary', () => {
     const service = new InternalToolsService(prisma as never, reports as never);
     prisma.user.findUnique.mockResolvedValue({ id: 'owner-1', role: UserRole.OWNER, teacher: null, isActive: true });
     prisma.lesson.groupBy.mockResolvedValue([]);
+    prisma.lesson.findMany.mockResolvedValue([]);
     prisma.student.findMany.mockResolvedValue([]);
     prisma.studentCourseAccount.findMany.mockResolvedValue([]);
     prisma.payroll.count.mockResolvedValue(0);
@@ -94,6 +109,7 @@ describe('InternalToolsService.dashboardSummary', () => {
 
     expect(reports.monthly).toHaveBeenCalledWith(new Date('2026-10-01T00:00:00.000Z'));
     expect(summary.highlights).toContain('2026-10 经营收入 1300.00 元');
+    expect(summary).toMatchObject({ monthlyOperatingIncome: '1300.00', todayLessonItems: [] });
   });
 
   it('rejects unknown, inactive and unlinked capability subjects', async () => {

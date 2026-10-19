@@ -65,6 +65,16 @@ describe('assistant client', () => {
     });
   });
 
+  it('preserves a validated lesson table from the workspace stream', () => {
+    const table = { type: 'data-table', columns: [{ key: 'time', label: '时间' }, { key: 'student', label: '学生' }], rows: [{ time: '09:00', student: '小明' }] };
+    expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({
+      type: 'workspace.replace', document: { protocolVersion: '1.0', title: '今日排课', blocks: [table] },
+    })}`)).toEqual({ type: 'workspace.replace', document: { protocolVersion: '1.0', title: '今日排课', blocks: [table] } });
+    expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({
+      type: 'workspace.replace', document: { protocolVersion: '1.0', title: '今日排课', blocks: [{ ...table, rows: [{ time: { unsafe: true } }] }] },
+    })}`)).toBeNull();
+  });
+
   it('rejects malformed workspace envelopes and supported blocks', () => {
     const invalidDocuments = [
       { protocolVersion: '2.0', title: '标题', blocks: [] },

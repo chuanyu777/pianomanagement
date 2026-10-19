@@ -9,6 +9,8 @@ type OwnerDashboardSummary = {
   period: string;
   highlights: string[];
   todayLessons: { total: number; scheduled: number; completed: number; cancelled: number };
+  todayLessonItems: TodayLessonItem[];
+  monthlyOperatingIncome: string | null;
   frozenStudentCount: number;
   studentsWithNegativeBalanceCount: number;
   unpaidPayrollCount: number;
@@ -19,10 +21,43 @@ type TeacherDashboardSummary = {
   businessDate: string;
   highlights: string[];
   todayScheduledCount: number;
+  todayLessonItems: TodayLessonItem[];
   futureScheduledCount: number;
 };
 
 export type DashboardSummary = OwnerDashboardSummary | TeacherDashboardSummary;
+
+type TodayLessonItem = {
+  lessonId: string;
+  startsAt: string;
+  endsAt: string;
+  startTime: string;
+  studentName: string;
+  courseName: string;
+  teacherName: string;
+  statusLabel: string;
+};
+
+function toTodayLessonItems(lessons: Array<{
+  id: string; startsAt: Date; endsAt: Date; status: LessonStatus;
+  account: { student: { name: string }; course: { name: string } }; teacher: { name: string };
+}>): TodayLessonItem[] {
+  const timeFormatter = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const statusLabels: Record<LessonStatus, string> = {
+    [LessonStatus.SCHEDULED]: '待上课', [LessonStatus.COMPLETED]: '已完成', [LessonStatus.CANCELLED]: '已取消',
+  };
+  return lessons.map((lesson) => ({
+    lessonId: lesson.id, startsAt: lesson.startsAt.toISOString(), endsAt: lesson.endsAt.toISOString(),
+    startTime: timeFormatter.format(lesson.startsAt), studentName: lesson.account.student.name,
+    courseName: lesson.account.course.name, teacherName: lesson.teacher.name, statusLabel: statusLabels[lesson.status],
+  }));
+}
+
+const TODAY_LESSON_SELECT = {
+  id: true, startsAt: true, endsAt: true, status: true,
+  account: { select: { student: { select: { name: true } }, course: { select: { name: true } } } },
+  teacher: { select: { name: true } },
+} as const;
 
 export type CourseAccountCandidate = {
   accountId: string;
@@ -275,7 +310,7 @@ export class InternalToolsService {
         status: LessonStatus.SCHEDULED,
         startsAt: { gte: dayStart, lt: dayEnd },
       };
-      const [todayScheduledCount, futureScheduledCount] = await Promise.all([
+      const [todayScheduledCount, futureScheduledCount, todayLessonRows] = await Promise.all([
         this.prisma.lesson.count({ where: whereToday }),
         this.prisma.lesson.count({
           where: {
@@ -284,22 +319,28 @@ export class InternalToolsService {
             startsAt: { gte: dayEnd },
           },
         }),
+        this.prisma.lesson.findMany({ where: whereToday, orderBy: [{ startsAt: 'asc' }, { id: 'asc' }], select: TODAY_LESSON_SELECT }),
       ]);
       return {
         role: 'TEACHER',
         businessDate: date,
         todayScheduledCount,
+        todayLessonItems: toTodayLessonItems(todayLessonRows),
         futureScheduledCount,
         highlights: [`今日排课 ${todayScheduledCount} 节`, `后续排课 ${futureScheduledCount} 节`],
       };
     }
 
     if (user.role !== UserRole.OWNER) throw new ForbiddenException('Capability 用户角色不可用');
-    const [lessonGroups, students, accounts, unpaidPayrollCount, monthlyReport] = await Promise.all([
+    const [lessonGroups, todayLessonRows, students, accounts, unpaidPayrollCount, monthlyReport] = await Promise.all([
       this.prisma.lesson.groupBy({
         by: ['status'],
         where: { startsAt: { gte: dayStart, lt: dayEnd } },
         _count: { _all: true },
+      }),
+      this.prisma.lesson.findMany({
+        where: { startsAt: { gte: dayStart, lt: dayEnd } },
+        orderBy: [{ startsAt: 'asc' }, { id: 'asc' }], select: TODAY_LESSON_SELECT,
       }),
       this.prisma.student.findMany({
         select: {
@@ -345,6 +386,8 @@ export class InternalToolsService {
       businessDate: date,
       period,
       todayLessons: { total: scheduled + completed + cancelled, scheduled, completed, cancelled },
+      todayLessonItems: toTodayLessonItems(todayLessonRows),
+      monthlyOperatingIncome: monthlyOperatingIncome ?? null,
       frozenStudentCount,
       studentsWithNegativeBalanceCount,
       unpaidPayrollCount,

@@ -7,8 +7,68 @@ const summary = {
   businessDate: '2026-10-17',
   highlights: ['今日排课 4 节', '本月经营收入 1200.00 元'],
 };
+const detailedSummary = {
+  role: 'OWNER', period: '2026-10',
+  businessDate: '2026-10-17',
+  highlights: ['今日排课 4 节', '冻结学生 2 人', '课程账户负余额学生 1 人', '2026-10 待发工资 3 笔', '本月经营收入 1200.00 元'],
+  todayLessons: { total: 4, scheduled: 3, completed: 1, cancelled: 0 },
+  todayLessonItems: [
+    { lessonId: 'lesson-1', startsAt: '2026-10-17T01:00:00.000Z', endsAt: '2026-10-17T01:45:00.000Z', startTime: '09:00', studentName: '小明', courseName: '主课', teacherName: '王老师', statusLabel: '待上课' },
+    { lessonId: 'lesson-2', startsAt: '2026-10-17T06:00:00.000Z', endsAt: '2026-10-17T06:45:00.000Z', startTime: '14:00', studentName: '小红', courseName: '陪练', teacherName: '李老师', statusLabel: '已完成' },
+  ],
+  frozenStudentCount: 2, studentsWithNegativeBalanceCount: 1, unpaidPayrollCount: 3,
+  monthlyOperatingIncome: '1200.00',
+};
 
 describe('read-only business query graph', () => {
+  it.each(['今天有哪些排课', '查询今天的排课', '查看今日排课', '今天有几节课', '今日排课', '今天的排课', '今天上什么课'])('returns only today lesson details for %s', async (userMessage) => {
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(detailedSummary);
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary });
+    const result = await graph.invoke({
+      runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage,
+    }, { configurable: { thread_id: `today-lessons-${userMessage}` } });
+
+    expect(fetchDashboardSummary).toHaveBeenCalledWith('request-capability');
+    expect(result.clarification).toBeUndefined();
+    expect(result.workspace?.title).toBe('今日排课 · 2026-10-17');
+    expect(result.answer).toContain('小明');
+    expect(result.answer).toContain('小红');
+    expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({
+      type: 'data-table', rows: expect.arrayContaining([expect.objectContaining({ student: '小明', course: '主课' })]),
+    }));
+    expect(JSON.stringify(result.workspace)).not.toMatch(/冻结|负余额|工资|收入|摘要 2/u);
+  });
+
+  it.each([
+    ['查看这个月收入', '本月经营收入 · 2026-10', '1200.00', '排课|冻结|负余额|工资'],
+    ['本月经营收入是多少', '本月经营收入 · 2026-10', '1200.00', '排课|冻结|负余额|工资'],
+    ['本月收入', '本月经营收入 · 2026-10', '1200.00', '排课|冻结|负余额|工资'],
+    ['有多少冻结学生', '冻结学生 · 2026-10-17', '2', '排课|负余额|工资|收入'],
+    ['查一下负余额学生', '负余额学生 · 2026-10-17', '1', '排课|冻结|工资|收入'],
+    ['待发工资有几笔', '待发工资 · 2026-10', '3', '排课|冻结|负余额|收入'],
+  ])('projects the matching result for %s', async (userMessage, title, value, unrelated) => {
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn().mockResolvedValue(detailedSummary) });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: `scope-${userMessage}` } });
+    expect(result.workspace?.title).toBe(title);
+    expect(result.answer).toContain(value);
+    expect(JSON.stringify(result.workspace)).not.toMatch(new RegExp(unrelated, 'u'));
+  });
+
+  it.each(['查询学生账户', '列出本周排课', '今天收入是多少'])('does not substitute the dashboard for unsupported scope %s', async (userMessage) => {
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn().mockResolvedValue(detailedSummary) });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: `unsupported-${userMessage}` } });
+    expect(result.answer).toContain('暂不支持');
+    expect(result.workspace?.title).toBe('暂不支持此查询');
+    expect(JSON.stringify(result.workspace)).not.toMatch(/1200\.00|冻结学生 2 人|今日排课 4 节/u);
+  });
+  it('reports an empty real schedule without rendering unrelated dashboard data', async () => {
+    const empty = { ...detailedSummary, todayLessons: { total: 0, scheduled: 0, completed: 0, cancelled: 0 }, todayLessonItems: [] };
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn().mockResolvedValue(empty) });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage: '今天有哪些排课' }, { configurable: { thread_id: 'empty-today-lessons' } });
+    expect(result.answer).toContain('没有排课');
+    expect(result.workspace?.blocks).toHaveLength(1);
+    expect(JSON.stringify(result.workspace)).not.toMatch(/冻结|工资|收入/u);
+  });
   it('creates a payment Preview after an exact unique account resolution, without any confirm capability', async () => {
     const findCourseAccountCandidates = vi.fn().mockResolvedValue({
       candidates: [{ accountId: '49fbcf47-c616-468a-a058-cdca1ee66025', studentName: '小明', courseName: '主课' }],
@@ -363,13 +423,7 @@ describe('read-only business query graph', () => {
       protocolVersion: '1.0',
       blocks: [
         { type: 'summary', text: '业务日期：2026-10-17' },
-        {
-          type: 'metric-grid',
-          metrics: [
-            { label: '摘要 1', value: '今日排课 4 节', tone: 'neutral' },
-            { label: '摘要 2', value: '本月经营收入 1200.00 元', tone: 'neutral' },
-          ],
-        },
+        { type: 'summary', title: '经营要点', text: '今日排课 4 节\n本月经营收入 1200.00 元' },
       ],
       sources: [],
     });
@@ -377,8 +431,16 @@ describe('read-only business query graph', () => {
     expect(JSON.stringify(result)).not.toContain('request-capability');
   });
 
-  it('treats 查看今日排课 as a read-only dashboard query instead of an incomplete lesson command', async () => {
-    const fetchDashboardSummary = vi.fn().mockResolvedValue(summary);
+  it('shows a general operating overview without numbered placeholder labels', async () => {
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn().mockResolvedValue(detailedSummary) });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage: '今天经营情况怎么样' }, { configurable: { thread_id: 'overview-without-placeholder-labels' } });
+    expect(result.workspace?.title).toBe('经营摘要 · 2026-10-17');
+    expect(JSON.stringify(result.workspace)).not.toMatch(/摘要 [1-9]/u);
+    expect(JSON.stringify(result.workspace)).toContain('冻结学生 2 人');
+  });
+
+  it('treats 查看今日排课 as a read-only schedule query instead of an incomplete lesson command', async () => {
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(detailedSummary);
     const graph = createBusinessQueryGraph({
       checkpointer: new MemorySaver(),
       capability: 'request-capability',
@@ -396,21 +458,7 @@ describe('read-only business query graph', () => {
 
     expect(fetchDashboardSummary).toHaveBeenCalledWith('request-capability');
     expect(result.clarification).toBeUndefined();
-    expect(result.workspace?.title).toBe('经营摘要 · 2026-10-17');
-  });
-
-  it.each(['查看这个月收入', '查询学生账户', '列出本周排课'])('treats %s as a read-only query', async (userMessage) => {
-    const fetchDashboardSummary = vi.fn().mockResolvedValue(summary);
-    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary });
-
-    const result = await graph.invoke(
-      { runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage },
-      { configurable: { thread_id: `read-only-${userMessage}` } },
-    );
-
-    expect(fetchDashboardSummary).toHaveBeenCalledWith('request-capability');
-    expect(result.clarification).toBeUndefined();
-    expect(result.workspace?.title).toBe('经营摘要 · 2026-10-17');
+    expect(result.workspace?.title).toBe('今日排课 · 2026-10-17');
   });
 
   it('asks the model to summarize only the fetched read-only summary', async () => {
@@ -426,7 +474,7 @@ describe('read-only business query graph', () => {
       {
         runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa',
         threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75',
-        userMessage: '今天有几节课？',
+        userMessage: '今天经营情况怎么样？',
       },
       { configurable: { thread_id: 'model-read-only-query' } },
     );
@@ -435,7 +483,7 @@ describe('read-only business query graph', () => {
     expect(model.invoke).toHaveBeenCalledTimes(1);
     const messages = model.invoke.mock.calls[0]?.[0] as [unknown, HumanMessage];
     expect(JSON.parse(String(messages[1].content))).toEqual({
-      question: '今天有几节课？',
+      question: '今天经营情况怎么样？',
       readOnlySummary: summary,
     });
     expect(JSON.stringify(messages)).toContain('只读');

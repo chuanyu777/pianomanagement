@@ -211,7 +211,7 @@ describe('agent runtime Fastify server', () => {
     vi.stubGlobal('fetch', fetchDashboardSummary);
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
     const path = '/internal/assistant/runs/start';
-    const body = { runId, threadId, userMessage: '重放验证' };
+    const body = { runId, threadId, userMessage: '查询经营摘要，重放验证' };
     const headers = signedHeaders('POST', path, body);
 
     const first = await app.inject({ method: 'POST', url: path, headers, payload: body });
@@ -267,7 +267,7 @@ describe('agent runtime Fastify server', () => {
     const appendMessage = vi.spyOn(repository, 'appendMessage');
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
 
-    const startBody = { runId, threadId, userMessage: '今天有几节课？' };
+    const startBody = { runId, threadId, userMessage: '查询经营摘要' };
     const start = await app.inject({
       method: 'POST',
       url: '/internal/assistant/runs/start',
@@ -310,8 +310,8 @@ describe('agent runtime Fastify server', () => {
     });
     expect(completedEvents.body).toContain('event: assistant.delta');
     expect(completedEvents.body).toContain('event: workspace.replace');
-    expect(completedEvents.body).toContain('"type":"metric-grid"');
-    expect(completedEvents.body).toContain('"value":"今日排课 4 节"');
+    expect(completedEvents.body).toContain('"title":"经营要点"');
+    expect(completedEvents.body).toContain('"text":"今日排课 4 节"');
     expect(completedEvents.body).toContain('event: run.completed');
     expect(completedEvents.body).not.toContain('event: clarification.requested');
     expect(completedEvents.body.indexOf('event: workspace.replace')).toBeLessThan(
@@ -380,7 +380,7 @@ describe('agent runtime Fastify server', () => {
     const address = app.server.address();
     if (!address || typeof address === 'string') throw new Error('测试服务未监听 TCP 端口');
 
-    const startBody = { runId, threadId, userMessage: '实时 SSE' };
+    const startBody = { runId, threadId, userMessage: '查询经营摘要，实时 SSE' };
     const startPromise = app.inject({
       method: 'POST',
       url: '/internal/assistant/runs/start',
@@ -441,7 +441,7 @@ describe('agent runtime Fastify server', () => {
     if (!address || typeof address === 'string') throw new Error('测试服务未监听 TCP 端口');
 
     try {
-      const startBody = { runId, threadId, userMessage: '断开清理' };
+      const startBody = { runId, threadId, userMessage: '查询经营摘要，断开清理' };
       const startPromise = app.inject({
         method: 'POST',
         url: '/internal/assistant/runs/start',
@@ -588,7 +588,7 @@ describe('agent runtime Fastify server', () => {
     const repository = createTestRepository();
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
 
-    const failureBody = { runId, threadId, userMessage: '阶段 0' };
+    const failureBody = { runId, threadId, userMessage: '查询经营摘要' };
     const response = await app.inject({
       method: 'POST',
       url: '/internal/assistant/runs/start',
@@ -608,7 +608,7 @@ describe('agent runtime Fastify server', () => {
     vi.stubGlobal('fetch', fetchDashboardSummary);
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });
 
-    const knownBody = { runId, threadId, userMessage: '阶段 0' };
+    const knownBody = { runId, threadId, userMessage: '查询经营摘要' };
     await app.inject({
       method: 'POST',
       url: '/internal/assistant/runs/start',

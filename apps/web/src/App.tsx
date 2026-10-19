@@ -332,6 +332,7 @@ function ContextPanel({ onClear, workspace }: { onClear: () => void; workspace: 
       <Title className="live-workspace-title" level={5}>{workspace.title}</Title>
       {workspace.blocks.map((block, index) => {
         if (block.type === 'summary') return <section className="workspace-summary" key={`summary-${index}`}><strong>{block.title}</strong><p>{block.text}</p></section>;
+        if (block.type === 'data-table') return <div className="workspace-table-wrap" key={`table-${index}`}><table aria-label="查询结果" className="workspace-table"><thead><tr>{block.columns.map((column) => <th key={column.key} scope="col">{column.label}</th>)}</tr></thead><tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{block.columns.map((column) => <td key={column.key}>{String(row[column.key] ?? '—')}</td>)}</tr>)}</tbody></table></div>;
         if (block.type === 'alert-list') return <div aria-label="经营提醒" className="workspace-alerts" key={`alerts-${index}`}>
           {block.alerts.map((alert, alertIndex) => <Alert key={`${alert.title}-${alertIndex}`} message={alert.title} description={alert.detail} showIcon type={alert.severity} />)}
         </div>;

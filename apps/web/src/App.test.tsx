@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -95,6 +95,25 @@ describe('AI workspace', () => {
     expect(screen.getByText('经营利润')).toBeInTheDocument();
   });
 
+  it('shows readable category and channel labels in real manual transactions', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
+    const transaction = { id: 'm1', kind: 'INCOME', incomeCategory: 'BOOK_SALE', expenseCategory: null, amount: '1.00', channel: 'CASH', occurredAt: '2026-10-19T04:45:00.000Z', note: null, createdAt: '2026-10-19T04:45:00.000Z' };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      const body = path === '/api/assistant/status'
+        ? { available: true, core: { available: true }, agentRuntime: { available: true }, checkedAt: '2026-10-19T04:45:00.000Z', message: 'AI 助手已连接' }
+        : path.startsWith('/api/manual-transactions?') ? [transaction] : {};
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    }));
+    renderApp('/structured/finance');
+    await user.click(await screen.findByRole('tab', { name: '手工收支' }));
+    const table = await screen.findByRole('table', { name: '手工收支列表' });
+    expect(within(table).getByText('卖书')).toBeInTheDocument();
+    expect(within(table).getByText('现金')).toBeInTheDocument();
+    expect(within(table).queryByText('BOOK_SALE')).not.toBeInTheDocument();
+  });
+
   it('uses the logged-in JWT and an idempotency key for lesson completion', async () => {
     const user = userEvent.setup();
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
@@ -142,6 +161,7 @@ describe('AI workspace', () => {
                   { type: 'summary', title: '排课情况', text: '今日共有 2 节排课。' },
                   { type: 'alert-list', alerts: [{ severity: 'warning', title: '待确认课消', detail: '有 1 节课程等待确认。' }] },
                   { type: 'metric-grid', metrics: [{ label: '今日排课', value: '2 节', tone: 'positive' }] },
+                  { type: 'data-table', columns: [{ key: 'time', label: '时间' }, { key: 'student', label: '学生' }, { key: 'course', label: '课程' }], rows: [{ time: '09:00', student: '小明', course: '主课' }] },
                 ],
                 sources: [],
               },
@@ -171,6 +191,8 @@ describe('AI workspace', () => {
     expect(screen.getByText('有 1 节课程等待确认。')).toBeInTheDocument();
     expect(screen.getByText('今日排课')).toBeInTheDocument();
     expect(screen.getByText('2 节')).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: '查询结果' })).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: '小明' })).toBeInTheDocument();
     expect(await screen.findByText('已完成')).toBeInTheDocument();
     const startCall = fetchMock.mock.calls.find(([path]) => path === '/api/assistant/runs');
     expect(new Headers(startCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');

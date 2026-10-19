@@ -118,6 +118,12 @@ button { cursor: pointer; }
 .workspace-summary { padding: 17px 18px; border: 1px solid #dfe3eb; border-radius: 4px; background: rgba(255,255,255,.94); box-shadow: 0 7px 20px rgba(42,51,73,.04); }
 .workspace-summary strong { color: #444d63; font-size: 12px; }
 .workspace-summary p { margin: 8px 0 0; color: #7a8294; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workspace-table-wrap { width: 100%; overflow-x: auto; border: 1px solid #dfe3eb; border-radius: 4px; background: #fff; }
+.workspace-table { width: 100%; min-width: 540px; border-collapse: collapse; text-align: left; font-size: 12px; }
+.workspace-table th, .workspace-table td { padding: 12px 14px; border-bottom: 1px solid #e8ebf1; white-space: nowrap; }
+.workspace-table th { color: #7a8294; font-weight: 600; background: #f8f9fc; }
+.workspace-table td { color: #414a60; }
+.workspace-table tbody tr:last-child td { border-bottom: 0; }
 .preview-alert { margin-top: 10px; border-radius: 10px; }
 .receipt-result { margin-top: 12px; padding-top: 12px; border-top: 1px solid #edf0f4; }
 .receipt-result strong { color: #555d70; font-size: 11px; }

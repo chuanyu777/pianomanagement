@@ -25,6 +25,7 @@ type LessonIntent = { studentName: string; courseName: string; teacherName: stri
 type BatchLessonIntent = LessonIntent & { weeks: number };
 type RefundIntent = { studentName: string; feeAmount: string; channel: PaymentChannel; note?: string };
 type StructuredActionKind = 'lesson.reschedule' | 'lesson.cancel' | 'lesson.complete' | 'lesson.complete.reversal' | 'manual-transaction.create' | 'payroll.generate' | 'payroll.pay' | 'payroll.adjust' | 'period.close' | 'period.reopen';
+type ReadScope = 'dashboard' | 'today-lessons' | 'monthly-income' | 'frozen-students' | 'negative-balance' | 'unpaid-payroll' | 'unsupported';
 type StructuredActionIntent = {
   kind: StructuredActionKind; studentName?: string; teacherName?: string; date?: string; targetStartsAt?: string;
   amount?: string; channel?: PaymentChannel; category?: string; transactionKind?: 'INCOME' | 'EXPENSE'; period?: string; reason?: string;
@@ -34,6 +35,7 @@ type StructuredActionIntent = {
 const QueryState = Annotation.Root({
   runId: Annotation<string>(), threadId: Annotation<string>(), userMessage: Annotation<string>(),
   dashboardSummary: Annotation<DashboardSummary | undefined>(), moneyIntent: Annotation<MoneyIntent | undefined>(), lessonIntent: Annotation<LessonIntent | undefined>(), batchLessonIntent: Annotation<BatchLessonIntent | undefined>(), refundIntent: Annotation<RefundIntent | undefined>(),
+  readScope: Annotation<ReadScope | undefined>(),
   actionIntent: Annotation<StructuredActionIntent | undefined>(), lessonActionCandidates: Annotation<LessonCandidates | undefined>(), payrollCandidates: Annotation<PayrollCandidates | undefined>(), structuredActionPreview: Annotation<StructuredActionPreviewResponse | undefined>(),
   clarification: Annotation<string | undefined>(), accountCandidates: Annotation<CourseAccountCandidates | undefined>(), studentCandidates: Annotation<StudentCandidates | undefined>(),
   teacherCandidates: Annotation<TeacherCandidates | undefined>(), moneyPreview: Annotation<MoneyPreview | undefined>(), lessonPreview: Annotation<SingleLessonPreviewResponse | undefined>(), batchLessonPreview: Annotation<BatchLessonPreviewResponse | undefined>(), refundPreview: Annotation<FinalRefundPreviewResponse | undefined>(), workspace: Annotation<WorkspaceDocument | undefined>(), answer: Annotation<string | undefined>(),
@@ -176,15 +178,32 @@ function parseLessonIntent(message: string): { lessonIntent?: LessonIntent; batc
     : { lessonIntent };
 }
 
-function parseBusinessIntent(message: string): { moneyIntent?: MoneyIntent; lessonIntent?: LessonIntent; batchLessonIntent?: BatchLessonIntent; refundIntent?: RefundIntent; actionIntent?: StructuredActionIntent; clarification?: string } {
-  if (/^(?:帮我)?\s*(?:查看|查询|看看|列出|显示|统计)/u.test(message.trim())) return {};
+function parseReadScope(message: string): ReadScope | undefined {
+  const text = message.trim();
+  const asking = /查看|查询|看看|列出|显示|统计|查一下|有哪些|多少|几节|几笔|怎么样|什么课|情况|明细|课表/u.test(text)
+    || /^(?:今天|今日)(?:的)?(?:排课|课程)[？?。]?$/u.test(text)
+    || /^(?:本月|这个月)(?:的)?(?:经营)?收入[？?。]?$/u.test(text);
+  if (!asking) return undefined;
+  if (/(?:今天|今日|当天)/u.test(text) && /排课|课程|课表|上课|几节课|上什么课/u.test(text)) return 'today-lessons';
+  if (/(?:这个月|本月|当月)/u.test(text) && /收入|营收/u.test(text)) return 'monthly-income';
+  if (/冻结/u.test(text) && /学生|人数|多少/u.test(text)) return 'frozen-students';
+  if (/负余额/u.test(text)) return 'negative-balance';
+  if (/待发工资|未发工资/u.test(text)) return 'unpaid-payroll';
+  if (/经营情况|经营概况|经营摘要|经营数据|经营如何/u.test(text)) return 'dashboard';
+  return 'unsupported';
+}
+
+function parseBusinessIntent(message: string): { readScope?: ReadScope; moneyIntent?: MoneyIntent; lessonIntent?: LessonIntent; batchLessonIntent?: BatchLessonIntent; refundIntent?: RefundIntent; actionIntent?: StructuredActionIntent; clarification?: string } {
+  const readScope = parseReadScope(message);
+  if (readScope) return { readScope };
   const refund = parseRefundIntent(message);
   if (refund.refundIntent || refund.clarification) return refund;
   const money = parseMoneyIntent(message);
   if (money.moneyIntent || money.clarification) return money;
   const structuredAction = parseStructuredActionIntent(message);
   if (structuredAction.actionIntent || structuredAction.clarification) return structuredAction;
-  return parseLessonIntent(message);
+  const lesson = parseLessonIntent(message);
+  return lesson.lessonIntent || lesson.batchLessonIntent || lesson.clarification ? lesson : { readScope: 'unsupported' };
 }
 
 function deterministicAnswer(summary: DashboardSummary): string {
@@ -194,8 +213,51 @@ function deterministicAnswer(summary: DashboardSummary): string {
 function createDashboardWorkspace(summary: DashboardSummary): WorkspaceDocument {
   return WorkspaceDocumentSchema.parse({ protocolVersion, title: `经营摘要 · ${summary.businessDate}`, blocks: [
     { type: 'summary', title: '今日经营摘要', text: `业务日期：${summary.businessDate}` },
-    { type: 'metric-grid', metrics: summary.highlights.map((highlight, index) => ({ label: `摘要 ${index + 1}`, value: highlight, tone: 'neutral' })) },
+    { type: 'summary', title: '经营要点', text: summary.highlights.length > 0 ? summary.highlights.join('\n') : '当前没有可展示的经营数据。' },
   ], sources: [] });
+}
+
+function scopedReadResult(summary: DashboardSummary, scope: ReadScope): { answer: string; workspace: WorkspaceDocument } {
+  if (scope === 'today-lessons') {
+    const lessons = summary.todayLessonItems;
+    if (!lessons) return unsupportedReadResult('当前账号没有可用的今日排课明细。');
+    const total = summary.todayLessons?.total ?? summary.todayScheduledCount ?? lessons.length;
+    const counts = summary.todayLessons
+      ? `待上 ${summary.todayLessons.scheduled}、已完成 ${summary.todayLessons.completed}、已取消 ${summary.todayLessons.cancelled}`
+      : `待上 ${summary.todayScheduledCount ?? total}`;
+    const answer = lessons.length === 0
+      ? `${summary.businessDate} 没有排课。`
+      : `${summary.businessDate} 共 ${total} 节课（${counts}）：${lessons.map((lesson) => `${lesson.startTime} ${lesson.studentName} · ${lesson.courseName} · ${lesson.teacherName}（${lesson.statusLabel}）`).join('；')}`;
+    return { answer, workspace: WorkspaceDocumentSchema.parse({
+      protocolVersion, title: `今日排课 · ${summary.businessDate}`,
+      blocks: [
+        { type: 'summary', title: '今日课程', text: lessons.length === 0 ? '今天没有排课。' : `共 ${total} 节（${counts}）` },
+        ...(lessons.length > 0 ? [{ type: 'data-table', columns: [
+          { key: 'time', label: '时间' }, { key: 'student', label: '学生' }, { key: 'course', label: '课程' }, { key: 'teacher', label: '老师' }, { key: 'status', label: '状态' },
+        ], rows: lessons.map((lesson) => ({ time: lesson.startTime, student: lesson.studentName, course: lesson.courseName, teacher: lesson.teacherName, status: lesson.statusLabel })) }] : []),
+      ], sources: [],
+    }) };
+  }
+  const metrics: Record<Exclude<ReadScope, 'dashboard' | 'today-lessons' | 'unsupported'>, { title: string; period: string; label: string; value: string | undefined; unit: string }> = {
+    'monthly-income': { title: '本月经营收入', period: summary.period ?? summary.businessDate.slice(0, 7), label: '经营收入', value: summary.monthlyOperatingIncome ?? undefined, unit: '元' },
+    'frozen-students': { title: '冻结学生', period: summary.businessDate, label: '冻结学生', value: summary.frozenStudentCount?.toString(), unit: '人' },
+    'negative-balance': { title: '负余额学生', period: summary.businessDate, label: '课程账户负余额学生', value: summary.studentsWithNegativeBalanceCount?.toString(), unit: '人' },
+    'unpaid-payroll': { title: '待发工资', period: summary.period ?? summary.businessDate.slice(0, 7), label: '待发工资', value: summary.unpaidPayrollCount?.toString(), unit: '笔' },
+  };
+  if (scope === 'dashboard' || scope === 'unsupported') throw new Error('INVALID_SCOPED_READ');
+  const metric = metrics[scope];
+  if (metric.value === undefined) return unsupportedReadResult('当前账号没有可用的这项统计数据。');
+  return { answer: `${metric.period} ${metric.label} ${metric.value} ${metric.unit}。`, workspace: WorkspaceDocumentSchema.parse({
+    protocolVersion, title: `${metric.title} · ${metric.period}`, blocks: [
+      { type: 'metric-grid', metrics: [{ label: metric.label, value: `${metric.value} ${metric.unit}`, tone: 'neutral' }] },
+    ], sources: [],
+  }) };
+}
+
+function unsupportedReadResult(message = '暂不支持这项明细查询，请使用对应的结构化页面查看。'): { answer: string; workspace: WorkspaceDocument } {
+  return { answer: message, workspace: WorkspaceDocumentSchema.parse({
+    protocolVersion, title: '暂不支持此查询', blocks: [{ type: 'summary', title: '当前无法查询', text: message }], sources: [],
+  }) };
 }
 
 function createClarificationWorkspace(question: string): WorkspaceDocument {
@@ -313,12 +375,16 @@ export function createBusinessQueryGraph(input: {
   return new StateGraph(QueryState)
     .addNode('classifyIntent', async (state: QueryStateValue) => parseBusinessIntent(state.userMessage))
     .addNode('readDashboardSummary', async () => ({ dashboardSummary: DashboardSummarySchema.parse(await input.fetchDashboardSummary(input.capability)) }))
+    .addNode('buildUnsupportedWorkspace', async () => unsupportedReadResult())
     .addNode('buildDashboardWorkspace', async (state: QueryStateValue) => {
       if (!state.dashboardSummary) throw new Error('DASHBOARD_SUMMARY_MISSING');
-      return { workspace: createDashboardWorkspace(state.dashboardSummary) };
+      return state.readScope && state.readScope !== 'dashboard'
+        ? scopedReadResult(state.dashboardSummary, state.readScope)
+        : { workspace: createDashboardWorkspace(state.dashboardSummary) };
     })
     .addNode('answerQuery', async (state: QueryStateValue) => {
       if (!state.dashboardSummary) throw new Error('DASHBOARD_SUMMARY_MISSING');
+      if (state.readScope && state.readScope !== 'dashboard') return { answer: state.answer };
       const fallback = deterministicAnswer(state.dashboardSummary);
       if (!input.model) return { answer: fallback };
       try {
@@ -496,7 +562,7 @@ export function createBusinessQueryGraph(input: {
       return { workspace: createRefundWorkspace(state.refundIntent, state.refundPreview), answer: '已生成退学退款预览，尚未登记退款或变更学生状态。请在工作区核对逐课程金额、手续费和实际退款后，再由你确认。' };
     })
     .addEdge(START, 'classifyIntent')
-    .addConditionalEdges('classifyIntent', (state) => state.clarification ? 'buildClarificationWorkspace' : state.refundIntent ? 'resolveStudent' : state.actionIntent ? 'resolveStructuredAction' : (state.moneyIntent || state.lessonIntent || state.batchLessonIntent) ? 'resolveCourseAccount' : 'readDashboardSummary')
+    .addConditionalEdges('classifyIntent', (state) => state.clarification ? 'buildClarificationWorkspace' : state.refundIntent ? 'resolveStudent' : state.actionIntent ? 'resolveStructuredAction' : (state.moneyIntent || state.lessonIntent || state.batchLessonIntent) ? 'resolveCourseAccount' : state.readScope === 'unsupported' ? 'buildUnsupportedWorkspace' : 'readDashboardSummary')
     .addConditionalEdges('resolveStructuredAction', (state) => state.clarification ? 'buildClarificationWorkspace' : 'createStructuredActionPreview')
     .addConditionalEdges('resolveCourseAccount', (state) => state.clarification ? 'buildClarificationWorkspace' : (state.lessonIntent || state.batchLessonIntent) ? 'resolveTeacher' : 'createMoneyPreview')
     .addConditionalEdges('resolveStudent', (state) => state.clarification ? 'buildClarificationWorkspace' : 'createFinalRefundPreview')
@@ -512,6 +578,7 @@ export function createBusinessQueryGraph(input: {
     .addEdge('buildRefundWorkspace', END)
     .addEdge('buildStructuredActionWorkspace', END)
     .addEdge('buildClarificationWorkspace', END)
+    .addEdge('buildUnsupportedWorkspace', END)
     .addEdge('readDashboardSummary', 'buildDashboardWorkspace')
     .addEdge('buildDashboardWorkspace', 'answerQuery')
     .addEdge('answerQuery', END)

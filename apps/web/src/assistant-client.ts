@@ -8,6 +8,7 @@ export type AssistantRun = {
 
 export type WorkspaceBlock =
   | { type: 'summary'; title: string; text: string }
+  | { type: 'data-table'; columns: { key: string; label: string }[]; rows: Record<string, string | number | boolean | null>[] }
   | { type: 'alert-list'; alerts: { severity: 'info' | 'warning' | 'error'; title: string; detail?: string }[] }
   | { type: 'metric-grid'; metrics: { label: string; value: string; tone: 'neutral' | 'positive' | 'warning' }[] }
   | { type: 'calculation-breakdown'; title: string; lines: { label: string; amount: string }[]; total: string }
@@ -46,6 +47,20 @@ function parseWorkspaceDocument(value: unknown): WorkspaceDocument | null {
     if (rawBlock.type === 'summary') {
       if (typeof rawBlock.title !== 'string' || rawBlock.title.trim().length === 0 || typeof rawBlock.text !== 'string') return null;
       blocks.push({ type: 'summary', title: rawBlock.title, text: rawBlock.text });
+    } else if (rawBlock.type === 'data-table') {
+      if (!Array.isArray(rawBlock.columns) || !Array.isArray(rawBlock.rows)) return null;
+      const columns: Extract<WorkspaceBlock, { type: 'data-table' }>['columns'] = [];
+      for (const column of rawBlock.columns) {
+        if (!isRecord(column) || typeof column.key !== 'string' || column.key.trim().length === 0 ||
+            typeof column.label !== 'string' || column.label.trim().length === 0) return null;
+        columns.push({ key: column.key, label: column.label });
+      }
+      const rows: Extract<WorkspaceBlock, { type: 'data-table' }>['rows'] = [];
+      for (const row of rawBlock.rows) {
+        if (!isRecord(row) || Object.values(row).some((cell) => cell !== null && !['string', 'number', 'boolean'].includes(typeof cell))) return null;
+        rows.push(row as Record<string, string | number | boolean | null>);
+      }
+      blocks.push({ type: 'data-table', columns, rows });
     } else if (rawBlock.type === 'alert-list') {
       if (!Array.isArray(rawBlock.alerts)) return null;
       const alerts: Extract<WorkspaceBlock, { type: 'alert-list' }>['alerts'] = [];

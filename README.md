@@ -90,7 +90,7 @@ docker compose exec \
 unset OWNER_BOOTSTRAP_USERNAME OWNER_BOOTSTRAP_PASSWORD
 ```
 
-按提示输入用户名和至少 12 位密码。店主创建成功后，打开 <http://localhost:3000/api/docs>，调用 `POST /api/auth/login` 获取 `accessToken`，再通过 Swagger `Authorize`（如当前页面提供）调用 `GET /api/auth/me` 和店主受限接口；完整操作步骤见[阶段 0 开发运行手册](docs/阶段0-开发运行手册.md#swagger-登录与受限接口测试)。用户名已存在表示数据库中已有该账号。以上数据库密码、JWT/HMAC 密钥均为 Compose 内的本地开发值，只用于隔离的本机测试，不得用于共享、预发布或生产环境。每次 Core 容器启动会生成临时 Ed25519 Capability 私钥。AI 默认关闭，不需要模型密钥。
+按提示输入用户名和至少 12 位密码。店主创建成功后，打开 <http://localhost:3000/api/docs>，调用 `POST /api/auth/login` 获取 `accessToken`，再通过 Swagger `Authorize`（如当前页面提供）调用 `GET /api/auth/me` 和店主受限接口；完整操作步骤见[阶段 0 开发运行手册](docs/阶段0-开发运行手册.md#swagger-登录与受限接口测试)。用户名已存在表示数据库中已有该账号。以上数据库密码、JWT/HMAC 密钥均为 Compose 内的本地开发值，只用于隔离的本机测试，不得用于共享、预发布或生产环境。每次 Core 容器启动会生成临时 Ed25519 Capability 私钥。AI 默认关闭；需要本地 AI 时按[本地 AI 配置](docs/阶段0-开发运行手册.md#本地-ai-配置)启用，真实密钥只放在未纳入 Git 的 `.env` 中。
 
 查看日志或停止容器：
 

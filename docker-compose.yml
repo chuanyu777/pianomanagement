@@ -79,7 +79,10 @@ services:
       AGENT_WORKER_RENEW_INTERVAL_MS: 10000
       AGENT_WORKER_POLL_INTERVAL_MS: 1000
       AGENT_WORKER_RECOVERY_BATCH_SIZE: 100
-      AI_ENABLED: "false"
+      AI_ENABLED: "${AI_ENABLED:-false}"
+      AI_PROVIDER: "${AI_PROVIDER:-}"
+      AI_MODEL: "${AI_MODEL:-}"
+      AI_API_KEY: "${AI_API_KEY:-}"
       AGENT_DATABASE_URL: postgresql://piano_agent:piano_agent_dev@agent-db:5432/piano_agent
       CORE_INTERNAL_API_URL: http://core:3000/api/internal
       INTERNAL_SERVICE_SECRET: piano-local-only-internal-secret-change-me

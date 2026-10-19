@@ -173,20 +173,19 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
   const location = useLocation();
   const navigate = useNavigate();
   const assistantState = useAssistantState();
+  const isAssistantWorkspace = location.pathname === '/';
   return (
     <div className="app-shell">
       <header className="topbar">
-        <Link aria-label="返回 AI 工作台" className="brand" to="/">
-          <span className="brand-mark">P</span><span><strong>琴行经营</strong><small>AI 工作台</small></span>
-        </Link>
-        <div className="topbar-actions">
-          {user && <span className="signed-in-user">{user.username}</span>}
-          <Button aria-label="退出登录" onClick={onLogout} size="small">退出</Button>
-        </div>
+        <span className="topbar-product">● AI NATIVE · 琴行经营工作台</span>
+        <span className="topbar-note">关键操作先预览，再由你确认</span>
       </header>
-      <div className="workspace-grid">
+      <div className={`workspace-grid ${isAssistantWorkspace ? 'assistant-layout' : 'structured-layout'}`}>
         <aside aria-label="主导航" className="sidebar panel-surface">
-          <div className="sidebar-heading"><span className="eyebrow">OPERATING DESK</span><span className="sidebar-caption">经营菜单</span></div>
+          <Link aria-label="返回 AI 工作台" className="brand sidebar-brand" to="/">
+            <span className="brand-mark">P</span><span><strong>琴行经营</strong><small>AI 工作台</small></span>
+          </Link>
+          <div className="sidebar-heading"><span className="eyebrow">经营导航</span><span className="sidebar-caption">OPERATING DESK</span></div>
           <nav className="nav-list">
             {navItems.map((item) => {
               const active = location.pathname === item.path;
@@ -196,10 +195,13 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
               </button>;
             })}
           </nav>
-          <div className="sidebar-footer"><span className="eyebrow">TODAY</span><span>先处理最重要的事</span><span className="muted">所有关键操作都会先让你核对</span></div>
+          <div className="sidebar-footer">
+            <div><span className="eyebrow">当前账号</span><strong>{user?.username ?? '已登录'}</strong></div>
+            <Button aria-label="退出登录" ghost onClick={onLogout} size="small">退出</Button>
+          </div>
         </aside>
         <main className="main-column"><Outlet context={{ assistantState, onLogout, setWorkspace }} /></main>
-        <aside aria-label="经营工作区" className="context-panel panel-surface"><ContextPanel onClear={() => setWorkspace(null)} workspace={workspace} /></aside>
+        {isAssistantWorkspace && <aside aria-label="经营工作区" className="context-panel panel-surface"><ContextPanel onClear={() => setWorkspace(null)} workspace={workspace} /></aside>}
       </div>
     </div>
   );

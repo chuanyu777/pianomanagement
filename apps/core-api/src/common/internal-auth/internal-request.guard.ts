@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import type { CanActivate, ExecutionContext } from '@nestjs/common';
 import {
   INTERNAL_REQUEST_NONCE_HEADER,
@@ -6,9 +6,13 @@ import {
   INTERNAL_REQUEST_TIMESTAMP_HEADER,
 } from '@piano/assistant-protocol';
 import {
-  InternalRequestReplayProtector,
   verifySignedInternalRequest,
 } from '@piano/assistant-protocol/internal-auth';
+import {
+  InMemoryInternalRequestReplayStore,
+  PostgresInternalRequestReplayStore,
+  type InternalRequestReplayStore,
+} from './replay-protector.js';
 
 type InternalRequest = {
   body?: unknown;
@@ -25,9 +29,12 @@ function headerValue(request: InternalRequest, name: string): string | undefined
 
 @Injectable()
 export class InternalRequestGuard implements CanActivate {
-  readonly #replayProtector = new InternalRequestReplayProtector();
+  constructor(
+    @Inject(PostgresInternalRequestReplayStore)
+    private readonly replayStore: InternalRequestReplayStore = new InMemoryInternalRequestReplayStore(),
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<InternalRequest>();
     const timestamp = headerValue(request, INTERNAL_REQUEST_TIMESTAMP_HEADER);
     const nonce = headerValue(request, INTERNAL_REQUEST_NONCE_HEADER);
@@ -53,7 +60,7 @@ export class InternalRequestGuard implements CanActivate {
           'last-event-id': headerValue(request, 'last-event-id'),
         },
       }) ||
-      !this.#replayProtector.consume(nonce)
+      !(await this.replayStore.consume(nonce))
     ) {
       throw new UnauthorizedException('服务鉴权失败');
     }

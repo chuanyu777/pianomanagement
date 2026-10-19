@@ -9,10 +9,7 @@ import {
   INTERNAL_REQUEST_SIGNATURE_HEADER,
   INTERNAL_REQUEST_TIMESTAMP_HEADER,
 } from '@piano/assistant-protocol';
-import {
-  InternalRequestReplayProtector,
-  verifySignedInternalRequest,
-} from '@piano/assistant-protocol/internal-auth';
+import { verifySignedInternalRequest } from '@piano/assistant-protocol/internal-auth';
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { AgentConfig } from './config/agent-config.js';
@@ -24,6 +21,10 @@ import type {
   PersistedAssistantEvent,
 } from './persistence/repository.js';
 import type { RunWorker } from './worker/run-worker.js';
+import {
+  InMemoryInternalRequestReplayStore,
+  type InternalRequestReplayStore,
+} from './persistence/replay-protector.js';
 
 function headerValue(
   request: { headers: Record<string, string | string[] | undefined> },
@@ -93,16 +94,18 @@ export function buildServer(input: {
   repository: AgentRuntimeRepository;
   eventHub?: RunEventHub;
   worker?: Pick<RunWorker, 'start' | 'stop'>;
+  replayStore?: InternalRequestReplayStore;
 }): FastifyInstance {
   const app = Fastify({ logger: true });
   const model = createChatModel(input.config);
-  const replayProtector = new InternalRequestReplayProtector();
+  const replayStore = input.replayStore ?? new InMemoryInternalRequestReplayStore();
   const eventHub = input.eventHub ?? new RunEventHub();
   if (input.worker) {
     app.addHook('onReady', async () => input.worker!.start());
     app.addHook('onClose', async () => input.worker!.stop());
   }
   app.addHook('onClose', async () => eventHub.closeAll());
+  app.addHook('onClose', async () => replayStore.close());
 
   const appendEvent = async (
     runId: string,
@@ -146,7 +149,7 @@ export function buildServer(input: {
           'last-event-id': headerValue(request, 'last-event-id'),
         },
       }) ||
-      !replayProtector.consume(nonce) ||
+      !(await replayStore.consume(nonce)) ||
       !capability
     ) {
       return reply.code(401).send({ message: '服务鉴权失败' });

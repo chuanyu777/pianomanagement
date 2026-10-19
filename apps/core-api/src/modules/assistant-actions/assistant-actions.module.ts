@@ -9,9 +9,10 @@ import { RefundsModule } from '../refunds/refunds.module.js';
 import { ManualTransactionsModule } from '../manual-transactions/manual-transactions.module.js';
 import { PayrollModule } from '../payroll/payroll.module.js';
 import { PeriodsModule } from '../periods/periods.module.js';
+import { InternalRequestModule } from '../../common/internal-auth/internal-request.module.js';
 
 @Module({
-  imports: [PrismaModule, LessonsModule, CourseLedgerModule, RefundsModule, ManualTransactionsModule, PayrollModule, PeriodsModule],
+  imports: [PrismaModule, InternalRequestModule, LessonsModule, CourseLedgerModule, RefundsModule, ManualTransactionsModule, PayrollModule, PeriodsModule],
   controllers: [AssistantActionsController, AssistantPreviewConfirmController],
   providers: [AssistantActionsService],
   exports: [AssistantActionsService],

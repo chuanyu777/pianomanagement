@@ -8,12 +8,14 @@ import { createBusinessRunExecutor } from './worker/run-executor.js';
 import { RunWorker } from './worker/run-worker.js';
 import { CoreToolClient } from './tools/core-tool-client.js';
 import { createChatModel } from './llm/model-factory.js';
+import { PostgresInternalRequestReplayStore } from './persistence/replay-protector.js';
 
 const config = parseAgentConfig(process.env);
 const checkpointer = createCheckpointer(config.AGENT_DATABASE_URL);
 const repository = createAgentRuntimeRepository({ connectionString: config.AGENT_DATABASE_URL });
 const eventHub = new RunEventHub();
-const app = buildServer({ config, checkpointer, repository, eventHub });
+const replayStore = new PostgresInternalRequestReplayStore(config.AGENT_DATABASE_URL);
+const app = buildServer({ config, checkpointer, repository, eventHub, replayStore });
 const coreTools = new CoreToolClient(
   config.CORE_INTERNAL_API_URL,
   config.AI_REQUEST_TIMEOUT_MS,

@@ -19,7 +19,7 @@ describe('InternalRequestGuard', () => {
     else process.env['INTERNAL_SERVICE_SECRET'] = originalSecret;
   });
 
-  it('accepts one fresh signed request and rejects nonce replay', () => {
+  it('accepts one fresh signed request and rejects nonce replay', async () => {
     process.env['INTERNAL_SERVICE_SECRET'] = secret;
     const method = 'POST';
     const originalUrl = '/api/internal/assistant-actions/preview';
@@ -35,11 +35,11 @@ describe('InternalRequestGuard', () => {
     const request = { method, originalUrl, body, headers };
     const guard = new InternalRequestGuard();
 
-    expect(guard.canActivate(contextFor(request))).toBe(true);
-    expect(() => guard.canActivate(contextFor(request))).toThrow('服务鉴权失败');
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    await expect(guard.canActivate(contextFor(request))).rejects.toThrow('服务鉴权失败');
   });
 
-  it('rejects a signature when the body was changed', () => {
+  it('rejects a signature when the body was changed', async () => {
     process.env['INTERNAL_SERVICE_SECRET'] = secret;
     const method = 'POST';
     const originalUrl = '/api/internal/assistant-actions/preview';
@@ -53,7 +53,7 @@ describe('InternalRequestGuard', () => {
     headers['authorization'] = 'Bearer capability-a';
     const guard = new InternalRequestGuard();
 
-    expect(() =>
+    await expect(
       guard.canActivate(
         contextFor({
           method,
@@ -62,10 +62,10 @@ describe('InternalRequestGuard', () => {
           body: { idempotencyKey: 'tampered' },
         }),
       ),
-    ).toThrow('服务鉴权失败');
+    ).rejects.toThrow('服务鉴权失败');
   });
 
-  it('rejects a valid HMAC when the bearer Capability changes', () => {
+  it('rejects a valid HMAC when the bearer Capability changes', async () => {
     process.env['INTERNAL_SERVICE_SECRET'] = secret;
     const method = 'GET';
     const originalUrl = '/api/internal/tools/system-status';
@@ -78,8 +78,8 @@ describe('InternalRequestGuard', () => {
     headers['authorization'] = 'Bearer capability-b';
     const guard = new InternalRequestGuard();
 
-    expect(() =>
+    await expect(
       guard.canActivate(contextFor({ method, originalUrl, headers })),
-    ).toThrow('服务鉴权失败');
+    ).rejects.toThrow('服务鉴权失败');
   });
 });

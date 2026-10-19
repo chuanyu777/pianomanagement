@@ -3,6 +3,7 @@ import { z } from 'zod';
 const CoreConfigSchema = z.object({
   CORE_DATABASE_URL: z.string().min(1),
   CORE_PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
+  AGENT_DATABASE_URL: z.string().min(1),
   AGENT_RUNTIME_URL: z.url(),
   CAPABILITY_SIGNING_PRIVATE_KEY_B64: z.string().min(1),
   INTERNAL_SERVICE_SECRET: z.string().min(32),

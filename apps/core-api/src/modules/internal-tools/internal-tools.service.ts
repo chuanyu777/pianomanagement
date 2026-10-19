@@ -1,6 +1,7 @@
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
-import { LessonStatus, PayrollStatus, UserRole } from '../../generated/prisma/client.js';
+import { BadRequestException, ForbiddenException, Injectable, Optional } from '@nestjs/common';
+import { LessonStatus, PayrollStatus, Prisma, UserRole } from '../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { ReportsService } from '../reports/reports.service.js';
 
 type OwnerDashboardSummary = {
   role: 'OWNER';
@@ -105,7 +106,7 @@ function countFrozenStudents(
 
 @Injectable()
 export class InternalToolsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, @Optional() private readonly reports?: ReportsService) {}
 
   async teacherCandidates(
     subjectId: string,
@@ -294,7 +295,7 @@ export class InternalToolsService {
     }
 
     if (user.role !== UserRole.OWNER) throw new ForbiddenException('Capability 用户角色不可用');
-    const [lessonGroups, students, accounts, unpaidPayrollCount] = await Promise.all([
+    const [lessonGroups, students, accounts, unpaidPayrollCount, monthlyReport] = await Promise.all([
       this.prisma.lesson.groupBy({
         by: ['status'],
         where: { startsAt: { gte: dayStart, lt: dayEnd } },
@@ -317,6 +318,7 @@ export class InternalToolsService {
       this.prisma.payroll.count({
         where: { status: PayrollStatus.UNPAID, periodStart: monthStart(year, month) },
       }),
+      this.reports?.monthly(new Date(Date.UTC(year, month - 1, 1))),
     ]);
 
     const counts = new Map(lessonGroups.map((group) => [group.status, group._count._all]));
@@ -333,6 +335,9 @@ export class InternalToolsService {
     const completed = counts.get(LessonStatus.COMPLETED) ?? 0;
     const cancelled = counts.get(LessonStatus.CANCELLED) ?? 0;
     const period = `${year}-${String(month).padStart(2, '0')}`;
+    const monthlyOperatingIncome = monthlyReport
+      ? new Prisma.Decimal(monthlyReport.lessonIncome).add(monthlyReport.refundFeeIncome).add(monthlyReport.manualIncome).toFixed(2)
+      : undefined;
     const frozenStudentCount = countFrozenStudents(students, now);
     const studentsWithNegativeBalanceCount = studentsWithNegativeBalance.size;
     return {
@@ -348,6 +353,7 @@ export class InternalToolsService {
         `冻结学生 ${frozenStudentCount} 人`,
         `课程账户负余额学生 ${studentsWithNegativeBalanceCount} 人`,
         `${period} 待发工资 ${unpaidPayrollCount} 笔`,
+        ...(monthlyOperatingIncome ? [`${period} 经营收入 ${monthlyOperatingIncome} 元`] : []),
       ],
     };
   }

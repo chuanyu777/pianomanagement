@@ -151,6 +151,7 @@ function parseLessonIntent(message: string): { lessonIntent?: LessonIntent; batc
   const batchMatch = BATCH_LESSON_INTENT_PATTERN.exec(message.trim());
   const match = batchMatch ?? LESSON_INTENT_PATTERN.exec(message.trim());
   if (!match?.groups) {
+    if (/^(?:帮我)?\s*(?:查看|查询|看看|列出|显示|统计)/u.test(message.trim())) return {};
     return /安排|排课/u.test(message)
       ? { clarification: '请按“给学生名的课程名安排老师名于YYYY-MM-DD HH:mm”说明；例如：给小明的主课安排王老师于2026-10-20 15:00。' }
       : {};
@@ -176,6 +177,7 @@ function parseLessonIntent(message: string): { lessonIntent?: LessonIntent; batc
 }
 
 function parseBusinessIntent(message: string): { moneyIntent?: MoneyIntent; lessonIntent?: LessonIntent; batchLessonIntent?: BatchLessonIntent; refundIntent?: RefundIntent; actionIntent?: StructuredActionIntent; clarification?: string } {
+  if (/^(?:帮我)?\s*(?:查看|查询|看看|列出|显示|统计)/u.test(message.trim())) return {};
   const refund = parseRefundIntent(message);
   if (refund.refundIntent || refund.clarification) return refund;
   const money = parseMoneyIntent(message);

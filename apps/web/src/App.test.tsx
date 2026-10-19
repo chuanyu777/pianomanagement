@@ -52,7 +52,7 @@ describe('AI workspace', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ username: 'owner', password: 'correct-password' });
     const studentsCall = fetchMock.mock.calls.find(([path]) => path === '/api/students');
     expect(new Headers(studentsCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
-    expect(screen.getByRole('link', { name: /完整业务接口/ })).toHaveAttribute('href', '/api/docs');
+    expect(screen.getByText('学生档案与课程账户')).toBeInTheDocument();
   });
 
   it('loads real schedule records with their related student and course', async () => {

@@ -35,6 +35,10 @@ function hasString(value: Record<string, unknown>, key: string): boolean {
   return typeof value[key] === 'string';
 }
 
+function formatAssistantReply(value: string): string {
+  return value.replace(/\*\*(.*?)\*\*/g, '$1').replace(/__(.*?)__/g, '$1').trim();
+}
+
 function isAssistantState(value: unknown): value is AssistantState {
   if (!isRecord(value) || !isRecord(value.core) || !isRecord(value.agentRuntime)) return false;
   return typeof value.available === 'boolean' && typeof value.core.available === 'boolean' &&
@@ -169,7 +173,6 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
   const location = useLocation();
   const navigate = useNavigate();
   const assistantState = useAssistantState();
-  const isAssistantAvailable = assistantState.data?.available === true;
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -177,17 +180,13 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
           <span className="brand-mark">P</span><span><strong>琴行经营</strong><small>AI 工作台</small></span>
         </Link>
         <div className="topbar-actions">
-          <Tag className="security-tag">安全预览模式</Tag>
-          <span aria-label={isAssistantAvailable ? 'AI 已连接' : 'AI 尚未接通'} className="connection-status">
-            <span className="status-dot" /> {isAssistantAvailable ? 'AI 已连接' : 'AI 尚未接通'}
-          </span>
           {user && <span className="signed-in-user">{user.username}</span>}
           <Button aria-label="退出登录" onClick={onLogout} size="small">退出</Button>
         </div>
       </header>
       <div className="workspace-grid">
         <aside aria-label="主导航" className="sidebar panel-surface">
-          <div className="sidebar-heading"><span className="eyebrow">NAVIGATION</span><span className="sidebar-caption">经营入口</span></div>
+          <div className="sidebar-heading"><span className="eyebrow">OPERATING DESK</span><span className="sidebar-caption">经营菜单</span></div>
           <nav className="nav-list">
             {navItems.map((item) => {
               const active = location.pathname === item.path;
@@ -197,7 +196,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
               </button>;
             })}
           </nav>
-          <div className="sidebar-footer"><span className="eyebrow">SYSTEM</span><span>Core API {assistantState.data?.core.available ? '已连接' : '未连接'}</span><span className="muted">已登录 · 真实业务数据</span></div>
+          <div className="sidebar-footer"><span className="eyebrow">TODAY</span><span>先处理最重要的事</span><span className="muted">所有关键操作都会先让你核对</span></div>
         </aside>
         <main className="main-column"><Outlet context={{ assistantState, onLogout, setWorkspace }} /></main>
         <aside aria-label="经营工作区" className="context-panel panel-surface"><ContextPanel onClear={() => setWorkspace(null)} workspace={workspace} /></aside>
@@ -298,10 +297,7 @@ function WorkspaceHome() {
       <div className="home-intro"><div><span className="eyebrow accent-eyebrow">AI-FIRST OPERATING DESK</span><Title id="welcome-heading" level={1}>把经营问题交给工作台。</Title>
         <p className="intro-copy">用自然语言描述目标，AI 会先读取必要信息、解释判断依据，再生成一份可确认的操作预览。</p></div>
         <div className="date-chip"><span className="date-label">业务日</span><strong>尚未设置</strong></div></div>
-      <Alert className="availability-alert" description={isUnavailable
-        ? '状态检查显示 AI 服务暂不可用。你仍可以提交问题，工作台会报告实际连接结果；结构化入口可继续查看真实业务数据。'
-        : assistantState.data?.message ?? 'AI 已准备好接收任务。'}
-        title={isUnavailable ? 'AI 助手暂不可用' : 'AI 助手已连接'} showIcon type={isUnavailable ? 'warning' : 'success'} />
+      {isUnavailable && <Alert className="availability-alert" description="助手暂时无法回答问题，你仍可以使用学生、排课和收支页面。" title="助手暂时不可用" showIcon type="warning" />}
       <Card className="prompt-card" variant="borderless">
         <div className="card-heading"><div><span className="eyebrow">START WITH A QUESTION</span><Title level={3}>你想先处理什么？</Title></div><Tag className="preview-tag">所有动作先预览</Tag></div>
         <form onSubmit={submit}>
@@ -311,13 +307,13 @@ function WorkspaceHome() {
         <div className="suggestion-row" aria-label="示例入口"><span className="suggestion-label">可以从这里开始</span>{suggestions.map((suggestion) => <button className="suggestion-button" disabled={isBusy} key={suggestion} onClick={() => setPrompt(suggestion)} type="button">{suggestion}</button>)}</div>
         {runStatus !== 'idle' && <section aria-label="AI 运行结果" className={`assistant-run assistant-run-${runStatus}`}>
           <div className="assistant-run-heading"><strong>运行状态</strong><Tag>{statusLabel[runStatus]}</Tag>{runId && <Text className="run-id">Run {runId}</Text>}</div>
-          {reply && <div aria-live="polite" className="assistant-reply"><strong>AI 助手</strong><p>{reply}</p></div>}
+          {reply && <div aria-live="polite" className="assistant-reply"><strong>AI 助手</strong><p>{formatAssistantReply(reply)}</p></div>}
           {clarification && <Alert className="run-alert" message="需要补充信息" description={clarification} showIcon type="info" />}
           {runError && <Alert className="run-alert" message={runError} showIcon type="error" action={runError.includes('登录状态已失效') ? <Button onClick={onLogout} size="small">返回登录</Button> : undefined} />}
         </section>}
       </Card>
-      <section aria-labelledby="workflow-heading" className="workflow-section"><div className="section-heading"><div><span className="eyebrow">SAFE WORKFLOW</span><Title id="workflow-heading" level={3}>每一次操作都经过确认</Title></div><Text className="section-note">当前为产品骨架</Text></div>
-        <div className="workflow-steps"><WorkflowStep number="01" title="描述" detail="用自然语言说明目标" /><span className="step-arrow" aria-hidden="true">→</span><WorkflowStep number="02" title="预览" detail="查看数据与计算依据" /><span className="step-arrow" aria-hidden="true">→</span><WorkflowStep number="03" title="确认" detail="由 Core API 执行写入" /></div>
+      <section aria-labelledby="workflow-heading" className="workflow-section"><div className="section-heading"><div><span className="eyebrow">SAFE WORKFLOW</span><Title id="workflow-heading" level={3}>每一次操作都经过确认</Title></div><Text className="section-note">AI 先理解，再由你决定</Text></div>
+        <div className="workflow-steps"><WorkflowStep number="01" title="描述" detail="用自然语言说明目标" /><span className="step-arrow" aria-hidden="true">→</span><WorkflowStep number="02" title="预览" detail="查看数据与计算依据" /><span className="step-arrow" aria-hidden="true">→</span><WorkflowStep number="03" title="确认" detail="你确认后才执行写入" /></div>
       </section>
     </section>
   );
@@ -347,8 +343,8 @@ function ContextPanel({ onClear, workspace }: { onClear: () => void; workspace: 
       })}
       {workspace.blocks.length === 0 && <p className="workspace-empty">当前结果没有可展示的工作区内容。</p>}
     </div> : <div className="empty-context"><span className="empty-orbit" aria-hidden="true">＋</span><strong>还没有工作区内容</strong><span>向助手提问后，真实返回的摘要、提醒和指标会显示在这里。</span></div>}
-    <div className="boundary-card"><div className="boundary-title"><span className="boundary-icon">◌</span> AI 的安全边界</div><ul><li>只能查询和申请 Preview</li><li>不能直接确认资金或课消</li><li>写入由浏览器直接调用 Core</li></ul></div>
-    <div className="context-meta"><span>数据连接</span><strong>Core API</strong></div><div className="context-meta"><span>会话状态</span><strong>尚未开始</strong></div>
+    <div className="boundary-card"><div className="boundary-title"><span className="boundary-icon">◌</span> 工作方式</div><p className="boundary-copy">助手先读取业务信息并生成核对内容，只有你确认后才会执行变更。</p></div>
+    <div className="context-meta"><span>数据状态</span><strong>实时读取</strong></div><div className="context-meta"><span>操作方式</span><strong>先核对，后执行</strong></div>
   </div>;
 }
 

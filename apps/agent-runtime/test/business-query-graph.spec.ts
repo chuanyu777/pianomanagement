@@ -377,6 +377,42 @@ describe('read-only business query graph', () => {
     expect(JSON.stringify(result)).not.toContain('request-capability');
   });
 
+  it('treats 查看今日排课 as a read-only dashboard query instead of an incomplete lesson command', async () => {
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(summary);
+    const graph = createBusinessQueryGraph({
+      checkpointer: new MemorySaver(),
+      capability: 'request-capability',
+      fetchDashboardSummary,
+    });
+
+    const result = await graph.invoke(
+      {
+        runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa',
+        threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75',
+        userMessage: '查看今日排课',
+      },
+      { configurable: { thread_id: 'read-only-schedule-query' } },
+    );
+
+    expect(fetchDashboardSummary).toHaveBeenCalledWith('request-capability');
+    expect(result.clarification).toBeUndefined();
+    expect(result.workspace?.title).toBe('经营摘要 · 2026-10-17');
+  });
+
+  it.each(['查看这个月收入', '查询学生账户', '列出本周排课'])('treats %s as a read-only query', async (userMessage) => {
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(summary);
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary });
+
+    const result = await graph.invoke(
+      { runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage },
+      { configurable: { thread_id: `read-only-${userMessage}` } },
+    );
+
+    expect(fetchDashboardSummary).toHaveBeenCalledWith('request-capability');
+    expect(result.clarification).toBeUndefined();
+    expect(result.workspace?.title).toBe('经营摘要 · 2026-10-17');
+  });
+
   it('asks the model to summarize only the fetched read-only summary', async () => {
     const model = { invoke: vi.fn().mockResolvedValue(new AIMessage('今天安排了 4 节课。')) };
     const graph = createBusinessQueryGraph({

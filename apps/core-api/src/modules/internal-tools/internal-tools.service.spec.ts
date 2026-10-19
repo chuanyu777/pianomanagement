@@ -80,6 +80,22 @@ describe('InternalToolsService.dashboardSummary', () => {
     expect(prisma.payroll.count).not.toHaveBeenCalled();
   });
 
+  it('includes monthly operating income when the reports service is available', async () => {
+    const prisma = mockPrisma();
+    const reports = { monthly: vi.fn().mockResolvedValue({ lessonIncome: '1200.00', refundFeeIncome: '30.00', manualIncome: '70.00' }) };
+    const service = new InternalToolsService(prisma as never, reports as never);
+    prisma.user.findUnique.mockResolvedValue({ id: 'owner-1', role: UserRole.OWNER, teacher: null, isActive: true });
+    prisma.lesson.groupBy.mockResolvedValue([]);
+    prisma.student.findMany.mockResolvedValue([]);
+    prisma.studentCourseAccount.findMany.mockResolvedValue([]);
+    prisma.payroll.count.mockResolvedValue(0);
+
+    const summary = await service.dashboardSummary('owner-1', new Date('2026-10-17T04:00:00.000Z'));
+
+    expect(reports.monthly).toHaveBeenCalledWith(new Date('2026-10-01T00:00:00.000Z'));
+    expect(summary.highlights).toContain('2026-10 经营收入 1300.00 元');
+  });
+
   it('rejects unknown, inactive and unlinked capability subjects', async () => {
     const prisma = mockPrisma();
     const service = new InternalToolsService(prisma as never);

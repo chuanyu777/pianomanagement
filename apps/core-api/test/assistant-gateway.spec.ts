@@ -49,6 +49,8 @@ describe('AssistantGatewayService', () => {
         Buffer.from(input.capability.split('.')[1]!, 'base64url').toString('utf8'),
       ) as { sub: string; threadId: string; runId: string; jti: string; permissions: string[]; iat: number; exp: number };
       expect(payload.sub).toBe(userId);
+      expect(payload.role).toBe('TEACHER');
+      expect(payload.teacherId).toBe('71726279-43f1-4fe6-9aa1-b12988812b5d');
       expect(payload.runId).toBe(input.runId);
       expect(payload.threadId).toBe(threadId);
       expect(payload.jti).toMatch(/^[0-9a-f-]{36}$/);
@@ -67,6 +69,8 @@ describe('AssistantGatewayService', () => {
 
     const result = await service.startRun({
       userId,
+      role: 'TEACHER',
+      teacherId: '71726279-43f1-4fe6-9aa1-b12988812b5d',
       threadId,
       message: '查看今天的排课',
       clientRequestId: 'client-request-1',
@@ -88,6 +92,8 @@ describe('AssistantGatewayService', () => {
         Buffer.from(input.capability.split('.')[1]!, 'base64url').toString('utf8'),
       ) as { sub: string; threadId: string; runId: string; permissions: string[]; iat: number; exp: number };
       expect(payload.sub).toBe(userId);
+      expect(payload.role).toBe('OWNER');
+      expect(payload.teacherId).toBeUndefined();
       expect(payload.runId).toBe(runId);
       expect(payload.threadId).toBe(threadId);
       expect(payload.permissions).toEqual(['READ', 'PREVIEW_L1', 'PREVIEW_L2']);
@@ -102,7 +108,7 @@ describe('AssistantGatewayService', () => {
     });
 
     await expect(
-      service.resumeRun({ userId, threadId, runId, input: { approved: true } }),
+      service.resumeRun({ userId, role: 'OWNER', threadId, runId, input: { approved: true } }),
     ).resolves.toMatchObject({ runId, threadId });
     expect(resume).toHaveBeenCalledWith(
       expect.objectContaining({ threadId, runId, input: { approved: true } }),
@@ -129,7 +135,7 @@ describe('AssistantGatewayService', () => {
       openEvents,
     });
 
-    const proxy = await service.openRunEvents({ userId, threadId, runId, lastEventId: '40' });
+    const proxy = await service.openRunEvents({ userId, role: 'OWNER', threadId, runId, lastEventId: '40' });
     const text = await new Response(proxy.body).text();
 
     expect(proxy.contentType).toBe('text/event-stream');
@@ -161,7 +167,7 @@ describe('AssistantGatewayService', () => {
     }));
     const service = createService({ start: vi.fn(), resume: vi.fn(), openEvents });
 
-    const proxy = await service.openRunEvents({ userId, threadId, runId });
+    const proxy = await service.openRunEvents({ userId, role: 'OWNER', threadId, runId });
     await new Promise((resolve) => setImmediate(resolve));
     expect(upstreamPulls).toBe(0);
 
@@ -183,10 +189,10 @@ describe('AssistantGatewayService', () => {
     });
 
     await expect(
-      service.startRun({ userId, message: '查询余额' }),
+      service.startRun({ userId, role: 'OWNER', message: '查询余额' }),
     ).rejects.toThrow('AI 助手服务暂时不可用，请稍后重试');
     await expect(
-      service.startRun({ userId, message: '查询余额' }),
+      service.startRun({ userId, role: 'OWNER', message: '查询余额' }),
     ).rejects.not.toThrow(upstreamSecret);
   });
 });

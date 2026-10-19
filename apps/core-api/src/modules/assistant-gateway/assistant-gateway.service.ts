@@ -12,6 +12,7 @@ import {
   type AssistantResumeInput,
 } from '@piano/assistant-protocol';
 import { CapabilityTokenService } from '../../common/capability/capability-token.service.js';
+import type { UserRole } from '../../generated/prisma/client.js';
 import {
   AGENT_RUNTIME_CLIENT,
   type AgentRuntimeClient,
@@ -29,6 +30,8 @@ const SAFE_STREAM_ERROR = {
 
 export type StartAssistantRunInput = {
   userId: string;
+  role: UserRole;
+  teacherId?: string;
   threadId?: string;
   message: string;
   clientRequestId?: string;
@@ -37,6 +40,8 @@ export type StartAssistantRunInput = {
 
 export type ResumeAssistantRunInput = {
   userId: string;
+  role: UserRole;
+  teacherId?: string;
   threadId: string;
   runId: string;
   input: AssistantResumeInput;
@@ -45,6 +50,8 @@ export type ResumeAssistantRunInput = {
 
 export type OpenAssistantEventsInput = {
   userId: string;
+  role: UserRole;
+  teacherId?: string;
   threadId: string;
   runId: string;
   lastEventId?: string;
@@ -67,7 +74,7 @@ export class AssistantGatewayService {
   async startRun(input: StartAssistantRunInput): Promise<AgentRuntimeRun> {
     const runId = randomUUID();
     const threadId = input.threadId ?? randomUUID();
-    const capability = this.issueCapability(input.userId, threadId, runId);
+    const capability = this.issueCapability(input.userId, input.role, input.teacherId, threadId, runId);
     try {
       const result = await this.agentRuntime.start({
         runId,
@@ -84,7 +91,7 @@ export class AssistantGatewayService {
   }
 
   async resumeRun(input: ResumeAssistantRunInput): Promise<AgentRuntimeRun> {
-    const capability = this.issueCapability(input.userId, input.threadId, input.runId);
+    const capability = this.issueCapability(input.userId, input.role, input.teacherId, input.threadId, input.runId);
     try {
       const result = await this.agentRuntime.resume({
         runId: input.runId,
@@ -100,7 +107,7 @@ export class AssistantGatewayService {
   }
 
   async openRunEvents(input: OpenAssistantEventsInput): Promise<AssistantSseProxy> {
-    const capability = this.issueCapability(input.userId, input.threadId, input.runId);
+    const capability = this.issueCapability(input.userId, input.role, input.teacherId, input.threadId, input.runId);
     let upstream: AgentRuntimeEventStream;
     try {
       upstream = await this.agentRuntime.openEvents({
@@ -120,9 +127,11 @@ export class AssistantGatewayService {
     };
   }
 
-  private issueCapability(userId: string, threadId: string, runId: string): string {
+  private issueCapability(userId: string, role: UserRole, teacherId: string | undefined, threadId: string, runId: string): string {
     return this.capabilities.issue({
       userId,
+      role,
+      ...(teacherId ? { teacherId } : {}),
       threadId,
       runId,
       ttlSeconds: CAPABILITY_TTL_SECONDS,

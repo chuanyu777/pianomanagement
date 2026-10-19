@@ -340,6 +340,30 @@ describe('agent runtime Fastify server', () => {
     await app.close();
   });
 
+  it('persists the opaque Core capability on the Run and reuses it for Core tools', async () => {
+    const persistedCapability = 'core-capability-with-role-and-teacher-scope';
+    const fetchDashboardSummary = vi.fn().mockResolvedValue(dashboardResponse);
+    vi.stubGlobal('fetch', fetchDashboardSummary);
+    const repository = createTestRepository();
+    const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
+    const body = { runId, threadId, userMessage: '按当前身份查询经营摘要' };
+    const securityHeaders = { 'x-assistant-capability': persistedCapability };
+
+    const start = await app.inject({
+      method: 'POST',
+      url: '/internal/assistant/runs/start',
+      headers: signedHeaders('POST', '/internal/assistant/runs/start', body, securityHeaders),
+      payload: body,
+    });
+
+    expect(start.statusCode).toBe(200);
+    expect((await repository.findRun(runId))?.capability).toBe(persistedCapability);
+    await vi.waitFor(async () => expect((await repository.findRun(runId))?.status).toBe('completed'));
+    const [, coreInit] = fetchDashboardSummary.mock.calls[0]!;
+    expect((coreInit.headers as Record<string, string>).authorization).toBe(`Bearer ${persistedCapability}`);
+    await app.close();
+  });
+
   it('keeps an SSE connection open after history replay and pushes events created later', async () => {
     let resolveDashboard: ((value: typeof dashboardResponse) => void) | undefined;
     let signalFetchStarted: (() => void) | undefined;

@@ -14,6 +14,7 @@ describe('CapabilityTokenService', () => {
     const now = new Date('2026-10-15T00:00:00.000Z');
     const token = service.issue({
       userId: 'owner-1',
+      role: 'OWNER',
       threadId: 'c33c4244-2c78-4b25-b6d3-b62daf712dc5',
       runId: '49463786-f98c-4aa7-a2d0-b686f7066e6f',
       permissions: ['READ'],
@@ -21,6 +22,8 @@ describe('CapabilityTokenService', () => {
     });
     const payload = service.verify(token, new Date('2026-10-15T00:04:59.000Z'));
     expect(payload.permissions).toEqual(['READ']);
+    expect(payload.role).toBe('OWNER');
+    expect(payload.teacherId).toBeUndefined();
     expect(payload.jti).toMatch(/^[0-9a-f-]{36}$/);
     expect(payload.exp - payload.iat).toBe(300);
   });
@@ -30,6 +33,7 @@ describe('CapabilityTokenService', () => {
     const now = new Date('2026-10-15T00:00:00.000Z');
     const token = service.issue({
       userId: 'owner-1',
+      role: 'OWNER',
       threadId: 'c33c4244-2c78-4b25-b6d3-b62daf712dc5',
       runId: '49463786-f98c-4aa7-a2d0-b686f7066e6f',
       permissions: ['PREVIEW_L1'],
@@ -42,5 +46,23 @@ describe('CapabilityTokenService', () => {
     const signature = tokenParts[2]!;
     tokenParts[2] = `${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`;
     expect(() => service.verify(tokenParts.join('.'), now)).toThrow(UnauthorizedException);
+  });
+
+  it('carries the Core UserRole string and an optional linked teacher id', () => {
+    const service = createService();
+    const token = service.issue({
+      userId: 'teacher-user',
+      role: 'TEACHER',
+      teacherId: '71726279-43f1-4fe6-9aa1-b12988812b5d',
+      threadId: 'c33c4244-2c78-4b25-b6d3-b62daf712dc5',
+      runId: '49463786-f98c-4aa7-a2d0-b686f7066e6f',
+      permissions: ['READ'],
+    });
+
+    expect(service.verify(token)).toMatchObject({
+      sub: 'teacher-user',
+      role: 'TEACHER',
+      teacherId: '71726279-43f1-4fe6-9aa1-b12988812b5d',
+    });
   });
 });

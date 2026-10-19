@@ -8,11 +8,16 @@ import {
 } from 'node:crypto';
 import { Injectable, Optional, UnauthorizedException } from '@nestjs/common';
 import { z } from 'zod';
+import { UserRole, type UserRole as UserRoleValue } from '../../generated/prisma/client.js';
+
+const CapabilityRoleSchema = z.enum([UserRole.OWNER, UserRole.TEACHER]);
 
 const CapabilityPayloadSchema = z.object({
   iss: z.literal('piano-core'),
   aud: z.literal('piano-core-internal'),
   sub: z.string().min(1),
+  role: CapabilityRoleSchema,
+  teacherId: z.string().uuid().optional(),
   threadId: z.string().uuid(),
   runId: z.string().uuid(),
   jti: z.string().uuid(),
@@ -54,6 +59,8 @@ export class CapabilityTokenService {
 
   issue(input: {
     userId: string;
+    role: UserRoleValue;
+    teacherId?: string;
     threadId: string;
     runId: string;
     permissions: CapabilityPayload['permissions'];
@@ -65,6 +72,8 @@ export class CapabilityTokenService {
       iss: 'piano-core',
       aud: 'piano-core-internal',
       sub: input.userId,
+      role: input.role,
+      ...(input.teacherId ? { teacherId: input.teacherId } : {}),
       threadId: input.threadId,
       runId: input.runId,
       jti: randomUUID(),

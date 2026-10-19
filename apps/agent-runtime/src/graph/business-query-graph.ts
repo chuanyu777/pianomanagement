@@ -24,10 +24,11 @@ type MoneyPreview = PaymentPreviewResponse | GiftPreviewResponse;
 type LessonIntent = { studentName: string; courseName: string; teacherName: string; startsAt: string };
 type BatchLessonIntent = LessonIntent & { weeks: number };
 type RefundIntent = { studentName: string; feeAmount: string; channel: PaymentChannel; note?: string };
-type StructuredActionKind = 'lesson.reschedule' | 'lesson.cancel' | 'lesson.complete' | 'lesson.complete.reversal' | 'manual-transaction.create' | 'payroll.generate' | 'payroll.pay' | 'period.close' | 'period.reopen';
+type StructuredActionKind = 'lesson.reschedule' | 'lesson.cancel' | 'lesson.complete' | 'lesson.complete.reversal' | 'manual-transaction.create' | 'payroll.generate' | 'payroll.pay' | 'payroll.adjust' | 'period.close' | 'period.reopen';
 type StructuredActionIntent = {
   kind: StructuredActionKind; studentName?: string; teacherName?: string; date?: string; targetStartsAt?: string;
   amount?: string; channel?: PaymentChannel; category?: string; transactionKind?: 'INCOME' | 'EXPENSE'; period?: string; reason?: string;
+  bonusAmount?: string; bonusNote?: string; deductionAmount?: string; deductionNote?: string;
 };
 
 const QueryState = Annotation.Root({
@@ -114,12 +115,23 @@ function parseStructuredActionIntent(message: string): { actionIntent?: Structur
     const category = manual.groups['category']?.trim();
     return { actionIntent: { kind: 'manual-transaction.create', amount, channel: CHANNELS[manual.groups['channel']!]!, transactionKind: manual.groups['kind'] === '收入' ? 'INCOME' : 'EXPENSE', ...(category ? { category } : {}) } };
   }
-  const payroll = /^(?:生成|核算)\s*(?<teacher>[^\s，,]+)\s*(?<period>\d{4}-\d{2})\s*(?:工资|薪资|课时费)/u.exec(text);
+  const payroll = /^(?:生成|核算)\s*(?<teacher>[^\s，,]+)\s*(?<period>\d{4}-\d{2})\s*(?:工资|薪资|课时费)\s*$/u.exec(text);
   if (payroll?.groups) return { actionIntent: { kind: 'payroll.generate', teacherName: payroll.groups['teacher']!.replace(/老师$/u, ''), period: payroll.groups['period']! } };
-  const payrollPay = /^(?:支付|发放|登记支付)\s*(?<teacher>[^\s，,]+)\s*(?<period>\d{4}-\d{2})\s*(?:工资|薪资|课时费)\s*(?:[，,]\s*(?<channel>现金|微信|支付宝|银行卡|其他))?/u.exec(text);
+  const payrollPay = /^(?:支付|发放|登记支付)\s*(?<teacher>[^\s，,]+)\s*(?<period>\d{4}-\d{2})\s*(?:工资|薪资|课时费)\s*(?:[，,]\s*(?<channel>现金|微信|支付宝|银行卡|其他))?\s*$/u.exec(text);
   if (payrollPay?.groups) {
     if (!payrollPay.groups['channel']) return { clarification: '登记工资支付还需要渠道：现金、微信、支付宝、银行卡或其他。' };
     return { actionIntent: { kind: 'payroll.pay', teacherName: payrollPay.groups['teacher']!.replace(/老师$/u, ''), period: payrollPay.groups['period']!, channel: CHANNELS[payrollPay.groups['channel']!]! } };
+  }
+  const payrollAdjust = /^(?:给|为)?\s*(?<teacher>[^\s，,]+)\s*(?<period>\d{4}-\d{2})\s*(?:工资|薪资)\s*(?:加|增加|调整|设置|改为)?\s*(?<kind>奖金|代扣)\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?:元|块)?(?:[，,]\s*(?:奖金说明|代扣说明|说明|备注)\s*[:：]?\s*(?<note>.+))?$/u.exec(text);
+  if (payrollAdjust?.groups) {
+    const amount = toNonNegativeMoneyString(payrollAdjust.groups['amount']!);
+    if (!amount) return { clarification: '奖金或代扣金额需要是零或正数，最多保留两位小数。' };
+    const note = payrollAdjust.groups['note']?.trim();
+    if (amount !== '0.00' && !note) return { clarification: `${payrollAdjust.groups['kind']}金额大于零时必须补充说明，例如：给王老师 2026-10 工资加奖金 300 元，奖金说明：公开课奖励。` };
+    const teacherName = payrollAdjust.groups['teacher']!.replace(/老师$/u, '');
+    return payrollAdjust.groups['kind'] === '奖金'
+      ? { actionIntent: { kind: 'payroll.adjust', teacherName, period: payrollAdjust.groups['period']!, bonusAmount: amount, ...(note ? { bonusNote: note } : {}) } }
+      : { actionIntent: { kind: 'payroll.adjust', teacherName, period: payrollAdjust.groups['period']!, deductionAmount: amount, ...(note ? { deductionNote: note } : {}) } };
   }
   const period = /^(?<operation>关账|结账|关闭账期|重开|重开账期|重新开账)\s*(?<period>\d{4}-\d{2})(?:[，,]\s*(?<reason>.+))?$/u.exec(text);
   if (period?.groups) {
@@ -358,7 +370,7 @@ export function createBusinessQueryGraph(input: {
         }
         return { teacherCandidates: candidates };
       }
-      if (intent.teacherName && intent.kind === 'payroll.pay') {
+      if (intent.teacherName && (intent.kind === 'payroll.pay' || intent.kind === 'payroll.adjust')) {
         if (!input.findPayrollCandidates) return { clarification: '当前 Core 尚未提供工资候选查询，无法安全唯一定位工资记录；不会创建预览。' };
         const candidates = await input.findPayrollCandidates(input.capability, { teacherName: intent.teacherName, period: intent.period! });
         if (candidates.candidates.length !== 1) {

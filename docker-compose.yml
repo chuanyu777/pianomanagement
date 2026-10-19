@@ -37,7 +37,6 @@ services:
       dockerfile: apps/core-api/Dockerfile
     environment:
       CORE_DATABASE_URL: postgresql://piano_core:piano_core_dev@core-db:5432/piano_core
-      AGENT_DATABASE_URL: postgresql://piano_agent:piano_agent_dev@agent-db:5432/piano_agent
       CORE_PORT: 3000
       AGENT_RUNTIME_URL: http://agent:3100
       INTERNAL_SERVICE_SECRET: piano-local-only-internal-secret-change-me
@@ -50,8 +49,6 @@ services:
       - "3000:3000"
     depends_on:
       core-db:
-        condition: service_healthy
-      agent-db:
         condition: service_healthy
     command:
       - sh

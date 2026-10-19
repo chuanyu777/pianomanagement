@@ -12,7 +12,6 @@ function ensureExportOnlyConfig(): void {
     process.env['CAPABILITY_SIGNING_PRIVATE_KEY_B64'] = Buffer.from(pem).toString('base64');
   }
   process.env['AGENT_RUNTIME_URL'] ||= 'http://127.0.0.1:3100';
-  process.env['AGENT_DATABASE_URL'] ||= 'postgresql://127.0.0.1:5434/piano_agent';
   process.env['INTERNAL_SERVICE_SECRET'] ||= 'openapi-export-only-not-a-runtime-secret';
   process.env['JWT_SIGNING_SECRET'] ||= 'openapi-export-only-jwt-secret-012345678901234567890';
   process.env['AGENT_REQUEST_TIMEOUT_MS'] ||= '15000';

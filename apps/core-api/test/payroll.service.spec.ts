@@ -50,7 +50,7 @@ describe('PayrollService', () => {
   });
 
   it('calculates gross salary with bonus and net salary after deduction using Decimal arithmetic', async () => {
-    const update = vi.fn().mockResolvedValue(record());
+    const update = vi.fn().mockResolvedValue(record({ grossSalary: new Prisma.Decimal('105.00'), netSalary: new Prisma.Decimal('113.00') }));
     const tx = {
       payroll: {
         findUnique: vi.fn().mockResolvedValue({ periodStart, courseRevenue: new Prisma.Decimal('50.00'), status: PayrollStatus.UNPAID }),
@@ -64,9 +64,9 @@ describe('PayrollService', () => {
       baseSalary: new Prisma.Decimal('100.00'), commissionRate: new Prisma.Decimal('10.0000'),
       bonusAmount: new Prisma.Decimal('10.00'), bonusNote: '  代课奖金  ',
       deductionAmount: new Prisma.Decimal('2.00'), deductionNote: '  教材代扣  ', actorId: 'owner-1',
-    })).resolves.toMatchObject({ grossSalary: '115.00', netSalary: '113.00' });
+    })).resolves.toMatchObject({ grossSalary: '105.00', netSalary: '113.00' });
     const data = update.mock.calls[0]?.[0].data;
-    expect(data.grossSalary.eq('115.00')).toBe(true);
+    expect(data.grossSalary.eq('105.00')).toBe(true);
     expect(data.netSalary.eq('113.00')).toBe(true);
     expect(data.bonusNote).toBe('代课奖金');
     expect(data.deductionNote).toBe('教材代扣');
@@ -93,6 +93,37 @@ describe('PayrollService', () => {
       .rejects.toBeInstanceOf(BadRequestException);
     await expect(service.update('payroll-1', { ...input, bonusNote: '奖金', deductionAmount: new Prisma.Decimal('102.00'), deductionNote: '扣款' }))
       .rejects.toBeInstanceOf(BadRequestException);
+    expect(tx.payroll.update).not.toHaveBeenCalled();
+  });
+
+  it('previews a bonus adjustment with Decimal strings and applies it with the payroll version fence', async () => {
+    const existing = record();
+    const update = vi.fn().mockResolvedValue(record({ bonusAmount: new Prisma.Decimal('300.00'), bonusNote: '公开课奖励', grossSalary: new Prisma.Decimal('105.00'), netSalary: new Prisma.Decimal('403.00'), version: 2 }));
+    const tx = { payroll: { findUnique: vi.fn().mockResolvedValue(existing), update } };
+    const prisma = {
+      payroll: { findUnique: vi.fn().mockResolvedValue(existing) },
+      $transaction: vi.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+    };
+    const periods = { assertWritableForDate: vi.fn().mockResolvedValue(undefined) };
+    const service = new PayrollService(prisma as never, periods as never);
+
+    await expect(service.previewAdjust({ payrollId: 'payroll-1', bonusAmount: new Prisma.Decimal('300.00'), bonusNote: ' 公开课奖励 ', actorId: 'owner-1' }))
+      .resolves.toMatchObject({ beforeBonusAmount: '10.00', afterBonusAmount: '300.00', beforeDeductionAmount: '2.00', afterDeductionAmount: '2.00', payroll: { grossSalary: '105.00', netSalary: '403.00', version: 2 } });
+    expect(update).not.toHaveBeenCalled();
+
+    await expect(service.adjustInTransaction(tx as never, 'payroll-1', { bonusAmount: new Prisma.Decimal('300.00'), bonusNote: '公开课奖励', actorId: 'owner-1' }, 1))
+      .resolves.toMatchObject({ bonusAmount: new Prisma.Decimal('300.00') });
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ bonusAmount: new Prisma.Decimal('300.00'), bonusNote: '公开课奖励', version: { increment: 1 } }),
+    }));
+  });
+
+  it('rejects a positive deduction adjustment without a note or with a stale version', async () => {
+    const existing = record();
+    const tx = { payroll: { findUnique: vi.fn().mockResolvedValue(existing), update: vi.fn() } };
+    const service = new PayrollService({ $transaction: vi.fn() } as never, { assertWritableForDate: vi.fn().mockResolvedValue(undefined) } as never);
+    await expect(service.adjustInTransaction(tx as never, 'payroll-1', { deductionAmount: new Prisma.Decimal('30.00'), actorId: 'owner-1' }, 1)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.adjustInTransaction(tx as never, 'payroll-1', { deductionAmount: new Prisma.Decimal('30.00'), deductionNote: '教材', actorId: 'owner-1' }, 2)).rejects.toBeInstanceOf(ConflictException);
     expect(tx.payroll.update).not.toHaveBeenCalled();
   });
 

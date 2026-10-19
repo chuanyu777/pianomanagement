@@ -43,8 +43,14 @@ function serviceWith(overrides: Record<string, unknown> = {}) {
       commissionRate: '10.0000', commissionAmount: '10.00', grossSalary: '3010.00', netSalary: '3010.00',
     }),
     findById: vi.fn().mockResolvedValue({ id: 'payroll-1', teacherId: 'teacher-1', teacherName: '李老师', periodStart: new Date('2026-10-01T00:00:00.000Z'), status: 'UNPAID', netSalary: '3010.00', version: 2 }),
+    previewAdjust: vi.fn().mockResolvedValue({
+      payroll: { id: 'payroll-1', teacherName: '李老师', periodStart: new Date('2026-10-01T00:00:00.000Z'), status: 'UNPAID', netSalary: '3310.00', grossSalary: '3310.00', version: 3 },
+      payrollVersion: 2,
+      beforeBonusAmount: '0.00', afterBonusAmount: '300.00', beforeDeductionAmount: '0.00', afterDeductionAmount: '0.00',
+    }),
     generateInTransaction: vi.fn().mockResolvedValue({ id: 'payroll-1', netSalary: new Prisma.Decimal('3010.00') }),
     payInTransaction: vi.fn().mockResolvedValue({ id: 'payroll-1', status: 'PAID' }),
+    adjustInTransaction: vi.fn().mockResolvedValue({ id: 'payroll-1', status: 'UNPAID', bonusAmount: new Prisma.Decimal('300.00'), deductionAmount: new Prisma.Decimal('0.00'), grossSalary: new Prisma.Decimal('3310.00'), netSalary: new Prisma.Decimal('3310.00') }),
   };
   const periods = {
     assertWritableForDate: vi.fn().mockResolvedValue(undefined),
@@ -88,6 +94,7 @@ describe('AssistantActionsService structured business previews', () => {
   it.each([
     ['payroll.generate', { teacherId: 'teacher-1', period: '2026-10' }],
     ['payroll.pay', { payrollId: 'payroll-1', paidAt: '2026-10-19T02:00:00.000Z', channel: 'WECHAT' }],
+    ['payroll.adjust', { payrollId: 'payroll-1', bonusAmount: '300.00', bonusNote: '公开课奖励' }],
     ['period.close', { period: '2026-10' }],
     ['period.reopen', { period: '2026-10', reason: '补录遗漏记录' }],
   ] as const)('creates a %s preview through its domain service', async (actionType, command) => {
@@ -98,8 +105,23 @@ describe('AssistantActionsService structured business previews', () => {
     expect(result.actionType).toBe(actionType);
     if (actionType === 'payroll.generate') expect(payroll.previewGenerate).toHaveBeenCalled();
     if (actionType === 'payroll.pay') expect(payroll.findById).toHaveBeenCalledWith('payroll-1');
+    if (actionType === 'payroll.adjust') expect(payroll.previewAdjust).toHaveBeenCalledWith(expect.objectContaining({ payrollId: 'payroll-1', bonusAmount: expect.any(Prisma.Decimal), bonusNote: '公开课奖励' }));
     if (actionType === 'period.close') expect(periods.assertWritableForDate).toHaveBeenCalled();
     if (actionType === 'period.reopen') expect(periods.previewReopen).toHaveBeenCalled();
+  });
+
+  it('executes payroll.adjust through the PayrollService transaction helper with the preview version', async () => {
+    const { service, prisma, tx, payroll } = serviceWith();
+    const preview = { ...createPreview('preview-1', 'payroll.adjust'), normalizedCommandJson: {
+      payrollId: 'payroll-1', bonusAmount: '300.00', bonusNote: '公开课奖励',
+    }, resourceVersionsJson: { payrollId: 'payroll-1', payrollVersion: 2, status: 'UNPAID' } };
+    prisma.actionPreview.findUnique.mockResolvedValue({ actionType: 'payroll.adjust' });
+    tx.actionPreview.findUnique.mockResolvedValue(preview);
+    const result = await service.confirmPreview('preview-1', owner, 'confirm-payroll-adjust');
+    expect(result).toMatchObject({ status: PreviewStatus.EXECUTED, receipt: { actionType: 'payroll.adjust', payrollId: 'payroll-1', bonusAmount: '300.00', idempotencyKey: 'confirm-payroll-adjust' } });
+    expect(payroll.adjustInTransaction).toHaveBeenCalledWith(tx, 'payroll-1', expect.objectContaining({ bonusAmount: expect.any(Prisma.Decimal), bonusNote: '公开课奖励', actorId: owner.id }), 2);
+    expect(tx.actionPreview.update).toHaveBeenCalledTimes(1);
+    expect(tx.businessAuditEvent.create).toHaveBeenCalledTimes(1);
   });
 
   it('executes manual transaction, preview status update, and confirmation audit in one transaction', async () => {

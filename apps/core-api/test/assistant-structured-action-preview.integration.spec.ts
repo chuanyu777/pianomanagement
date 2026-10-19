@@ -5,7 +5,7 @@ import { AssistantActionsService } from '../src/modules/assistant-actions/assist
 import { PayrollService } from '../src/modules/payroll/payroll.service.js';
 import { PeriodsService } from '../src/modules/periods/periods.service.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
-import { UserRole } from '../src/generated/prisma/client.js';
+import { Prisma, UserRole } from '../src/generated/prisma/client.js';
 
 const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
 
@@ -66,6 +66,17 @@ if (hasDatabase) {
       expect(payrollId).toEqual(expect.any(String));
       expect(await prisma.payroll.count({ where: { id: payrollId } })).toBe(1);
 
+      const adjustPreview = await actions.createStructuredActionPreview({
+        actorUserId: ownerId, runId: randomUUID(), requestId: randomUUID(), idempotencyKey: randomUUID(),
+        actionType: 'payroll.adjust', command: { payrollId, bonusAmount: '300.00', bonusNote: '结构化测试奖金' },
+      });
+      previewIds.push(adjustPreview.previewId);
+      expect(await prisma.payroll.findUnique({ where: { id: payrollId }, select: { bonusAmount: true, version: true } }))
+        .toMatchObject({ bonusAmount: new Prisma.Decimal('0.00'), version: 0 });
+      await expect(actions.confirmPreview(adjustPreview.previewId, actor, randomUUID())).resolves.toMatchObject({
+        status: 'EXECUTED', receipt: { actionType: 'payroll.adjust', payrollId, bonusAmount: '300.00', netSalary: '3300.00' },
+      });
+
       const payPreview = await actions.createStructuredActionPreview({
         actorUserId: ownerId, runId: randomUUID(), requestId: randomUUID(), idempotencyKey: randomUUID(),
         actionType: 'payroll.pay', command: { payrollId, paidAt: '2099-07-05T02:00:00.000Z', channel: 'WECHAT' },
@@ -91,7 +102,7 @@ if (hasDatabase) {
       expect(await prisma.closedPeriod.count({ where: { periodStart, reopenedAt: { not: null } } })).toBe(1);
 
       const confirmedAudits = await prisma.businessAuditEvent.count({ where: { previewId: { in: previewIds }, eventType: 'assistant.preview.confirmed' } });
-      expect(confirmedAudits).toBe(5);
+      expect(confirmedAudits).toBe(6);
     });
   });
 } else {

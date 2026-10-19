@@ -70,7 +70,7 @@ const ReschedulePreviewSchema = LessonMutationPreviewBaseSchema.extend({
 const StructuredActionPreviewSchema = z.object({
   actionType: z.enum([
     'lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal',
-    'manual-transaction.create', 'payroll.generate', 'payroll.pay', 'period.close', 'period.reopen',
+    'manual-transaction.create', 'payroll.generate', 'payroll.pay', 'payroll.adjust', 'period.close', 'period.reopen',
   ]),
   command: z.record(z.string(), z.unknown()),
   idempotencyKey: z.string().uuid(),

@@ -96,6 +96,7 @@ type StructuredBusinessAction =
   | 'manual-transaction.create'
   | 'payroll.generate'
   | 'payroll.pay'
+  | 'payroll.adjust'
   | 'period.close'
   | 'period.reopen';
 type StructuredAction = LessonMutationAction | StructuredBusinessAction;
@@ -142,6 +143,16 @@ function commandAmount(command: Record<string, unknown>, field: string): Prisma.
   }
   const amount = new Prisma.Decimal(value);
   if (!amount.isFinite() || !amount.gt(0)) throw new BadRequestException(`${field} 必须大于零`);
+  return amount;
+}
+
+function commandNonNegativeAmount(command: Record<string, unknown>, field: string): Prisma.Decimal {
+  const value = commandText(command, field);
+  if (!/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(value)) {
+    throw new BadRequestException(`${field} 必须是两位小数字符串`);
+  }
+  const amount = new Prisma.Decimal(value);
+  if (!amount.isFinite() || amount.lt(0)) throw new BadRequestException(`${field} 不能为负数`);
   return amount;
 }
 
@@ -529,7 +540,7 @@ export class AssistantActionsService {
     if (preview && ['lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal'].includes(preview.actionType)) {
       return this.confirmLessonMutationPreview(previewId, actor, idempotencyKey);
     }
-    if (preview && ['manual-transaction.create', 'payroll.generate', 'payroll.pay', 'period.close', 'period.reopen'].includes(preview.actionType)) {
+    if (preview && ['manual-transaction.create', 'payroll.generate', 'payroll.pay', 'payroll.adjust', 'period.close', 'period.reopen'].includes(preview.actionType)) {
       return this.confirmStructuredBusinessPreview(previewId, actor, idempotencyKey);
     }
     if (preview?.actionType === 'lesson.schedule.single') return this.confirmSingleLessonPreview(previewId, actor, idempotencyKey);
@@ -556,6 +567,7 @@ export class AssistantActionsService {
     if (input.actionType === 'manual-transaction.create') return this.createManualTransactionPreview(input);
     if (input.actionType === 'payroll.generate') return this.createPayrollGeneratePreview(input);
     if (input.actionType === 'payroll.pay') return this.createPayrollPayPreview(input);
+    if (input.actionType === 'payroll.adjust') return this.createPayrollAdjustPreview(input);
     if (input.actionType === 'period.close') return this.createPeriodClosePreview(input);
     if (input.actionType === 'period.reopen') return this.createPeriodReopenPreview(input);
 
@@ -661,6 +673,40 @@ export class AssistantActionsService {
     });
   }
 
+  private async createPayrollAdjustPreview(input: StructuredActionPreviewInput) {
+    const payrollService = this.payroll;
+    if (!payrollService) throw new ConflictException('工资预览服务未配置');
+    await this.loadOwner(input.actorUserId, '工资奖金或代扣调整');
+    const payrollId = commandText(input.command, 'payrollId');
+    const hasBonus = input.command.bonusAmount !== undefined;
+    const hasDeduction = input.command.deductionAmount !== undefined;
+    if (!hasBonus && !hasDeduction) throw new BadRequestException('至少需要调整奖金或代扣一项');
+    const bonusAmount = hasBonus ? commandNonNegativeAmount(input.command, 'bonusAmount') : undefined;
+    const deductionAmount = hasDeduction ? commandNonNegativeAmount(input.command, 'deductionAmount') : undefined;
+    const bonusNote = typeof input.command.bonusNote === 'string' ? input.command.bonusNote.trim() || undefined : undefined;
+    const deductionNote = typeof input.command.deductionNote === 'string' ? input.command.deductionNote.trim() || undefined : undefined;
+    const preview = await payrollService.previewAdjust({ payrollId, ...(bonusAmount ? { bonusAmount } : {}), ...(deductionAmount ? { deductionAmount } : {}), ...(hasBonus ? { bonusNote } : {}), ...(hasDeduction ? { deductionNote } : {}), actorId: input.actorUserId });
+    return this.saveStructuredPreview(input, {
+      command: {
+        payrollId,
+        ...(hasBonus ? { bonusAmount: bonusAmount!.toFixed(2), bonusNote: bonusNote ?? null } : {}),
+        ...(hasDeduction ? { deductionAmount: deductionAmount!.toFixed(2), deductionNote: deductionNote ?? null } : {}),
+      },
+      display: {
+        title: '调整工资奖金或代扣',
+        summary: `${preview.payroll.teacherName} ${preview.payroll.periodStart.toISOString().slice(0, 7)}：奖金 ¥${preview.beforeBonusAmount} → ¥${preview.afterBonusAmount}，代扣 ¥${preview.beforeDeductionAmount} → ¥${preview.afterDeductionAmount}，实发 ¥${preview.payroll.netSalary}`,
+        teacherName: preview.payroll.teacherName,
+        period: preview.payroll.periodStart.toISOString().slice(0, 7),
+        beforeBonusAmount: preview.beforeBonusAmount, afterBonusAmount: preview.afterBonusAmount,
+        beforeDeductionAmount: preview.beforeDeductionAmount, afterDeductionAmount: preview.afterDeductionAmount,
+        grossSalary: preview.payroll.grossSalary, netSalary: preview.payroll.netSalary,
+        bonusNote: preview.payroll.bonusNote, deductionNote: preview.payroll.deductionNote,
+      },
+      resourceVersions: { payrollId, payrollVersion: preview.payrollVersion, status: preview.payroll.status, periodStart: preview.payroll.periodStart.toISOString() },
+      resourceType: 'payroll', resourceId: payrollId,
+    });
+  }
+
   private async createPeriodClosePreview(input: StructuredActionPreviewInput) {
     if (!this.periods) throw new ConflictException('关账预览服务未配置');
     await this.loadOwner(input.actorUserId, '关账');
@@ -742,7 +788,7 @@ export class AssistantActionsService {
     return this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "ActionPreview" WHERE "id" = ${previewId} FOR UPDATE`;
       const preview = await tx.actionPreview.findUnique({ where: { id: previewId } });
-      const supported: StructuredBusinessAction[] = ['manual-transaction.create', 'payroll.generate', 'payroll.pay', 'period.close', 'period.reopen'];
+      const supported: StructuredBusinessAction[] = ['manual-transaction.create', 'payroll.generate', 'payroll.pay', 'payroll.adjust', 'period.close', 'period.reopen'];
       if (!preview || !supported.includes(preview.actionType as StructuredBusinessAction)) throw new NotFoundException('结构化业务预览不存在');
       if (preview.actorUserId !== actor.id) throw new ForbiddenException('不能确认其他用户的结构化业务预览');
       if (actor.role !== 'OWNER') throw new ForbiddenException('仅店主可确认该业务操作');
@@ -786,6 +832,18 @@ export class AssistantActionsService {
           const note = typeof command.note === 'string' ? command.note || undefined : undefined;
           const payroll = await payrollService.payInTransaction(tx, payrollId, { paidAt, channel, ...(note ? { note } : {}), actorId: actor.id }, Number(versions.payrollVersion));
           receipt = { actionType: preview.actionType, payrollId: payroll.id, status: payroll.status, paidAt: paidAt.toISOString(), channel, idempotencyKey, executedAt: new Date().toISOString() };
+        } else if (preview.actionType === 'payroll.adjust') {
+          const payrollId = commandText(command, 'payrollId');
+          const bonusAmount = command.bonusAmount === undefined ? undefined : commandNonNegativeAmount(command, 'bonusAmount');
+          const deductionAmount = command.deductionAmount === undefined ? undefined : commandNonNegativeAmount(command, 'deductionAmount');
+          const bonusNote = typeof command.bonusNote === 'string' ? command.bonusNote || undefined : undefined;
+          const deductionNote = typeof command.deductionNote === 'string' ? command.deductionNote || undefined : undefined;
+          const payroll = await payrollService.adjustInTransaction(tx, payrollId, {
+            ...(bonusAmount ? { bonusAmount } : {}), ...(deductionAmount ? { deductionAmount } : {}),
+            ...(command.bonusAmount !== undefined ? { bonusNote } : {}), ...(command.deductionAmount !== undefined ? { deductionNote } : {}),
+            actorId: actor.id,
+          }, Number(versions.payrollVersion));
+          receipt = { actionType: preview.actionType, payrollId: payroll.id, status: payroll.status, bonusAmount: payroll.bonusAmount.toFixed(2), deductionAmount: payroll.deductionAmount.toFixed(2), grossSalary: payroll.grossSalary.toFixed(2), netSalary: payroll.netSalary.toFixed(2), idempotencyKey, executedAt: new Date().toISOString() };
         } else if (preview.actionType === 'period.close') {
           const period = commandBusinessMonth(command);
           const closed = await periods.closeInTransaction(tx, period.date, actor.id);

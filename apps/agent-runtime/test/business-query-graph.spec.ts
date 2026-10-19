@@ -284,6 +284,45 @@ describe('read-only business query graph', () => {
     expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({ type: 'action-preview', actionType }));
   });
 
+  it('routes a bonus payroll adjustment with a Decimal string and note to Preview only', async () => {
+    const findPayrollCandidates = vi.fn().mockResolvedValue({ candidates: [
+      { payrollId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', teacherId: '6ed41b4d-cad9-42b3-a3ca-6571ce2e033b', teacherName: '王老师', period: '2026-10', status: 'UNPAID' },
+    ] });
+    const createActionPreview = vi.fn().mockResolvedValue({
+      previewId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c', actionType: 'payroll.adjust',
+      command: { payrollId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', bonusAmount: '300.00', bonusNote: '公开课奖励' },
+      display: { title: '调整工资奖金或代扣', summary: '王老师 2026-10：奖金 ¥10.00 → ¥300.00' }, expiresAt: '2026-10-17T01:05:00.000Z',
+    });
+    const graph = createBusinessQueryGraph({
+      checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn(),
+      findPayrollCandidates, createActionPreview,
+    });
+
+    const result = await graph.invoke({
+      runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75',
+      userMessage: '给王老师 2026-10 工资加奖金 300 元，奖金说明：公开课奖励',
+    }, { configurable: { thread_id: 'payroll-adjust-preview' } });
+
+    expect(findPayrollCandidates).toHaveBeenCalledWith('request-capability', { teacherName: '王', period: '2026-10' });
+    expect(createActionPreview).toHaveBeenCalledWith('request-capability', expect.objectContaining({
+      actionType: 'payroll.adjust',
+      command: expect.objectContaining({ payrollId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', bonusAmount: '300.00', bonusNote: '公开课奖励' }),
+    }));
+    expect(result.answer).toContain('尚未执行');
+    expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({ type: 'action-preview', actionType: 'payroll.adjust' }));
+  });
+
+  it('requires a note for a positive deduction adjustment before querying payroll records', async () => {
+    const findPayrollCandidates = vi.fn();
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn(), findPayrollCandidates, createActionPreview: vi.fn() });
+    const result = await graph.invoke({
+      runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75',
+      userMessage: '给王老师 2026-10 工资代扣 30 元',
+    }, { configurable: { thread_id: 'payroll-adjust-missing-note' } });
+    expect(result.answer).toContain('说明');
+    expect(findPayrollCandidates).not.toHaveBeenCalled();
+  });
+
   it('clarifies structured actions when the lesson object is not unique and never creates a Preview or reads Dashboard', async () => {
     const fetchDashboardSummary = vi.fn();
     const findLessonCandidates = vi.fn().mockResolvedValue({ candidates: [

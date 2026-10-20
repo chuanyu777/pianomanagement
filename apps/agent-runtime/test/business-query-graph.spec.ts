@@ -21,6 +21,102 @@ const detailedSummary = {
 };
 
 describe('read-only business query graph', () => {
+  it('shows the Core-approved lesson identity and before/after times before reschedule confirmation', async () => {
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn(),
+      findLessonCandidates: vi.fn().mockResolvedValue({ candidates: [{ lessonId: 'lesson-1', studentName: '小明', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-19T01:00:00.000Z', status: 'SCHEDULED' }] }),
+      createActionPreview: vi.fn().mockResolvedValue({ previewId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c', actionType: 'lesson.reschedule', command: {},
+        display: { studentName: '小明', courseName: '主课', previousStartsAt: '2026-10-19T01:00:00.000Z', startsAt: '2026-10-21T10:00:00.000Z', lessonId: 'internal-lesson-id', teacherId: 'internal-teacher-id' }, expiresAt: '2026-10-20T01:05:00.000Z' }),
+    });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage: '把小明的课调到 2026-10-21 18:00' }, { configurable: { thread_id: 'reschedule-visible-impact' } });
+    expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({ type: 'data-table', rows: expect.arrayContaining([
+      { field: '学生', value: '小明' }, { field: '课程', value: '主课' },
+      { field: '原上课时间', value: '2026-10-19 09:00' }, { field: '调整后上课时间', value: '2026-10-21 18:00' },
+    ]) }));
+    expect(JSON.stringify(result.workspace)).not.toMatch(/internal-lesson-id|internal-teacher-id|严格确认/u);
+    expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({ type: 'action-preview', actionType: 'lesson.reschedule' }));
+  });
+  it.each([
+    'AI学生1792224591416这节课调整到 18:00',
+    '把小明的课改到明天18:00',
+    '请把小明的上课时间调整到 18:00',
+    '帮我把小明这节课延后到18:00',
+    '给小明改上课时间到18:00',
+  ])('recognizes incomplete rescheduling as an action and asks for a date: %s', async (userMessage) => {
+    const fetchDashboardSummary = vi.fn();
+    const findLessonCandidates = vi.fn();
+    const createActionPreview = vi.fn();
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary, findLessonCandidates, createActionPreview });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: `incomplete-reschedule-${userMessage}` } });
+    expect(result.answer).toContain('调课');
+    expect(result.answer).toContain('日期');
+    expect(result.workspace?.title).toBe('需要补充信息');
+    expect(result.workspace?.title).not.toBe('暂不支持此查询');
+    expect(result.workspace?.blocks).toHaveLength(1);
+    expect(result.answer).not.toMatch(/Assistant Preview|Core|Agent|Dashboard/u);
+    expect(fetchDashboardSummary).not.toHaveBeenCalled();
+    expect(findLessonCandidates).not.toHaveBeenCalled();
+    expect(createActionPreview).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '把小明的课调到 2026-10-21 18:00',
+    '把小明这节课调整到 2026-10-21 18:00',
+    '请把小明的上课时间改到 2026-10-21 18:00',
+    '调整小明的上课时间到 2026-10-21 18:00',
+    '帮我查一下小明的课，把它调到 2026-10-21 18:00',
+    '帮我把学生小明的课调到 2026-10-21 18:00',
+  ])('finds the original lesson independently of its target date: %s', async (userMessage) => {
+    const findLessonCandidates = vi.fn().mockResolvedValue({ candidates: [{ lessonId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', studentName: '小明', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-19T01:00:00.000Z', status: 'SCHEDULED' }] });
+    const createActionPreview = vi.fn().mockResolvedValue({ previewId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c', actionType: 'lesson.reschedule', command: {}, display: { title: '调课预览', summary: '确认后调课。' }, expiresAt: '2026-10-17T01:05:00.000Z' });
+    const fetchDashboardSummary = vi.fn();
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary, findLessonCandidates, createActionPreview });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: `complete-reschedule-${userMessage}` } });
+    expect(findLessonCandidates).toHaveBeenCalledWith('request-capability', { studentName: '小明' });
+    expect(createActionPreview).toHaveBeenCalledWith('request-capability', expect.objectContaining({ actionType: 'lesson.reschedule', command: expect.objectContaining({ lessonId: 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90', targetStartsAt: '2026-10-21T18:00:00+08:00' }) }));
+    expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({ type: 'action-preview', actionType: 'lesson.reschedule' }));
+    expect(fetchDashboardSummary).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes the explicitly stated original time from the new time', async () => {
+    const findLessonCandidates = vi.fn().mockResolvedValue({ candidates: [{ lessonId: 'lesson-1', studentName: '小明', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-20T07:00:00.000Z', status: 'SCHEDULED' }] });
+    const createActionPreview = vi.fn().mockResolvedValue({ previewId: 'f77d8168-5d57-4e81-9c32-11e22e42b81c', actionType: 'lesson.reschedule', command: {}, display: { title: '调课' }, expiresAt: '2026-10-20T01:05:00.000Z' });
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn(), findLessonCandidates, createActionPreview });
+    await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage: '帮我给小明调课，原定 2026-10-20 15:00，改到 2026-10-21 18:00' }, { configurable: { thread_id: 'source-target-times' } });
+    expect(findLessonCandidates).toHaveBeenCalledWith('request-capability', { studentName: '小明', date: '2026-10-20' });
+    expect(createActionPreview).toHaveBeenCalledWith('request-capability', expect.objectContaining({ command: expect.objectContaining({ targetStartsAt: '2026-10-21T18:00:00+08:00' }) }));
+  });
+
+  it.each(['查询小明的调课记录', '查询小明的课调到 2026-10-21 18:00 的历史记录'])('keeps a rescheduling-history query read-only: %s', async (userMessage) => {
+    const createActionPreview = vi.fn();
+    const findLessonCandidates = vi.fn();
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn(), findLessonCandidates, createActionPreview });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: 'read-reschedule-history' } });
+    expect(result.workspace?.title).toBe('暂不支持此查询');
+    expect(findLessonCandidates).not.toHaveBeenCalled();
+    expect(createActionPreview).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['预览一次收款', '课程'],
+  ])('asks for essential details instead of showing unsupported for %s', async (userMessage, expectedDetail) => {
+    const fetchDashboardSummary = vi.fn();
+    const createPaymentPreview = vi.fn();
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary, createPaymentPreview });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: `starter-${userMessage}` } });
+    expect(result.workspace?.title).toBe('需要补充信息');
+    expect(result.answer).toContain(expectedDetail);
+    expect(fetchDashboardSummary).not.toHaveBeenCalled();
+    expect(createPaymentPreview).not.toHaveBeenCalled();
+  });
+
+  it.each(['查找学生账户', '查询学生账户'])('does not promise an unavailable account lookup for %s', async (userMessage) => {
+    const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn() });
+    const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: `account-read-${userMessage}` } });
+    expect(result.workspace?.title).toBe('暂不支持此查询');
+    expect(result.answer).toContain('学生与账户');
+    expect(result.answer).not.toContain('请提供学生姓名');
+  });
+
   it.each(['今天有哪些排课', '查询今天的排课', '查看今日排课', '今天有几节课', '今日排课', '今天的排课', '今天上什么课'])('returns only today lesson details for %s', async (userMessage) => {
     const fetchDashboardSummary = vi.fn().mockResolvedValue(detailedSummary);
     const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary });
@@ -54,7 +150,7 @@ describe('read-only business query graph', () => {
     expect(JSON.stringify(result.workspace)).not.toMatch(new RegExp(unrelated, 'u'));
   });
 
-  it.each(['查询学生账户', '列出本周排课', '今天收入是多少'])('does not substitute the dashboard for unsupported scope %s', async (userMessage) => {
+  it.each(['列出本周排课', '今天收入是多少'])('does not substitute the dashboard for unsupported scope %s', async (userMessage) => {
     const graph = createBusinessQueryGraph({ checkpointer: new MemorySaver(), capability: 'request-capability', fetchDashboardSummary: vi.fn().mockResolvedValue(detailedSummary) });
     const result = await graph.invoke({ runId: 'e200271f-06a4-45e6-bdb8-6c59b843a1fa', threadId: 'a2b50d20-bd44-4f42-b7f0-148535470c75', userMessage }, { configurable: { thread_id: `unsupported-${userMessage}` } });
     expect(result.answer).toContain('暂不支持');
@@ -302,8 +398,10 @@ describe('read-only business query graph', () => {
     }, { configurable: { thread_id: threadId } });
 
     expect(result.answer).toContain(expectedText);
-    expect(result.answer).toContain('没有 Assistant Preview');
+    expect(result.answer).toContain('预览');
+    expect(result.answer).not.toMatch(/Assistant Preview|Core|Agent|Dashboard|Confirm\/Execute/u);
     expect(result.workspace?.title).toBe('需要补充信息');
+    expect(result.workspace?.blocks).toHaveLength(1);
     for (const operation of [fetchDashboardSummary, findCourseAccountCandidates, findStudentCandidates,
       findTeacherCandidates, createSingleLessonPreview, createBatchLessonPreview, createFinalRefundPreview,
       createPaymentPreview, createGiftPreview]) {

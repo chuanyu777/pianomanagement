@@ -184,6 +184,10 @@ describe('AI workspace', () => {
 
     expect(await screen.findByText('今天有 2 节真实排课。')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '经营工作区' })).toBeInTheDocument();
+    expect(within(screen.getByLabelText('示例入口')).getByRole('button', { name: '查看今日排课' })).toBeInTheDocument();
+    expect(within(screen.getByLabelText('示例入口')).getByRole('button', { name: '查看这个月收入' })).toBeInTheDocument();
+    expect(within(screen.getByLabelText('示例入口')).getByRole('button', { name: '今天经营情况怎么样' })).toBeInTheDocument();
+    expect(within(screen.getByLabelText('示例入口')).queryByRole('button', { name: '查找学生账户' })).not.toBeInTheDocument();
     expect(screen.getByText('今日真实经营摘要')).toBeInTheDocument();
     expect(screen.getByText('排课情况')).toBeInTheDocument();
     expect(screen.getByText('今日共有 2 节排课。')).toBeInTheDocument();
@@ -193,6 +197,9 @@ describe('AI workspace', () => {
     expect(screen.getByText('2 节')).toBeInTheDocument();
     expect(screen.getByRole('table', { name: '查询结果' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: '小明' })).toBeInTheDocument();
+    expect(screen.queryByText('工作方式')).not.toBeInTheDocument();
+    expect(screen.queryByText('数据状态')).not.toBeInTheDocument();
+    expect(screen.queryByText('操作方式')).not.toBeInTheDocument();
     expect(await screen.findByText('已完成')).toBeInTheDocument();
     const startCall = fetchMock.mock.calls.find(([path]) => path === '/api/assistant/runs');
     expect(new Headers(startCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
@@ -242,10 +249,26 @@ describe('AI workspace', () => {
     await user.click(screen.getByRole('button', { name: /登\s*录/ }));
     await user.type(await screen.findByLabelText('经营问题'), '预览收款');
     await user.click(screen.getByRole('button', { name: /发送消息/ }));
+    const previewCard = await screen.findByLabelText('操作预览');
+    expect(within(previewCard).getByText('确认前请核对预览内容；确认后才会写入真实业务数据。')).toBeInTheDocument();
+    expect(within(previewCard).getByText(/有效期至/)).toBeInTheDocument();
+    const technicalDetails = previewCard.querySelector('details');
+    expect(technicalDetails).not.toBeNull();
+    expect(technicalDetails).not.toHaveAttribute('open');
+    expect(technicalDetails).toHaveTextContent('查看技术详情');
+    expect(technicalDetails).toHaveTextContent('course-account.payment');
+    expect(technicalDetails).toHaveTextContent('course-account.payment.v1');
+    expect(technicalDetails).toHaveTextContent('L2');
+    expect(technicalDetails).toHaveTextContent(previewId);
+    await user.click(within(previewCard).getByText('查看技术详情'));
+    expect(technicalDetails).toHaveAttribute('open');
     await user.click(await screen.findByRole('button', { name: '确认并登记' }));
     expect(await screen.findByText(/预览已失效或已被其他请求确认/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '重试确认' }));
-    expect(await screen.findByText('Core 回执明细')).toBeInTheDocument();
+    expect(await screen.findByText('执行回执')).toBeInTheDocument();
+    expect(screen.queryByText('Core 回执明细')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Core 已确认/)).not.toBeInTheDocument();
+    expect(screen.queryByText('工作方式')).not.toBeInTheDocument();
     expect(screen.getByText('payment-001')).toBeInTheDocument();
     expect(screen.getByText('120.00')).toBeInTheDocument();
     const confirmCall = fetchMock.mock.calls.find(([path]) => String(path) === `/api/assistant/previews/${previewId}/confirm`);

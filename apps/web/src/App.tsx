@@ -16,7 +16,7 @@ const navItems: NavItem[] = [
   { label: '排课与课消', description: '课程真实数据', path: '/structured/schedule', icon: '▦' },
   { label: '收支与报表', description: '月度经营数据', path: '/structured/finance', icon: '◫' },
 ];
-const suggestions = ['查找学生账户', '预览一次收款', '查看今日排课'];
+const suggestions = ['查看今日排课', '查看这个月收入', '今天经营情况怎么样'];
 
 type AssistantState = {
   available: boolean;
@@ -346,8 +346,6 @@ function ContextPanel({ onClear, workspace }: { onClear: () => void; workspace: 
       })}
       {workspace.blocks.length === 0 && <p className="workspace-empty">当前结果没有可展示的工作区内容。</p>}
     </div> : <div className="empty-context"><span className="empty-orbit" aria-hidden="true">＋</span><strong>还没有工作区内容</strong><span>向助手提问后，真实返回的摘要、提醒和指标会显示在这里。</span></div>}
-    <div className="boundary-card"><div className="boundary-title"><span className="boundary-icon">◌</span> 工作方式</div><p className="boundary-copy">助手先读取业务信息并生成核对内容，只有你确认后才会执行变更。</p></div>
-    <div className="context-meta"><span>数据状态</span><strong>实时读取</strong></div><div className="context-meta"><span>操作方式</span><strong>先核对，后执行</strong></div>
   </div>;
 }
 
@@ -381,11 +379,19 @@ function PreviewConfirmationCard({ preview }: { preview: Extract<WorkspaceBlock,
       setMessage(cause instanceof Error ? cause.message : '确认失败，请稍后重试。');
     }
   };
-  return <section aria-label="操作预览" className="workspace-summary">
+  return <section aria-label="操作预览" className="workspace-summary preview-card">
     <strong>{preview.title}</strong>
-    <p>动作类型：{preview.actionType} · 版本：{preview.schemaVersion}</p>
-    <p>风险等级：{preview.riskLevel} · 有效至 {formatDateTime(preview.expiresAt)}</p>
-    <p>预览编号：{preview.previewId}</p>
+    <p className="preview-guidance">确认前请核对预览内容；确认后才会写入真实业务数据。</p>
+    <p className="preview-expiry">有效期至 {formatDateTime(preview.expiresAt)}</p>
+    <details className="preview-technical-details">
+      <summary>查看技术详情</summary>
+      <dl>
+        <div className="receipt-row"><dt>动作类型</dt><dd>{preview.actionType}</dd></div>
+        <div className="receipt-row"><dt>数据版本</dt><dd>{preview.schemaVersion}</dd></div>
+        <div className="receipt-row"><dt>风险代码</dt><dd>{preview.riskLevel}</dd></div>
+        <div className="receipt-row"><dt>预览编号</dt><dd>{preview.previewId}</dd></div>
+      </dl>
+    </details>
     {expired && status !== 'confirmed' && <Alert className="preview-alert" message="预览已过期，未执行任何操作。请重新生成预览。" showIcon type="warning" />}
     {status === 'confirmed' ? <>
       <Alert message={message} showIcon type="success" />
@@ -419,11 +425,11 @@ function receiptValue(value: unknown): string {
 }
 
 function ReceiptResult({ receipt }: { receipt: Record<string, unknown> | null }) {
-  if (!receipt) return <Alert className="preview-alert" message="Core 已确认，但未返回回执明细。" showIcon type="info" />;
+  if (!receipt) return <Alert className="preview-alert" message="操作已确认，但未返回执行回执。" showIcon type="info" />;
   const entries = Object.entries(receipt);
-  return <section aria-label="Core 回执明细" className="receipt-result">
-    <strong>Core 回执明细</strong>
-    {entries.length === 0 ? <p>Core 返回了空回执。</p> : <dl>{entries.map(([key, value]) => <div className="receipt-row" key={key}><dt>{key}</dt><dd>{receiptValue(value)}</dd></div>)}</dl>}
+  return <section aria-label="执行回执" className="receipt-result">
+    <strong>执行回执</strong>
+    {entries.length === 0 ? <p>操作返回了空执行回执。</p> : <dl>{entries.map(([key, value]) => <div className="receipt-row" key={key}><dt>{key}</dt><dd>{receiptValue(value)}</dd></div>)}</dl>}
   </section>;
 }
 

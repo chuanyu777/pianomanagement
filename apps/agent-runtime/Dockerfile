@@ -4,6 +4,7 @@ WORKDIR /workspace
 COPY . .
 RUN npm install --include=dev \
     && npm run build -w @piano/assistant-protocol \
+    && npm run build -w @piano/generated-core-client \
     && npm run build -w @piano/agent-runtime
 
 ENV NODE_ENV=production

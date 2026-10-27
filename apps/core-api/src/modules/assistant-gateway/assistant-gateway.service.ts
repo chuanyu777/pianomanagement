@@ -18,6 +18,8 @@ import {
   type AgentRuntimeClient,
   type AgentRuntimeEventStream,
   type AgentRuntimeRun,
+  type AgentThreadDetail,
+  type AgentThreadSummary,
 } from './agent-runtime.client.js';
 
 const CAPABILITY_TTL_SECONDS = 300;
@@ -125,6 +127,24 @@ export class AssistantGatewayService {
       contentType: 'text/event-stream',
       cacheControl: 'no-cache, no-transform',
     };
+  }
+
+  async listThreads(input: { userId: string; role: UserRole; teacherId?: string; limit?: number; traceId?: string }): Promise<AgentThreadSummary[]> {
+    const capability = this.issueCapability(input.userId, input.role, input.teacherId, randomUUID(), randomUUID());
+    try {
+      return await this.agentRuntime.listThreads({ capability, ...(input.limit ? { limit: input.limit } : {}), ...(input.traceId ? { traceId: input.traceId } : {}) });
+    } catch (error) {
+      throw this.toPublicError(error);
+    }
+  }
+
+  async getThread(input: { userId: string; role: UserRole; teacherId?: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail> {
+    const capability = this.issueCapability(input.userId, input.role, input.teacherId, input.threadId, randomUUID());
+    try {
+      return await this.agentRuntime.getThread({ capability, threadId: input.threadId, ...(input.traceId ? { traceId: input.traceId } : {}) });
+    } catch (error) {
+      throw this.toPublicError(error);
+    }
   }
 
   private issueCapability(userId: string, role: UserRole, teacherId: string | undefined, threadId: string, runId: string): string {

@@ -36,12 +36,13 @@ function setup() {
     recordPaymentInTransaction: vi.fn(async () => after),
     recordGiftInTransaction: vi.fn(async () => after),
   };
-  return { service: new AssistantActionsService(prisma as never, {} as never, ledger as never), tx, prisma, ledger, preview };
+  const periods = { assertWritableForDate: vi.fn(async () => undefined) };
+  return { service: new AssistantActionsService(prisma as never, {} as never, ledger as never, undefined, undefined, undefined, periods as never), tx, prisma, ledger, periods, preview };
 }
 
 describe('AssistantActionsService money Preview/Confirm', () => {
   it('stores a two-decimal L2 payment Preview and audit without writing a ledger entry', async () => {
-    const { service, tx, ledger } = setup();
+    const { service, tx, ledger, periods } = setup();
     const result = await service.createPaymentPreview({
       actorUserId: owner.id, runId: 'run-1', requestId: 'request-1', idempotencyKey: 'preview-key',
       accountId: 'account-1', amount: '10.00', channel: 'CASH', occurredAt: new Date('2026-10-17T01:00:00.000Z'),
@@ -59,7 +60,18 @@ describe('AssistantActionsService money Preview/Confirm', () => {
     }));
     expect(displayJson).not.toHaveProperty('beforeBalance.version');
     expect(ledger.projectBalance).toHaveBeenCalledOnce();
+    expect(periods.assertWritableForDate).toHaveBeenCalledWith(new Date('2026-10-17T01:00:00.000Z'));
     expect(tx.businessAuditEvent.create).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a money Preview in a closed business month before storing it', async () => {
+    const context=setup();
+    context.periods.assertWritableForDate.mockRejectedValueOnce(Object.assign(new Error('该业务月份已关账'),{status:409}));
+    await expect(context.service.createPaymentPreview({
+      actorUserId:owner.id,runId:'run-closed',requestId:'request-closed',idempotencyKey:'preview-closed',
+      accountId:'account-1',amount:'10.00',channel:'WECHAT',occurredAt:new Date('2026-09-20T00:00:00+08:00'),
+    })).rejects.toMatchObject({status:409});
+    expect(context.tx.actionPreview.create).not.toHaveBeenCalled();
   });
 
   it('replays the original preview after a same-command idempotency conflict', async () => {

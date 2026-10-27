@@ -1,5 +1,8 @@
 import {
   BadGatewayException,
+  ConflictException,
+  ForbiddenException,
+  HttpException,
   GatewayTimeoutException,
   Injectable,
   ServiceUnavailableException,
@@ -9,6 +12,7 @@ import {
   AssistantRunSchema,
   AssistantResumeRequestSchema,
   AssistantStartRequestSchema,
+  WorkspaceDocumentSchema,
   type AssistantResumeInput,
 } from '@piano/assistant-protocol';
 import { createSignedInternalRequestHeaders } from '@piano/assistant-protocol/internal-auth';
@@ -46,10 +50,22 @@ export type AgentRuntimeEventStream = {
   contentType: string;
 };
 
+const AgentThreadSummarySchema = z.object({
+  threadId: z.string().uuid(), title: z.string(), lastActivityAt: z.string().datetime(), latestStatus: z.enum(['queued', 'running', 'waiting_for_input', 'completed', 'failed']).nullable(),
+});
+const AgentThreadDetailSchema = AgentThreadSummarySchema.extend({
+  messages: z.array(z.object({ id: z.string().uuid(), role: z.enum(['user', 'assistant']), content: z.string(), createdAt: z.string().datetime() })),
+  workspace: WorkspaceDocumentSchema.nullable(),
+});
+export type AgentThreadSummary = z.infer<typeof AgentThreadSummarySchema>;
+export type AgentThreadDetail = z.infer<typeof AgentThreadDetailSchema>;
+
 export interface AgentRuntimeClient {
   start(input: AgentRuntimeStartInput): Promise<AgentRuntimeRun>;
   resume(input: AgentRuntimeResumeInput): Promise<AgentRuntimeRun>;
   openEvents(input: AgentRuntimeEventsInput): Promise<AgentRuntimeEventStream>;
+  listThreads(input: { capability: string; limit?: number; traceId?: string }): Promise<AgentThreadSummary[]>;
+  getThread(input: { capability: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail>;
 }
 export const AGENT_RUNTIME_CLIENT = Symbol('AGENT_RUNTIME_CLIENT');
 
@@ -166,6 +182,26 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
     };
   }
 
+  listThreads(input: { capability: string; limit?: number; traceId?: string }): Promise<AgentThreadSummary[]> {
+    const limit = input.limit ?? 12;
+    return this.getJson(`/internal/assistant/threads?limit=${limit}`, input.capability, z.array(AgentThreadSummarySchema), input.traceId);
+  }
+
+  getThread(input: { capability: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail> {
+    assertUuid(input.threadId);
+    return this.getJson(`/internal/assistant/threads/${encodeURIComponent(input.threadId)}`, input.capability, AgentThreadDetailSchema, input.traceId);
+  }
+
+  private async getJson<T>(path: string, capability: string, schema: z.ZodType<T>, traceId?: string): Promise<T> {
+    const url = `${this.#baseUrl}${path}`;
+    const response = await this.request(url, { method: 'GET', headers: this.headers(url, 'GET', capability, traceId, 'application/json') });
+    let payload: unknown;
+    try { payload = await response.json(); } catch { throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE); }
+    const parsed = schema.safeParse(payload);
+    if (!parsed.success) throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE);
+    return parsed.data;
+  }
+
   private async postJson(
     path: string,
     body: unknown,
@@ -227,9 +263,11 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
       const response = await this.#fetch(url, { ...init, signal: controller.signal });
       if (response.ok) return response;
       await response.body?.cancel();
+      if (response.status === 403) throw new ForbiddenException('当前账号无权访问该AI任务，请新建会话。');
+      if (response.status === 409) throw new ConflictException('AI任务状态已变化，请重新核对。');
       throw new ServiceUnavailableException(PUBLIC_UNAVAILABLE_MESSAGE);
     } catch (error) {
-      if (error instanceof ServiceUnavailableException || error instanceof BadGatewayException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       if (isAbortError(error)) throw new GatewayTimeoutException(PUBLIC_TIMEOUT_MESSAGE);

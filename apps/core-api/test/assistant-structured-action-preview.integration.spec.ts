@@ -6,6 +6,9 @@ import { PayrollService } from '../src/modules/payroll/payroll.service.js';
 import { PeriodsService } from '../src/modules/periods/periods.service.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 import { Prisma, UserRole } from '../src/generated/prisma/client.js';
+import { StudentsService } from '../src/modules/students/students.service.js';
+import { CoursesService } from '../src/modules/courses/courses.service.js';
+import { StudentCourseAccountsService } from '../src/modules/student-course-accounts/student-course-accounts.service.js';
 
 const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
 
@@ -15,11 +18,12 @@ if (hasDatabase) {
     const periods = new PeriodsService(prisma);
     const manual = new ManualTransactionsService(prisma, periods);
     const payroll = new PayrollService(prisma, periods);
-    const actions = new AssistantActionsService(prisma, {} as never, {} as never, undefined, manual, payroll, periods);
+    const actions = new AssistantActionsService(prisma, {} as never, {} as never, undefined, manual, payroll, periods, new StudentsService(prisma), new CoursesService(prisma), new StudentCourseAccountsService(prisma));
     const ownerId = randomUUID();
     const teacherUserId = randomUUID();
     const teacherId = randomUUID();
     const previewIds: string[] = [];
+    const studentIds: string[] = [];
     const periodStart = new Date('2099-07-01T00:00:00.000Z');
     const actor = { id: ownerId, username: 'structured-owner', role: UserRole.OWNER };
 
@@ -39,12 +43,25 @@ if (hasDatabase) {
       await prisma.closedPeriod.deleteMany({ where: { periodStart } });
       await prisma.payroll.deleteMany({ where: { teacherId } });
       await prisma.manualTransaction.deleteMany({ where: { createdById: ownerId } });
+      await prisma.student.deleteMany({ where: { id: { in: studentIds } } });
       await prisma.teacher.deleteMany({ where: { id: teacherId } });
       await prisma.user.deleteMany({ where: { id: { in: [ownerId, teacherUserId] } } });
       await prisma.$disconnect();
     });
 
+    it('creates a student with a normalized phone only after Preview confirmation', async () => {
+      const name = `结构化学生-${randomUUID()}`;
+      const preview = await actions.createStructuredActionPreview({ actorUserId: ownerId, runId: randomUUID(), requestId: randomUUID(), idempotencyKey: randomUUID(), actionType: 'student.create', command: { name, phone: '138 0013 8000' } });
+      previewIds.push(preview.previewId);
+      expect(await prisma.student.count({ where: { name } })).toBe(0);
+      const confirmation = await actions.confirmPreview(preview.previewId, actor, randomUUID());
+      const studentId = String(confirmation.receipt.studentId);
+      studentIds.push(studentId);
+      expect(await prisma.student.findUnique({ where: { id: studentId }, select: { name: true, phone: true } })).toEqual({ name, phone: '13800138000' });
+    });
+
     it('keeps business writes, Preview state, audit and receipt in the confirm transaction', async () => {
+      const initialPreviewCount = previewIds.length;
       const manualPreview = await actions.createStructuredActionPreview({
         actorUserId: ownerId, runId: randomUUID(), requestId: randomUUID(), idempotencyKey: randomUUID(),
         actionType: 'manual-transaction.create',
@@ -101,7 +118,7 @@ if (hasDatabase) {
       expect(reopenReceipt).toMatchObject({ status: 'EXECUTED', receipt: { period: '2099-07', reason: '结构化测试完成' } });
       expect(await prisma.closedPeriod.count({ where: { periodStart, reopenedAt: { not: null } } })).toBe(1);
 
-      const confirmedAudits = await prisma.businessAuditEvent.count({ where: { previewId: { in: previewIds }, eventType: 'assistant.preview.confirmed' } });
+      const confirmedAudits = await prisma.businessAuditEvent.count({ where: { previewId: { in: previewIds.slice(initialPreviewCount) }, eventType: 'assistant.preview.confirmed' } });
       expect(confirmedAudits).toBe(6);
     });
   });

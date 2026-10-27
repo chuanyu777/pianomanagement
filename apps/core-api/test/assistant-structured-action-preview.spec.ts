@@ -46,11 +46,22 @@ function serviceWith(overrides: Record<string, unknown> = {}) {
     previewAdjust: vi.fn().mockResolvedValue({
       payroll: { id: 'payroll-1', teacherName: '李老师', periodStart: new Date('2026-10-01T00:00:00.000Z'), status: 'UNPAID', netSalary: '3310.00', grossSalary: '3310.00', version: 3 },
       payrollVersion: 2,
+      beforeBaseSalary: '3000.00', afterBaseSalary: '3000.00', beforeCommissionRate: '10.0000', afterCommissionRate: '10.0000',
       beforeBonusAmount: '0.00', afterBonusAmount: '300.00', beforeDeductionAmount: '0.00', afterDeductionAmount: '0.00',
     }),
     generateInTransaction: vi.fn().mockResolvedValue({ id: 'payroll-1', netSalary: new Prisma.Decimal('3010.00') }),
     payInTransaction: vi.fn().mockResolvedValue({ id: 'payroll-1', status: 'PAID' }),
-    adjustInTransaction: vi.fn().mockResolvedValue({ id: 'payroll-1', status: 'UNPAID', bonusAmount: new Prisma.Decimal('300.00'), deductionAmount: new Prisma.Decimal('0.00'), grossSalary: new Prisma.Decimal('3310.00'), netSalary: new Prisma.Decimal('3310.00') }),
+    adjustInTransaction: vi.fn().mockResolvedValue({
+      id: 'payroll-1', status: 'UNPAID', baseSalary: new Prisma.Decimal('3000.00'), commissionRate: new Prisma.Decimal('10.0000'),
+      commissionAmount: new Prisma.Decimal('10.00'), bonusAmount: new Prisma.Decimal('300.00'), deductionAmount: new Prisma.Decimal('0.00'),
+      grossSalary: new Prisma.Decimal('3310.00'), netSalary: new Prisma.Decimal('3310.00'),
+    }),
+    previewCancelPayment: vi.fn().mockResolvedValue({ payroll:{ id:'payroll-1',teacherId:'teacher-1',teacherName:'李老师',periodStart:new Date('2026-10-01T00:00:00.000Z'),status:'PAID',netSalary:'3010.00',paidAt:new Date('2026-10-20T00:00:00.000Z'),paymentChannel:'WECHAT',version:3 },expectedVersion:3 }),
+    cancelPaymentInTransaction: vi.fn().mockResolvedValue({ id:'payroll-1',teacherId:'teacher-1',status:'UNPAID' }),
+  };
+  const ledger = {
+    previewReverseEntry: vi.fn().mockResolvedValue({ entryId:'entry-1',accountId:'account-1',accountVersion:3,kind:'PAYMENT',amount:'500.00',before:{accountId:'account-1',paidBalance:'500.00',giftBalance:'80.00',totalBalance:'580.00'},after:{accountId:'account-1',paidBalance:'0.00',giftBalance:'80.00',totalBalance:'80.00'} }),
+    reverseEntryInTransaction: vi.fn().mockResolvedValue({ accountId:'account-1',paidBalance:'0.00',giftBalance:'80.00',totalBalance:'80.00' }),
   };
   const periods = {
     assertWritableForDate: vi.fn().mockResolvedValue(undefined),
@@ -59,8 +70,8 @@ function serviceWith(overrides: Record<string, unknown> = {}) {
     reopenInTransaction: vi.fn().mockResolvedValue({ reopenedAt: new Date('2026-10-19T00:00:00.000Z') }),
   };
   return {
-    service: new AssistantActionsService(prisma as never, {} as never, {} as never, undefined, manual as never, payroll as never, periods as never),
-    prisma, tx, manual, payroll, periods,
+    service: new AssistantActionsService(prisma as never, {} as never, ledger as never, undefined, manual as never, payroll as never, periods as never),
+    prisma, tx, manual, payroll, periods, ledger,
   };
 }
 
@@ -89,6 +100,18 @@ describe('AssistantActionsService structured business previews', () => {
       command: { kind: 'INCOME', incomeCategory: 'BOOK_SALE', amount: 123.4, channel: 'CASH', occurredAt: '2026-10-19T02:00:00.000Z' },
     })).rejects.toThrow('amount 必须是非空字符串');
     expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('maps the fixed Chinese manual-transaction categories at the Core boundary', async () => {
+    const { service, tx } = serviceWith();
+    await service.createStructuredActionPreview({
+      actorUserId: owner.id, runId: 'run-1', requestId: 'request-1', idempotencyKey: 'idem-chinese-category',
+      actionType: 'manual-transaction.create',
+      command: { kind: '收入', category: '书籍销售', amount: '50.00', channel: 'WECHAT', occurredAt: '2026-10-19T02:00:00.000Z' },
+    });
+    expect(tx.actionPreview.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      normalizedCommandJson: expect.objectContaining({ kind:'INCOME',incomeCategory:'BOOK_SALE',amount:'50.00' }),
+    }) }));
   });
 
   it.each([
@@ -124,6 +147,83 @@ describe('AssistantActionsService structured business previews', () => {
     expect(tx.businessAuditEvent.create).toHaveBeenCalledTimes(1);
   });
 
+  it('previews optional base salary and commission changes with the recalculated salary breakdown', async () => {
+    const { service, tx, payroll } = serviceWith();
+    payroll.previewAdjust.mockResolvedValue({
+      payroll: {
+        id: 'payroll-1', teacherName: '李老师', periodStart: new Date('2026-10-01T00:00:00.000Z'), status: 'UNPAID',
+        baseSalary: '2500.00', commissionRate: '12.5000', commissionAmount: '125.00', grossSalary: '2725.00', netSalary: '2700.00',
+        bonusAmount: '100.00', bonusNote: '公开课奖励', deductionAmount: '25.00', deductionNote: '教材', version: 3,
+      },
+      payrollVersion: 2,
+      beforeBaseSalary: '3000.00', afterBaseSalary: '2500.00', beforeCommissionRate: '10.0000', afterCommissionRate: '12.5000',
+      beforeBonusAmount: '0.00', afterBonusAmount: '100.00', beforeDeductionAmount: '0.00', afterDeductionAmount: '25.00',
+    });
+    const result = await service.createStructuredActionPreview({
+      actorUserId: owner.id, runId: 'run-1', requestId: 'request-payroll-adjust', idempotencyKey: 'idem-payroll-adjust-new-fields',
+      actionType: 'payroll.adjust', command: {
+        payrollId: 'payroll-1', baseSalary: '2500.00', commissionRate: '12.5000',
+        bonusAmount: '100.00', bonusNote: '公开课奖励', deductionAmount: '25.00', deductionNote: '教材',
+      },
+    });
+
+    expect(payroll.previewAdjust).toHaveBeenCalledWith(expect.objectContaining({
+      payrollId: 'payroll-1', baseSalary: new Prisma.Decimal('2500.00'), commissionRate: new Prisma.Decimal('12.5000'),
+      bonusAmount: new Prisma.Decimal('100.00'), deductionAmount: new Prisma.Decimal('25.00'), actorId: owner.id,
+    }));
+    expect(tx.actionPreview.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      normalizedCommandJson: expect.objectContaining({
+        baseSalary: '2500.00', commissionRate: '12.5000', beforeBaseSalary: '3000.00', afterBaseSalary: '2500.00',
+        beforeCommissionRate: '10.0000', afterCommissionRate: '12.5000', commissionAmount: '125.00', grossSalary: '2725.00', netSalary: '2700.00',
+      }),
+      displayJson: expect.objectContaining({
+        beforeBaseSalary: '3000.00', afterBaseSalary: '2500.00', beforeCommissionRate: '10.0000', afterCommissionRate: '12.5000',
+        commissionAmount: '125.00', grossSalary: '2725.00', netSalary: '2700.00',
+      }),
+    }) }));
+    expect(result.display).toMatchObject({ beforeBaseSalary: '3000.00', afterBaseSalary: '2500.00', commissionAmount: '125.00', grossSalary: '2725.00', netSalary: '2700.00' });
+  });
+
+  it('rejects unknown payroll.adjust command fields before asking PayrollService', async () => {
+    const { service, payroll, prisma } = serviceWith();
+    await expect(service.createStructuredActionPreview({
+      actorUserId: owner.id, runId: 'run-1', requestId: 'request-unknown-payroll-field', idempotencyKey: 'idem-unknown-payroll-field',
+      actionType: 'payroll.adjust', command: { payrollId: 'payroll-1', commissionRate: '12.5000', arbitrary: 'ignored?' },
+    })).rejects.toThrow('不支持的参数：arbitrary');
+    expect(payroll.previewAdjust).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('confirms payroll.adjust with new Decimal fields and returns before and after salary facts', async () => {
+    const { service, prisma, tx, payroll } = serviceWith();
+    payroll.adjustInTransaction.mockResolvedValue({
+      id: 'payroll-1', status: 'UNPAID', baseSalary: new Prisma.Decimal('2500.00'), commissionRate: new Prisma.Decimal('12.5000'),
+      commissionAmount: new Prisma.Decimal('125.00'), bonusAmount: new Prisma.Decimal('100.00'), deductionAmount: new Prisma.Decimal('25.00'),
+      grossSalary: new Prisma.Decimal('2725.00'), netSalary: new Prisma.Decimal('2700.00'),
+    });
+    const preview = { ...createPreview('preview-payroll-fields', 'payroll.adjust'), normalizedCommandJson: {
+      payrollId: 'payroll-1', baseSalary: '2500.00', commissionRate: '12.5000', bonusAmount: '100.00', bonusNote: '公开课奖励', deductionAmount: '25.00', deductionNote: '教材',
+    }, displayJson: {
+      beforeBaseSalary: '3000.00', afterBaseSalary: '2500.00', beforeCommissionRate: '10.0000', afterCommissionRate: '12.5000',
+    }, resourceVersionsJson: { payrollId: 'payroll-1', payrollVersion: 2, status: 'UNPAID' } };
+    prisma.actionPreview.findUnique.mockResolvedValue({ actionType: 'payroll.adjust' });
+    tx.actionPreview.findUnique.mockResolvedValue(preview);
+
+    const result = await service.confirmPreview(preview.id, owner, 'confirm-payroll-fields');
+
+    expect(payroll.adjustInTransaction).toHaveBeenCalledWith(tx, 'payroll-1', expect.objectContaining({
+      baseSalary: new Prisma.Decimal('2500.00'), commissionRate: new Prisma.Decimal('12.5000'),
+      bonusAmount: new Prisma.Decimal('100.00'), deductionAmount: new Prisma.Decimal('25.00'), actorId: owner.id,
+    }), 2);
+    expect(result).toMatchObject({ receipt: {
+      beforeBaseSalary: '3000.00', afterBaseSalary: '2500.00', beforeCommissionRate: '10.0000', afterCommissionRate: '12.5000',
+      baseSalary: '2500.00', commissionRate: '12.5000', commissionAmount: '125.00', grossSalary: '2725.00', netSalary: '2700.00',
+    } });
+    expect(tx.businessAuditEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      detailJson: expect.objectContaining({ beforeBaseSalary: '3000.00', afterBaseSalary: '2500.00', commissionAmount: '125.00', netSalary: '2700.00' }),
+    }) }));
+  });
+
   it('executes manual transaction, preview status update, and confirmation audit in one transaction', async () => {
     const { service, prisma, tx, manual } = serviceWith();
     const preview = { ...createPreview('preview-1', 'manual-transaction.create'), normalizedCommandJson: {
@@ -137,5 +237,23 @@ describe('AssistantActionsService structured business previews', () => {
     expect(manual.createInTransaction).toHaveBeenCalledWith(tx, expect.objectContaining({ amount: expect.any(Prisma.Decimal) }));
     expect(tx.actionPreview.update).toHaveBeenCalledTimes(1);
     expect(tx.businessAuditEvent.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['payroll.cancel-payment', { payrollId:'payroll-1',reason:'支付信息有误' }],
+    ['ledger-entry.reversal', { entryId:'entry-1',accountVersion:3,occurredAt:'2026-10-21T03:00:00.000Z',reason:'重复登记' }],
+  ] as const)('creates and confirms %s through the domain transaction helper', async (actionType, command) => {
+    const { service,prisma,tx,payroll,ledger }=serviceWith();
+    await service.createStructuredActionPreview({actorUserId:owner.id,runId:'run-new',requestId:'request-new',idempotencyKey:`preview-${actionType}`,actionType,command});
+    if(actionType==='payroll.cancel-payment') expect(payroll.previewCancelPayment).toHaveBeenCalledWith('payroll-1');
+    else expect(ledger.previewReverseEntry).toHaveBeenCalledWith('entry-1');
+
+    const preview={...createPreview('preview-1',actionType),normalizedCommandJson:command,resourceVersionsJson:actionType==='payroll.cancel-payment'?{payrollVersion:3}:{accountVersion:3}};
+    prisma.actionPreview.findUnique.mockResolvedValue({actionType});
+    tx.actionPreview.findUnique.mockResolvedValue(preview);
+    const result=await service.confirmPreview('preview-1',owner,'confirm-new');
+    expect(result).toMatchObject({status:PreviewStatus.EXECUTED,receipt:{actionType,idempotencyKey:'confirm-new'}});
+    if(actionType==='payroll.cancel-payment') expect(payroll.cancelPaymentInTransaction).toHaveBeenCalledWith(tx,'payroll-1',expect.objectContaining({actorId:owner.id,expectedVersion:3,note:'支付信息有误'}));
+    else expect(ledger.reverseEntryInTransaction).toHaveBeenCalledWith(tx,expect.objectContaining({entryId:'entry-1',accountVersion:3,createdById:owner.id,commandId:'confirm-new',note:'重复登记'}));
   });
 });

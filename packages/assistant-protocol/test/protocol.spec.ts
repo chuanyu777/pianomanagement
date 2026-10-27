@@ -43,6 +43,21 @@ describe('assistant protocol', () => {
     ).toThrow();
   });
 
+  it('carries a typed result kind instead of inferring behavior from titles', () => {
+    expect(WorkspaceDocumentSchema.parse({
+      protocolVersion: '1.0',
+      resultKind: 'preview',
+      title: '交费预览',
+      blocks: [{ type: 'summary', title: '交费预览', text: '尚未登记' }],
+    })).toMatchObject({ resultKind: 'preview' });
+    expect(() => WorkspaceDocumentSchema.parse({
+      protocolVersion: '1.0',
+      resultKind: 'dashboard',
+      title: '错误类型',
+      blocks: [],
+    })).toThrow();
+  });
+
   it('encodes a validated SSE event', () => {
     const event = AssistantEventSchema.parse({
       type: 'run.completed',

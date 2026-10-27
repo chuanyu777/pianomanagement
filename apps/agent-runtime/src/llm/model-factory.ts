@@ -28,6 +28,7 @@ export function createChatModel(
     maxTokens: config.AI_MAX_OUTPUT_TOKENS,
     timeout: config.AI_REQUEST_TIMEOUT_MS,
     maxRetries: 0,
+    ...(config.AI_MODEL === 'deepseek-chat' ? {temperature:0} : {}),
     configuration: {
       baseURL: DEEPSEEK_BASE_URL,
       ...(options.fetch ? { fetch: options.fetch } : {}),

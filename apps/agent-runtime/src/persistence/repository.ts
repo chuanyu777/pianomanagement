@@ -5,6 +5,7 @@ import {
   AssistantRunSchema,
   type AssistantEvent,
   type AssistantRun,
+  type WorkspaceDocument,
 } from '@piano/assistant-protocol';
 
 const schema = 'agent_runtime';
@@ -21,12 +22,25 @@ export interface PersistedAssistantEvent {
   createdAt: string;
 }
 
+export type AssistantThreadSummary = {
+  threadId: string;
+  title: string;
+  lastActivityAt: string;
+  latestStatus: AssistantRun['status'] | null;
+};
+
+export type AssistantThreadDetail = AssistantThreadSummary & {
+  messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>;
+  workspace: WorkspaceDocument | null;
+};
+
 export interface CreateRunInput {
   runId: string;
   threadId: string;
   userMessage: string;
   clientRequestId?: string | undefined;
   capability?: string | undefined;
+  actorKey?: string;
 }
 
 export interface UpdateRunInput {
@@ -47,6 +61,9 @@ export interface AppendMessageInput {
 }
 
 export interface AgentRuntimeRepository {
+  getThreadOwner(threadId: string): Promise<string | null>;
+  listThreads?(actorKey: string, limit: number): Promise<AssistantThreadSummary[]>;
+  getThread?(threadId: string, actorKey: string): Promise<AssistantThreadDetail | null>;
   createRun(input: CreateRunInput): Promise<{ run: AgentRunRecord; created: boolean }>;
   findRun(runId: string): Promise<AgentRunRecord | null>;
   claimRunForResume(runId: string): Promise<AgentRunRecord | null>;
@@ -191,16 +208,73 @@ export function createAgentRuntimeRepository(input: {
   const pool = new Pool({ connectionString: input.connectionString });
 
   return {
+    async getThreadOwner(threadId) {
+      const result = await pool.query<{ user_id: string | null }>(`SELECT user_id FROM ${schema}.agent_threads WHERE id = $1`, [threadId]);
+      return result.rows[0]?.user_id ?? null;
+    },
+    async listThreads(actorKey, limit) {
+      const result = await pool.query<{
+        id: string; title: string | null; last_activity_at: Date; latest_status: AssistantRun['status'] | null; latest_message: string | null;
+      }>(
+        `SELECT thread.id, thread.title, thread.last_activity_at,
+                latest_run.status AS latest_status,
+                latest_user.content AS latest_message
+           FROM ${schema}.agent_threads AS thread
+           LEFT JOIN LATERAL (
+             SELECT status FROM ${schema}.agent_runs
+              WHERE thread_id = thread.id ORDER BY created_at DESC, id DESC LIMIT 1
+           ) AS latest_run ON true
+           LEFT JOIN LATERAL (
+             SELECT content FROM ${schema}.agent_messages
+              WHERE thread_id = thread.id AND role = 'user' ORDER BY created_at DESC, id DESC LIMIT 1
+           ) AS latest_user ON true
+          WHERE thread.user_id = $1 AND thread.status = 'active'
+          ORDER BY thread.last_activity_at DESC, thread.id DESC
+          LIMIT $2`,
+        [actorKey, limit],
+      );
+      return result.rows.map((row) => ({
+        threadId: row.id,
+        title: row.title?.trim() || row.latest_message?.slice(0, 60) || '新对话',
+        lastActivityAt: row.last_activity_at.toISOString(),
+        latestStatus: row.latest_status,
+      }));
+    },
+    async getThread(threadId, actorKey) {
+      const thread = await pool.query<{ id: string; title: string | null; last_activity_at: Date }>(
+        `SELECT id, title, last_activity_at FROM ${schema}.agent_threads WHERE id = $1 AND user_id = $2 AND status = 'active'`,
+        [threadId, actorKey],
+      );
+      const row = thread.rows[0];
+      if (!row) return null;
+      const [latestRun, messages, latestWorkspace] = await Promise.all([
+        pool.query<{ status: AssistantRun['status'] }>(`SELECT status FROM ${schema}.agent_runs WHERE thread_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [threadId]),
+        pool.query<{ id: string; role: 'user' | 'assistant'; content: string; created_at: Date }>(`SELECT id, role, content, created_at FROM ${schema}.agent_messages WHERE thread_id = $1 ORDER BY created_at ASC, id ASC LIMIT 500`, [threadId]),
+        pool.query<{ payload: unknown }>(`SELECT event.payload FROM ${schema}.agent_run_events AS event JOIN ${schema}.agent_runs AS run ON run.id = event.run_id WHERE run.thread_id = $1 AND event.event_type = 'workspace.replace' ORDER BY event.event_id DESC LIMIT 1`, [threadId]),
+      ]);
+      const latestUser = [...messages.rows].reverse().find((message) => message.role === 'user');
+      const workspaceEvent = AssistantEventSchema.safeParse(latestWorkspace.rows[0]?.payload);
+      return {
+        threadId: row.id,
+        title: row.title?.trim() || latestUser?.content.slice(0, 60) || '新对话',
+        lastActivityAt: row.last_activity_at.toISOString(),
+        latestStatus: latestRun.rows[0]?.status ?? null,
+        messages: messages.rows.map((message) => ({ id: message.id, role: message.role, content: message.content, createdAt: message.created_at.toISOString() })),
+        workspace: workspaceEvent.success && workspaceEvent.data.type === 'workspace.replace' ? workspaceEvent.data.document : null,
+      };
+    },
     async createRun(runInput) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        await client.query(
-          `INSERT INTO ${schema}.agent_threads (id, last_activity_at, updated_at)
-           VALUES ($1, now(), now())
-           ON CONFLICT (id) DO UPDATE SET last_activity_at = now(), updated_at = now()`,
-          [runInput.threadId],
+        const bound = await client.query(
+          `INSERT INTO ${schema}.agent_threads (id, user_id, last_activity_at, updated_at)
+           VALUES ($1, $2, now(), now())
+           ON CONFLICT (id) DO UPDATE SET last_activity_at = now(), updated_at = now()
+           WHERE agent_threads.user_id IS NOT DISTINCT FROM EXCLUDED.user_id`,
+          [runInput.threadId, runInput.actorKey ?? null],
         );
+        if (bound.rowCount !== 1) throw new Error('任务身份或作用域无效');
         const inserted = await client.query<RunRow>(
           `INSERT INTO ${schema}.agent_runs
              (id, thread_id, client_request_id, status, user_message, started_at, capability_token)

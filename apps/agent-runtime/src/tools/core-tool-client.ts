@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { createSignedInternalRequestHeaders } from '@piano/assistant-protocol/internal-auth';
 import { DashboardSummarySchema, type DashboardSummary } from './dashboard-summary.js';
+import { CoreDialogueError } from './dialogue-tools.js';
 
 const SingleLessonPreviewRequestSchema = z
   .object({
@@ -17,6 +18,7 @@ export type SingleLessonPreviewRequest = z.infer<typeof SingleLessonPreviewReque
 
 const SingleLessonPreviewResponseSchema = z
   .object({
+    riskLevel: z.enum(['L1', 'L2']).optional(),
     previewId: z.uuid(),
     actionType: z.literal('lesson.schedule.single'),
     command: z
@@ -51,6 +53,7 @@ const BatchLessonPreviewRequestSchema = z.object({
 }).strict();
 
 const BatchLessonPreviewResponseSchema = z.object({
+  riskLevel: z.enum(['L1', 'L2']).optional(),
   previewId: z.uuid(),
   actionType: z.literal('lesson.schedule.weekly-batch'),
   command: z.object({
@@ -81,6 +84,7 @@ const FinalRefundPreviewRequestSchema = z.object({
 }).strict();
 
 const FinalRefundPreviewResponseSchema = z.object({
+  riskLevel: z.enum(['L1', 'L2']).optional(),
   previewId: z.uuid(),
   actionType: z.literal('student.final-refund'),
   command: z.object({
@@ -160,6 +164,7 @@ const MoneyPreviewDisplaySchema = z
 
 const PaymentPreviewResponseSchema = z
   .object({
+    riskLevel: z.enum(['L1', 'L2']).optional(),
     previewId: z.uuid(),
     actionType: z.literal('course-account.payment'),
     command: z
@@ -179,6 +184,7 @@ const PaymentPreviewResponseSchema = z
 
 const GiftPreviewResponseSchema = z
   .object({
+    riskLevel: z.enum(['L1', 'L2']).optional(),
     previewId: z.uuid(),
     actionType: z.literal('course-account.gift'),
     command: z
@@ -255,6 +261,7 @@ const StructuredActionPreviewRequestSchema = z.object({
 }).strict();
 
 const StructuredActionPreviewResponseSchema = z.object({
+  riskLevel: z.enum(['L1', 'L2']).optional(),
   previewId: z.uuid(), actionType: z.string().trim().min(1), command: z.record(z.string(), z.unknown()),
   display: z.object({ title: z.string().min(1).optional(), summary: z.string().min(1).optional() }).passthrough(),
   resourceVersions: z.record(z.string(), z.unknown()).optional(),
@@ -287,7 +294,7 @@ export class CoreToolClient {
       },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return SystemStatusSchema.parse(await response.json());
   }
 
@@ -307,17 +314,19 @@ export class CoreToolClient {
       },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return DashboardSummarySchema.parse(await response.json());
   }
 
   async getCourseAccountCandidates(
     capabilityToken: string,
-    input: { studentName: string; courseName: string },
+    input: { studentName: string; courseName?: string; match?: 'search' },
   ): Promise<CourseAccountCandidates> {
     const studentName = z.string().trim().min(1).max(100).parse(input.studentName);
-    const courseName = z.string().trim().min(1).max(100).parse(input.courseName);
-    const query = new URLSearchParams({ studentName, courseName });
+    const courseName = input.courseName === undefined ? undefined : z.string().trim().min(1).max(100).parse(input.courseName);
+    const query = new URLSearchParams({ studentName });
+    if (courseName) query.set('courseName', courseName);
+    if (input.match) query.set('match', input.match);
     const url = `${this.baseUrl}/tools/course-account-candidates?${query.toString()}`;
     const target = new URL(url);
     const authorization = `Bearer ${capabilityToken}`;
@@ -333,16 +342,17 @@ export class CoreToolClient {
       },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return CourseAccountCandidatesSchema.parse(await response.json());
   }
 
   async getTeacherCandidates(
     capabilityToken: string,
-    input: { teacherName: string },
+    input: { teacherName: string; match?: 'search' },
   ): Promise<TeacherCandidates> {
     const teacherName = z.string().trim().min(1).max(100).parse(input.teacherName);
     const query = new URLSearchParams({ teacherName });
+    if (input.match) query.set('match', input.match);
     const url = `${this.baseUrl}/tools/teacher-candidates?${query.toString()}`;
     const target = new URL(url);
     const authorization = `Bearer ${capabilityToken}`;
@@ -358,16 +368,17 @@ export class CoreToolClient {
       },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return TeacherCandidatesSchema.parse(await response.json());
   }
 
   async getStudentCandidates(
     capabilityToken: string,
-    input: { studentName: string },
+    input: { studentName: string; match?: 'search' },
   ): Promise<StudentCandidates> {
     const studentName = z.string().trim().min(1).max(100).parse(input.studentName);
     const query = new URLSearchParams({ studentName });
+    if (input.match) query.set('match', input.match);
     const url = `${this.baseUrl}/tools/student-candidates?${query.toString()}`;
     const target = new URL(url);
     const authorization = `Bearer ${capabilityToken}`;
@@ -383,16 +394,17 @@ export class CoreToolClient {
       },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return StudentCandidatesSchema.parse(await response.json());
   }
 
   async getLessonCandidates(
     capabilityToken: string,
-    input: { studentName: string; date?: string },
+    input: { studentName: string; date?: string; match?: 'search' },
   ): Promise<LessonCandidates> {
     const studentName = z.string().trim().min(1).max(100).parse(input.studentName);
     const query = new URLSearchParams({ studentName });
+    if (input.match) query.set('match', input.match);
     if (input.date) query.set('date', z.string().regex(/^\d{4}-\d{2}-\d{2}$/).parse(input.date));
     const url = `${this.baseUrl}/tools/lesson-candidates?${query.toString()}`;
     const target = new URL(url);
@@ -404,7 +416,7 @@ export class CoreToolClient {
       },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return LessonCandidatesSchema.parse(await response.json());
   }
 
@@ -429,7 +441,7 @@ export class CoreToolClient {
       headers: { authorization, ...createSignedInternalRequestHeaders({ secret: this.serviceSecret, method: 'GET', path: `${target.pathname}${target.search}`, securityHeaders: { authorization } }) },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return PayrollCandidatesSchema.parse(await response.json());
   }
 
@@ -527,7 +539,7 @@ export class CoreToolClient {
       body: JSON.stringify(request),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Core Tool API 调用失败：${response.status}`);
+    if (!response.ok) throw await CoreDialogueError.fromResponse(response);
     return responseSchema.parse(await response.json());
   }
 }

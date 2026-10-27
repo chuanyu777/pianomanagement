@@ -13,6 +13,15 @@ export const MoneyStringSchema = z
 
 export const RiskLevelSchema = z.enum(['L0', 'L1', 'L2']);
 export type RiskLevel = z.infer<typeof RiskLevelSchema>;
+export const WorkspaceResultKindSchema = z.enum([
+  'query',
+  'clarification',
+  'selection',
+  'preview',
+  'receipt',
+  'error',
+]);
+export type WorkspaceResultKind = z.infer<typeof WorkspaceResultKindSchema>;
 
 export const SourceReferenceSchema = z.object({
   type: z.enum(['student', 'courseAccount', 'lesson', 'ledgerEntry', 'report']),
@@ -120,9 +129,11 @@ export const WorkspaceBlockSchema = z.discriminatedUnion('type', [
 
 export const WorkspaceDocumentSchema = z.object({
   protocolVersion: z.literal(protocolVersion),
+  resultKind: WorkspaceResultKindSchema.optional(),
   title: z.string().min(1),
   blocks: z.array(WorkspaceBlockSchema),
   sources: z.array(SourceReferenceSchema).default([]),
+  taskVersion: z.number().int().nonnegative().optional(),
 });
 export type WorkspaceDocument = z.infer<typeof WorkspaceDocumentSchema>;
 

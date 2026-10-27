@@ -9,6 +9,8 @@ RUN npm install --include=dev \
       *) echo "Unsupported Docker architecture for Vite/Rolldown: $(node -p 'process.arch')" >&2; exit 1 ;; \
     esac \
     && npm install --no-save --package-lock=false "@rolldown/binding-linux-${rolldown_binding}@1.2.14" \
+    && npm run build -w @piano/assistant-protocol \
+    && npm run build -w @piano/generated-core-client \
     && npm run build -w @piano/web
 
 FROM nginx:1.27-alpine

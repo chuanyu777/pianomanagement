@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createAssistantIds,
+  createAssistantPreview,
   confirmAssistantPreview,
+  getAssistantPreview,
+  UnknownConfirmationError,
   parseAssistantRun,
   parseAssistantSseFrame,
   startAssistantRun,
@@ -13,6 +16,13 @@ const threadId = '9eb3b8c3-b730-4e49-baa0-0b4de36b9345';
 const previewId = '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d';
 
 describe('assistant client', () => {
+  it.each(['student.create', 'lesson.schedule'])('reads the authoritative version when %s preview creation omits schemaVersion', async (actionType) => {
+    const draft = { previewId, actionType, riskLevel: 'L2', expiresAt: '2099-10-21T02:00:00.000Z', display: { title: '确认操作' } };
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(init?.method === 'POST' ? draft : { ...draft, schemaVersion: `${actionType}.v1`, status: 'PENDING', receipt: null }), { status: 200 }));
+    const result = await createAssistantPreview({ token: 'jwt', path: 'structured-action', body: {}, fetchImpl: fetchMock });
+    expect(result.schemaVersion).toBe(`${actionType}.v1`);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it('creates secure UUIDs for the thread and idempotent client request', () => {
     const ids = createAssistantIds();
     expect(ids.threadId).toMatch(/^[0-9a-f-]{36}$/i);
@@ -29,7 +39,7 @@ describe('assistant client', () => {
       .toEqual({ type: 'clarification.requested', question: '请确认课程' });
   });
 
-  it('parses supported workspace blocks and ignores unknown block types', () => {
+  it('rejects a workspace containing an unknown block type', () => {
     const document = {
       protocolVersion: '1.0',
       title: '今日经营概览',
@@ -41,11 +51,7 @@ describe('assistant client', () => {
       ],
       sources: [],
     };
-    expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({ type: 'workspace.replace', document })}`))
-      .toEqual({
-        type: 'workspace.replace',
-        document: { protocolVersion: '1.0', title: document.title, blocks: document.blocks.slice(0, 3) },
-      });
+    expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({ type: 'workspace.replace', document })}`)).toBeNull();
   });
 
   it('parses a generic receipt workspace block without coupling to a business action type', () => {
@@ -58,10 +64,10 @@ describe('assistant client', () => {
     };
     expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({
       type: 'workspace.replace',
-      document: { protocolVersion: '1.0', title: '确认结果', blocks: [receipt] },
+      document: { protocolVersion: '1.0', title: '确认结果', blocks: [receipt], sources: [] },
     })}`)).toEqual({
       type: 'workspace.replace',
-      document: { protocolVersion: '1.0', title: '确认结果', blocks: [receipt] },
+      document: { protocolVersion: '1.0', title: '确认结果', blocks: [receipt], sources: [] },
     });
   });
 
@@ -69,10 +75,28 @@ describe('assistant client', () => {
     const table = { type: 'data-table', columns: [{ key: 'time', label: '时间' }, { key: 'student', label: '学生' }], rows: [{ time: '09:00', student: '小明' }] };
     expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({
       type: 'workspace.replace', document: { protocolVersion: '1.0', title: '今日排课', blocks: [table] },
-    })}`)).toEqual({ type: 'workspace.replace', document: { protocolVersion: '1.0', title: '今日排课', blocks: [table] } });
+    })}`)).toEqual({ type: 'workspace.replace', document: { protocolVersion: '1.0', title: '今日排课', blocks: [table], sources: [] } });
     expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({
       type: 'workspace.replace', document: { protocolVersion: '1.0', title: '今日排课', blocks: [{ ...table, rows: [{ time: { unsafe: true } }] }] },
     })}`)).toBeNull();
+  });
+
+  it('accepts the shared entity, calendar, ledger, recovery, and source blocks', () => {
+    const document = {
+      protocolVersion: '1.0',
+      title: '共享工作区协议',
+      taskVersion: 12,
+      blocks: [
+        { type: 'entity-picker', title: '学生', candidates: [{ id: 'student-1', label: '小明' }] },
+        { type: 'calendar', rangeStart: '2026-10-19T00:00:00.000Z', rangeEnd: '2026-10-20T00:00:00.000Z', events: [{ id: 'lesson-1', title: '主课', start: '2026-10-19T09:00:00.000Z', end: '2026-10-19T10:00:00.000Z' }] },
+        { type: 'ledger-detail', accountId: 'account-1', entries: [{ id: 'ledger-1', occurredAt: '2026-10-19T02:00:00.000Z', description: '交费', paidDelta: '200.00', giftDelta: '0.00' }] },
+        { type: 'error-recovery', code: 'PREVIEW_STALE', message: '预览已失效', actions: ['refresh', 'repreview'] },
+      ],
+      sources: [{ type: 'student', id: 'student-1', label: '学生：小明' }],
+    };
+    expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({ type: 'workspace.replace', document })}`)).toEqual({
+      type: 'workspace.replace', document,
+    });
   });
 
   it('rejects malformed workspace envelopes and supported blocks', () => {
@@ -146,11 +170,17 @@ describe('assistant client', () => {
   });
 
   it('confirms with the logged-in JWT and preserves arbitrary Core receipt fields', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      previewId,
-      status: 'EXECUTED',
-      receipt: { actionType: 'course-account.payment', paymentId: 'payment-001', amount: '120.00', details: { channel: 'WECHAT' } },
-    }), { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === `/api/assistant/previews/${previewId}`) return new Response(JSON.stringify({
+        previewId, actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', riskLevel: 'L2', status: 'PENDING', expiresAt: '2099-10-21T02:00:00.000Z', receipt: null,
+      }), { status: 200 });
+      if (init?.method === 'POST') return new Response(JSON.stringify({
+        previewId,
+        status: 'EXECUTED',
+        receipt: { actionType: 'course-account.payment', paymentId: 'payment-001', amount: '120.00', details: { channel: 'WECHAT' } },
+      }), { status: 200 });
+      return new Response('{}', { status: 404 });
+    });
     const result = await confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl: fetchMock });
 
     expect(result.receipt).toEqual({ actionType: 'course-account.payment', paymentId: 'payment-001', amount: '120.00', details: { channel: 'WECHAT' } });
@@ -161,13 +191,103 @@ describe('assistant client', () => {
   });
 
   it('turns Core conflict and malformed confirmation responses into safe UI errors', async () => {
+    const pending = JSON.stringify({ previewId, actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', riskLevel: 'L2', status: 'PENDING', expiresAt: '2099-10-21T02:00:00.000Z', receipt: null });
     await expect(confirmAssistantPreview({
       token: 'jwt', previewId, idempotencyKey: runId,
-      fetchImpl: vi.fn(async () => new Response(null, { status: 409 })),
+      fetchImpl: vi.fn(async (input: RequestInfo | URL) => new Response(String(input) === `/api/assistant/previews/${previewId}` ? pending : null, { status: String(input) === `/api/assistant/previews/${previewId}` ? 200 : 409 })),
     })).rejects.toThrow('预览已失效或已被其他请求确认');
     await expect(confirmAssistantPreview({
       token: 'jwt', previewId, idempotencyKey: runId,
-      fetchImpl: vi.fn(async () => new Response(JSON.stringify({ previewId, status: 'EXECUTED', receipt: [] }), { status: 200 })),
+      fetchImpl: vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === `/api/assistant/previews/${previewId}`) return new Response(pending, { status: 200 });
+        if (init?.method === 'POST') return new Response(JSON.stringify({ previewId, status: 'EXECUTED', receipt: [] }), { status: 200 });
+        return new Response(pending, { status: 200 });
+      }),
     })).rejects.toThrow('确认响应格式无效');
+  });
+
+  it('reads the current preview with JWT and rejects a response for another preview', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      previewId: '1f1d4de6-36cb-4ec2-904d-c522927d8d0c',
+      actionType: 'course-account.payment',
+      schemaVersion: 'course-account.payment.v1',
+      riskLevel: 'L2',
+      status: 'PENDING',
+      expiresAt: '2099-10-21T02:00:00.000Z',
+      receipt: null,
+    }), { status: 200 }));
+
+    await expect(getAssistantPreview({ token: 'jwt', previewId, fetchImpl: fetchMock }))
+      .rejects.toThrow('预览响应格式无效');
+    expect(fetchMock).toHaveBeenCalledWith(`/api/assistant/previews/${previewId}`, expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer jwt' }),
+    }));
+  });
+
+  it('checks Core after an unknown confirmation result and returns the real executed receipt', async () => {
+    let previewReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === `/api/assistant/previews/${previewId}`) {
+        previewReads += 1;
+        return new Response(JSON.stringify({
+          previewId,
+          actionType: 'course-account.payment',
+          schemaVersion: 'course-account.payment.v1',
+          riskLevel: 'L2',
+          status: previewReads === 1 ? 'PENDING' : 'EXECUTED',
+          expiresAt: '2099-10-21T02:00:00.000Z',
+          receipt: { paymentId: 'payment-after-timeout', amount: '120.00' },
+        }), { status: 200 });
+      }
+      if (init?.method === 'POST') throw new TypeError('network disconnected');
+      return new Response('{}', { status: 404 });
+    });
+
+    const result = await confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl: fetchMock });
+
+    expect(result).toEqual({
+      previewId,
+      status: 'EXECUTED',
+      receipt: { paymentId: 'payment-after-timeout', amount: '120.00' },
+    });
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      `/api/assistant/previews/${previewId}`,
+      `/api/assistant/previews/${previewId}/confirm`,
+      `/api/assistant/previews/${previewId}`,
+    ]);
+  });
+
+  it('throws a typed unknown confirmation error when recovery cannot prove execution', async () => {
+    const pending = JSON.stringify({ previewId, actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', riskLevel: 'L2', status: 'PENDING', expiresAt: '2099-10-21T02:00:00.000Z', receipt: null });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === `/api/assistant/previews/${previewId}`) return new Response(pending, { status: 200 });
+      if (init?.method === 'POST') return new Response(null, { status: 503 });
+      return new Response('{}', { status: 404 });
+    });
+
+    const result = confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl: fetchMock });
+
+    await expect(result).rejects.toBeInstanceOf(UnknownConfirmationError);
+    await expect(result).rejects.toThrow('确认请求结果未知');
+  });
+
+  it('keeps the typed unknown error when the recovery GET is unavailable', async () => {
+    let reads = 0;
+    let confirmations = 0;
+    const pending = { previewId, actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', riskLevel: 'L2', status: 'PENDING', expiresAt: '2099-10-21T02:00:00.000Z', receipt: null };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        confirmations++;
+        throw new TypeError('Failed to fetch');
+      }
+      reads++;
+      return reads === 1 ? new Response(JSON.stringify(pending), { status: 200 }) : new Response(null, { status: 503 });
+    });
+    const result = confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl: fetchMock });
+    await expect(result).rejects.toBeInstanceOf(UnknownConfirmationError);
+    await expect(result).rejects.toThrow('无法核对 Core 当前状态');
+    expect(reads).toBe(2);
+    expect(confirmations).toBe(1);
   });
 });

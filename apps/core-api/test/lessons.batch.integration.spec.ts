@@ -73,6 +73,11 @@ if (hasDatabase) {
         ['2026-11-16T01:00:00.000Z', '2026-11-16T01:45:00.000Z'],
       ]);
 
+      const week = { from: new Date('2026-11-01T16:00:00Z'), to: new Date('2026-11-08T16:00:00Z') };
+      const teacherActor = { id: teacherUser.id, username: teacherUser.username, role: UserRole.TEACHER, teacherId: teacher.id };
+      expect((await service.listForActor(teacherActor, week)).map((lesson) => lesson.id)).toEqual([created[0]!.id]);
+      expect(await service.listForActor({ ...teacherActor, teacherId: randomUUID() }, week)).toEqual([]);
+
       const beforeConflict = await prisma.lesson.count({ where: { teacherId: teacher.id } });
       const conflictingLesson = await prisma.lesson.create({
         data: {

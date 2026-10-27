@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 describe('StudentCourseAccountsService', () => {
   it('copies the course default price when creating an account and increments version on later price changes', async () => {
-    const findCourse = vi.fn(async () => ({ defaultUnitPrice: new Prisma.Decimal('180.00') }));
+    const updatedAt = new Date('2026-10-16T00:00:00.000Z');
+    const findCourse = vi.fn(async () => ({ defaultUnitPrice: new Prisma.Decimal('180.00'), updatedAt }));
+    const findStudent = vi.fn(async () => ({ updatedAt }));
     const createAccount = vi.fn(async () => ({
       id: 'cbe8c144-6f2e-4cea-9548-ee3931084e03',
       studentId: '73d3ad58-f329-4e14-aef4-d794470f69fd',
@@ -13,17 +15,19 @@ describe('StudentCourseAccountsService', () => {
       version: 0,
       course: { name: '主课', defaultDurationMinutes: 60 },
     }));
-    const updateAccount = vi.fn(async () => ({
+    const findAccount = vi.fn().mockResolvedValueOnce({ version: 0 }).mockResolvedValue({
       id: 'cbe8c144-6f2e-4cea-9548-ee3931084e03',
       studentId: '73d3ad58-f329-4e14-aef4-d794470f69fd',
       courseId: '6f902d86-79dd-4d3d-a86b-55e111c3d912',
-      currentUnitPrice: new Prisma.Decimal('200.00'),
-      version: 1,
+      currentUnitPrice: new Prisma.Decimal('200.00'), version: 1,
       course: { name: '主课', defaultDurationMinutes: 60 },
-    }));
+    });
+    const updateMany = vi.fn(async () => ({ count: 1 }));
     const transaction = vi.fn(async (callback) => callback({
+      $queryRaw: vi.fn(async () => []),
+      student: { findUnique: findStudent },
       course: { findUnique: findCourse },
-      studentCourseAccount: { create: createAccount, update: updateAccount },
+      studentCourseAccount: { create: createAccount, findUnique: findAccount, updateMany },
     }));
     const service = new StudentCourseAccountsService({ $transaction: transaction } as never);
 
@@ -32,10 +36,10 @@ describe('StudentCourseAccountsService', () => {
     });
     const updated = await service.updatePrice(created.id, { currentUnitPrice: new Prisma.Decimal('200.00') });
 
-    expect(findCourse).toHaveBeenCalledWith({
+    expect(findCourse).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: '6f902d86-79dd-4d3d-a86b-55e111c3d912' },
-      select: { defaultUnitPrice: true },
-    });
+      select: expect.objectContaining({ defaultUnitPrice: true, updatedAt: true }),
+    }));
     expect(createAccount).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         studentId: '73d3ad58-f329-4e14-aef4-d794470f69fd',
@@ -43,7 +47,8 @@ describe('StudentCourseAccountsService', () => {
         currentUnitPrice: new Prisma.Decimal('180.00'),
       }),
     }));
-    expect(updateAccount).toHaveBeenCalledWith(expect.objectContaining({
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: created.id, version: 0 },
       data: { currentUnitPrice: new Prisma.Decimal('200.00'), version: { increment: 1 } },
     }));
     expect(created.currentUnitPrice).toBe('180.00');

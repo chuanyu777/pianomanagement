@@ -13,6 +13,9 @@ const ResumeSchema = z.object({ threadId: UUID, approved: z.boolean() }).strict(
 class StartBody { @ApiProperty({ type: String, maxLength: 4000 }) message!: string; @ApiProperty({ type: String, required: false, format: 'uuid' }) threadId?: string; @ApiProperty({ type: String, required: false }) clientRequestId?: string; }
 class ResumeBody { @ApiProperty({ type: String, format: 'uuid' }) threadId!: string; @ApiProperty({ type: Boolean }) approved!: boolean; }
 class RunResponse { @ApiProperty({ type: String, format: 'uuid' }) runId!: string; @ApiProperty({ type: String, format: 'uuid' }) threadId!: string; @ApiProperty({ type: String, enum: ['queued', 'running', 'waiting_for_input', 'completed', 'failed'] }) status!: string; }
+class TaskSummaryResponse { @ApiProperty({ type: String, format: 'uuid' }) threadId!: string; @ApiProperty({ type: String }) title!: string; @ApiProperty({ type: String, format: 'date-time' }) lastActivityAt!: string; @ApiProperty({ type: String, nullable: true }) latestStatus!: string | null; }
+class TaskMessageResponse { @ApiProperty({ type: String, format: 'uuid' }) id!: string; @ApiProperty({ enum: ['user', 'assistant'] }) role!: string; @ApiProperty({ type: String }) content!: string; @ApiProperty({ type: String, format: 'date-time' }) createdAt!: string; }
+class TaskDetailResponse extends TaskSummaryResponse { @ApiProperty({ type: TaskMessageResponse, isArray: true }) messages!: TaskMessageResponse[]; @ApiProperty({ type: Object, nullable: true }) workspace!: Record<string, unknown> | null; }
 function actor(request: AuthenticatedRequest): NonNullable<AuthenticatedRequest['actor']> {
   if (!request.actor) throw new BadRequestException('登录状态无效或已过期');
   return request.actor;
@@ -22,6 +25,17 @@ type SseResponse = { status(code: number): SseResponse; setHeader(name: string, 
 @ApiTags('Assistant gateway') @ApiBearerAuth() @UseGuards(JwtAuthGuard, RolesGuard) @Roles(UserRole.OWNER, UserRole.TEACHER) @Controller('assistant')
 export class AssistantGatewayController {
   constructor(private readonly gateway: AssistantGatewayService) {}
+  @Get('tasks') @ApiOkResponse({ type: TaskSummaryResponse, isArray: true })
+  listTasks(@Req() request: AuthenticatedRequest) {
+    const currentActor = actor(request);
+    return this.gateway.listThreads({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}) });
+  }
+  @Get('tasks/:threadId') @ApiOkResponse({ type: TaskDetailResponse })
+  getTask(@Param('threadId') threadId: string, @Req() request: AuthenticatedRequest) {
+    if (!UUID.safeParse(threadId).success) throw new BadRequestException('请求参数不合法');
+    const currentActor = actor(request);
+    return this.gateway.getThread({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}), threadId });
+  }
   @Post('runs') @ApiBody({ type: StartBody }) @ApiOkResponse({ type: RunResponse })
   start(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = StartSchema.safeParse(body); if (!parsed.success) throw new BadRequestException('请求参数不合法');

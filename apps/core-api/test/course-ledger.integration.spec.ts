@@ -4,6 +4,7 @@ import { PaymentChannel, Prisma, UserRole } from '../src/generated/prisma/client
 import { CourseLedgerService } from '../src/modules/course-ledger/course-ledger.service.js';
 import { PeriodsService } from '../src/modules/periods/periods.service.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
+import { DashboardRepository } from '../src/modules/dashboard/dashboard.repository.js';
 
 const hasDatabase = Boolean(process.env['CORE_DATABASE_URL']);
 
@@ -79,10 +80,15 @@ if (hasDatabase) {
         orderBy: { createdAt: 'asc' },
       });
       expect(entries).toHaveLength(2);
+      const dashboard = await new DashboardRepository(prisma).ownerFacts();
+      expect(dashboard.recentRecords).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: entries.find((entry) => entry.kind === 'PAYMENT')?.id, paidDelta: '100.00', giftDelta: '0.00' }),
+      ]));
       const paymentEntry = entries.find((entry) => entry.kind === 'PAYMENT');
       expect(paymentEntry).toBeDefined();
       const reversal = await service.reverseEntry({
         entryId: paymentEntry!.id,
+        accountVersion: 2,
         occurredAt,
         createdById: actor.id,
         commandId: randomUUID(),
@@ -90,6 +96,7 @@ if (hasDatabase) {
       expect(reversal).toMatchObject({ paidBalance: '20.00', giftBalance: '40.00', totalBalance: '60.00' });
       await expect(service.reverseEntry({
         entryId: paymentEntry!.id,
+        accountVersion: 3,
         occurredAt,
         createdById: actor.id,
         commandId: randomUUID(),

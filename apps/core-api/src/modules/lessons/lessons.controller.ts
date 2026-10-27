@@ -1,5 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiHeader, ApiOkResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Get, Headers, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiHeader, ApiOkResponse, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '../../generated/prisma/client.js';
 import type { AuthenticatedActor } from '../auth/auth.types.js';
 import { JwtAuthGuard, type AuthenticatedRequest } from '../auth/jwt-auth.guard.js';
@@ -89,8 +89,13 @@ export class LessonsController {
 
   @Get()
   @ApiOkResponse({ type: LessonResponse, isArray: true })
-  list(@Req() request: AuthenticatedRequest) {
-    return this.lessons.listForActor(actorFrom(request));
+  @ApiQuery({ name: 'from', required: false, type: String, format: 'date-time' })
+  @ApiQuery({ name: 'to', required: false, type: String, format: 'date-time' })
+  list(@Req() request: AuthenticatedRequest, @Query() query: unknown) {
+    const parsed = z.object({ from: DateTimeSchema.optional(), to: DateTimeSchema.optional() }).strict().safeParse(query);
+    if (!parsed.success || Boolean(parsed.data.from) !== Boolean(parsed.data.to) || (parsed.data.from && parsed.data.to && (parsed.data.to <= parsed.data.from || parsed.data.to.getTime() - parsed.data.from.getTime() > 93 * 24 * 60 * 60 * 1000))) throw new BadRequestException('查询时间范围不合法');
+    const range = parsed.data.from && parsed.data.to ? { from: parsed.data.from, to: parsed.data.to } : undefined;
+    return this.lessons.listForActor(actorFrom(request), range);
   }
 
   @Patch(':id/reschedule')

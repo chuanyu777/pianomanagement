@@ -1,5 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiOkResponse, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiOkResponse, ApiProperty, ApiPropertyOptional, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { UserRole } from '../../generated/prisma/client.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
@@ -11,6 +11,9 @@ class CreateStudentBody {
   @ApiProperty({ type: String, minLength: 1, maxLength: 120 })
   name!: string;
 
+  @ApiPropertyOptional({ type: String, minLength: 6, maxLength: 24, nullable: true })
+  phone?: string | null;
+
   @ApiPropertyOptional({ type: String, minLength: 1, maxLength: 2000, nullable: true })
   notes?: string | null;
 }
@@ -18,6 +21,9 @@ class CreateStudentBody {
 class UpdateStudentBody {
   @ApiProperty({ type: String, minLength: 1, maxLength: 120, required: false })
   name?: string;
+
+  @ApiPropertyOptional({ type: String, minLength: 6, maxLength: 24, nullable: true })
+  phone?: string | null;
 
   @ApiPropertyOptional({ type: String, minLength: 1, maxLength: 2000, nullable: true })
   notes?: string | null;
@@ -29,6 +35,9 @@ class StudentResponse implements StudentSummary {
 
   @ApiProperty({ type: String })
   name!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  phone!: string | null;
 
   @ApiProperty({ type: String, nullable: true })
   notes!: string | null;
@@ -47,13 +56,15 @@ const NotesSchema = z.string().trim().min(1).max(2000).nullable().optional();
 
 const CreateStudentBodySchema = z.object({
   name: z.string().trim().min(1).max(120),
+  phone: z.string().trim().max(24).nullable().optional(),
   notes: NotesSchema,
 }).strict();
 
 const UpdateStudentBodySchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
+  phone: z.string().trim().max(24).nullable().optional(),
   notes: NotesSchema,
-}).strict().refine((body) => body.name !== undefined || body.notes !== undefined);
+}).strict().refine((body) => body.name !== undefined || body.phone !== undefined || body.notes !== undefined);
 
 @ApiTags('Students')
 @ApiBearerAuth()
@@ -71,6 +82,7 @@ export class StudentsController {
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
     const input = {
       name: parsed.data.name,
+      ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
       ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
     };
     return this.students.create(input);
@@ -78,8 +90,11 @@ export class StudentsController {
 
   @Get()
   @ApiOkResponse({ type: StudentResponse, isArray: true })
-  list(): Promise<StudentSummary[]> {
-    return this.students.list();
+  @ApiQuery({ name: 'q', required: false, type: String, description: '按学生姓名或联系电话搜索' })
+  list(@Query() query: unknown): Promise<StudentSummary[]> {
+    const parsed = z.object({ q: z.string().trim().max(120).optional() }).strict().safeParse(query);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    return this.students.list(parsed.data.q);
   }
 
   @Patch(':id')
@@ -93,6 +108,7 @@ export class StudentsController {
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
     const input = {
       ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+      ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
       ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
     };
     return this.students.update(id, input);

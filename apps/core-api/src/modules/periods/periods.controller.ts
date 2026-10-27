@@ -1,12 +1,12 @@
-import { BadRequestException, Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiProperty, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiProperty, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { formatBusinessMonth, parseBusinessMonth } from '../../common/time/business-calendar.js';
 import { UserRole } from '../../generated/prisma/client.js';
 import { JwtAuthGuard, type AuthenticatedRequest } from '../auth/jwt-auth.guard.js';
 import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
-import { type ClosedPeriodSummary, PeriodsService } from './periods.service.js';
+import { type ClosedPeriodSummary, PeriodsService, type PeriodCloseReadiness } from './periods.service.js';
 
 class ClosePeriodBody {
   @ApiProperty({ type: String, example: '2026-10' })
@@ -30,6 +30,17 @@ class PeriodResponse {
 
   @ApiProperty({ type: String, nullable: true })
   reopenReason!: string | null;
+}
+
+class PeriodCloseReadinessResponse implements PeriodCloseReadiness {
+  @ApiProperty({ type: String }) period!: string;
+  @ApiProperty({ type: Boolean }) closed!: boolean;
+  @ApiProperty({ type: Object, isArray: true }) blockers!: PeriodCloseReadiness['blockers'];
+  @ApiProperty({ type: Object, isArray: true }) pendingLessons!: PeriodCloseReadiness['pendingLessons'];
+  @ApiProperty({ type: Object, isArray: true }) missingPayrollTeachers!: PeriodCloseReadiness['missingPayrollTeachers'];
+  @ApiProperty({ type: Object, isArray: true }) unpaidPayrolls!: PeriodCloseReadiness['unpaidPayrolls'];
+  @ApiProperty({ type: Object, isArray: true }) refundAnomalies!: PeriodCloseReadiness['refundAnomalies'];
+  @ApiProperty({ type: Object, isArray: true }) ledgerAnomalies!: PeriodCloseReadiness['ledgerAnomalies'];
 }
 
 const CloseSchema = z.object({ period: z.string() }).strict();
@@ -67,6 +78,17 @@ export class PeriodsController {
     const periodStart = parseBusinessMonth(parsed.data.period);
     if (!periodStart) throw new BadRequestException('月份格式应为 YYYY-MM');
     return summary(await this.periods.close(periodStart, actorId(request)));
+  }
+
+  @Get('preclose')
+  @ApiQuery({ name: 'period', required: true, type: String, example: '2026-10' })
+  @ApiOkResponse({ type: PeriodCloseReadinessResponse })
+  async preclose(@Query() query: unknown, @Req() _request: AuthenticatedRequest): Promise<PeriodCloseReadiness> {
+    const parsed = z.object({ period: z.string() }).strict().safeParse(query);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    const period = parseBusinessMonth(parsed.data.period);
+    if (!period) throw new BadRequestException('月份格式应为 YYYY-MM');
+    return this.periods.preclose(period);
   }
 
   @Post('reopen')

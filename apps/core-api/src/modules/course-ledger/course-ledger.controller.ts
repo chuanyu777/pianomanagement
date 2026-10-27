@@ -26,6 +26,7 @@ import { RolesGuard } from '../auth/roles.guard.js';
 import {
   CourseLedgerService,
   type CourseAccountBalance,
+  type CourseAccountLedger,
 } from './course-ledger.service.js';
 
 const MONEY_STRING = /^(?:0|[1-9]\d{0,11})\.\d{2}$/;
@@ -45,6 +46,22 @@ class BalanceResponse implements CourseAccountBalance {
 
   @ApiProperty({ type: String, example: '200.00' })
   totalBalance!: string;
+}
+
+class LedgerEntryResponse {
+  @ApiProperty({ type: String, format: 'uuid' }) entryId!: string;
+  @ApiProperty({ type: String, format: 'date-time' }) occurredAt!: string;
+  @ApiProperty({ type: String }) kind!: string;
+  @ApiProperty({ type: String, example: '100.00' }) amount!: string;
+  @ApiProperty({ type: String, example: '100.00' }) paidDelta!: string;
+  @ApiProperty({ type: String, example: '0.00' }) giftDelta!: string;
+  @ApiProperty({ type: String, nullable: true }) note!: string | null;
+  @ApiProperty({ type: String }) operator!: string;
+}
+
+class LedgerResponse {
+  @ApiProperty({ type: String, format: 'uuid' }) accountId!: string;
+  @ApiProperty({ type: LedgerEntryResponse, isArray: true }) entries!: LedgerEntryResponse[];
 }
 
 class RecordPaymentBody {
@@ -76,6 +93,9 @@ class ReverseLedgerEntryBody {
   @ApiProperty({ type: String, format: 'date-time' })
   occurredAt!: string;
 
+  @ApiProperty({ type: Number, minimum: 0, description: '确认冲正时读取到的课程账户版本' })
+  accountVersion!: number;
+
   @ApiProperty({ type: String, required: false, maxLength: 2000 })
   note?: string;
 }
@@ -94,6 +114,7 @@ const GiftBodySchema = z.object({
 }).strict();
 const ReverseBodySchema = z.object({
   occurredAt: DateTimeSchema,
+  accountVersion: z.number().int().nonnegative(),
   note: NoteSchema,
 }).strict();
 
@@ -120,6 +141,12 @@ export class CourseLedgerController {
   @ApiOkResponse({ type: BalanceResponse })
   getBalance(@Param('accountId') accountId: string): Promise<CourseAccountBalance> {
     return this.ledger.getBalance(requireId(accountId));
+  }
+
+  @Get('student-course-accounts/:accountId/ledger')
+  @ApiOkResponse({ type: LedgerResponse })
+  getLedger(@Param('accountId') accountId: string): Promise<CourseAccountLedger> {
+    return this.ledger.listEntries(requireId(accountId));
   }
 
   @Post('student-course-accounts/:accountId/payments')

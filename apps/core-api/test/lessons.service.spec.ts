@@ -203,6 +203,63 @@ describe('LessonsService', () => {
     }));
   });
 
+  it('applies an exclusive time range without removing the teacher restriction', async () => {
+    const { service, lesson } = makeService();
+    const range = { from: new Date('2026-10-25T16:00:00Z'), to: new Date('2026-11-01T16:00:00Z') };
+    await service.listForActor(teacher, range);
+    expect(lesson.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { teacherId, startsAt: { gte: range.from, lt: range.to } },
+    }));
+  });
+
+  it('filters the safe range read by teacher, names and status without selecting money fields', async () => {
+    const { service, lesson } = makeService({
+      findMany: vi.fn(async () => [{
+        id: lessonId,
+        accountId,
+        teacherId,
+        startsAt: new Date('2026-10-21T15:59:59.999Z'),
+        endsAt: new Date('2026-10-21T16:45:00.000Z'),
+        status: 'SCHEDULED',
+        account: {
+          student: { id: studentId, name: '小明' },
+          course: { id: 'course-1', name: '主课' },
+        },
+        teacher: { id: teacherId, name: '王老师' },
+      }]),
+    });
+    const startsAt = new Date('2026-10-20T16:00:00.000Z');
+    const endsAt = new Date('2026-10-21T16:00:00.000Z');
+
+    await expect(service.listForActorInRange(teacher, {
+      startsAt,
+      endsAt,
+      studentName: '小明',
+      courseName: '主课',
+      teacherName: '王老师',
+      status: 'SCHEDULED',
+    })).resolves.toEqual([{
+      id: lessonId, accountId, teacherId,
+      startsAt: new Date('2026-10-21T15:59:59.999Z'),
+      endsAt: new Date('2026-10-21T16:45:00.000Z'),
+      status: 'SCHEDULED',
+      student: { id: studentId, name: '小明' },
+      course: { id: 'course-1', name: '主课' },
+      teacher: { id: teacherId, name: '王老师' },
+    }]);
+    expect(lesson.findMany).toHaveBeenCalledWith({
+      where: {
+        teacherId,
+        startsAt: { gte: startsAt, lt: endsAt },
+        account: { student: { name: '小明' }, course: { name: '主课' } },
+        teacher: { name: '王老师' },
+        status: 'SCHEDULED',
+      },
+      orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+      select: expect.not.objectContaining({ unitPriceSnapshot: true }),
+    });
+  });
+
   it('prevents a teacher from cancelling another teacher’s lesson', async () => {
     const { service, lesson } = makeService({
       findUnique: vi.fn(async () => makeLesson()),

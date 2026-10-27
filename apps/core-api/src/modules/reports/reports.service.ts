@@ -6,7 +6,7 @@ export type MonthlyReport = {
   periodStart: Date;
   cashIncome: string; cashExpense: string; cashNet: string;
   lessonIncome: string; refundFeeIncome: string; manualIncome: string;
-  payrollCost: string; giftCost: string; manualExpense: string; operatingProfit: string;
+  payrollCost: string; giftCost: string; manualExpense: string; operatingExpense: string; operatingProfit: string;
 };
 function businessMonthRange(start: Date): { start: Date; end: Date } {
   const offset = 8 * 60 * 60 * 1000;
@@ -28,7 +28,7 @@ export class ReportsService {
       this.prisma.payroll.findMany({ where: { status: PayrollStatus.PAID, paidAt: occurredInPeriod }, select: { netSalary: true } }),
       this.prisma.payroll.findMany({ where: { periodStart }, select: { grossSalary: true } }),
       this.prisma.giftRecord.findMany({ where: { occurredAt: occurredInPeriod }, select: { amount: true } }),
-      this.prisma.ledgerEntry.findMany({ where: { kind: { in: [LedgerEntryKind.LESSON_CONSUMPTION, LedgerEntryKind.LESSON_CONSUMPTION_REVERSAL] }, occurredAt: occurredInPeriod }, select: { paidDelta: true, giftDelta: true } }),
+      this.prisma.ledgerEntry.findMany({ where: { kind: { in: [LedgerEntryKind.LESSON_CONSUMPTION, LedgerEntryKind.LESSON_CONSUMPTION_REVERSAL, LedgerEntryKind.LESSON_CONSUMPTION_CORRECTION] }, occurredAt: occurredInPeriod }, select: { paidDelta: true, giftDelta: true } }),
     ]);
     const manualIncome = sum(manuals.filter((x) => x.kind === ManualTransactionKind.INCOME).map((x) => x.amount));
     const manualExpense = sum(manuals.filter((x) => x.kind === ManualTransactionKind.EXPENSE).map((x) => x.amount));
@@ -43,6 +43,6 @@ export class ReportsService {
     const cashExpense = actualRefund.add(paidSalary).add(manualExpense);
     const operatingIncome = lessonIncome.add(refundFeeIncome).add(manualIncome);
     const operatingExpense = payrollCost.add(giftCost).add(manualExpense);
-    return { periodStart, cashIncome: cashIncome.toFixed(2), cashExpense: cashExpense.toFixed(2), cashNet: cashIncome.sub(cashExpense).toFixed(2), lessonIncome: lessonIncome.toFixed(2), refundFeeIncome: refundFeeIncome.toFixed(2), manualIncome: manualIncome.toFixed(2), payrollCost: payrollCost.toFixed(2), giftCost: giftCost.toFixed(2), manualExpense: manualExpense.toFixed(2), operatingProfit: operatingIncome.sub(operatingExpense).toFixed(2) };
+    return { periodStart, cashIncome: cashIncome.toFixed(2), cashExpense: cashExpense.toFixed(2), cashNet: cashIncome.sub(cashExpense).toFixed(2), lessonIncome: lessonIncome.toFixed(2), refundFeeIncome: refundFeeIncome.toFixed(2), manualIncome: manualIncome.toFixed(2), payrollCost: payrollCost.toFixed(2), giftCost: giftCost.toFixed(2), manualExpense: manualExpense.toFixed(2), operatingExpense: operatingExpense.toFixed(2), operatingProfit: operatingIncome.sub(operatingExpense).toFixed(2) };
   }
 }

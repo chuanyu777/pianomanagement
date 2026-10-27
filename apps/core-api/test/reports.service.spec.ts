@@ -29,7 +29,7 @@ describe('ReportsService', () => {
       periodStart,
       cashIncome: '120.00', cashExpense: '108.00', cashNet: '12.00',
       lessonIncome: '45.00', refundFeeIncome: '5.00', manualIncome: '20.00',
-      payrollCost: '115.00', giftCost: '12.00', manualExpense: '8.00', operatingProfit: '-65.00',
+      payrollCost: '115.00', giftCost: '12.00', manualExpense: '8.00', operatingExpense: '135.00', operatingProfit: '-65.00',
     });
     const start = new Date('2026-09-30T16:00:00.000Z');
     const end = new Date('2026-10-31T16:00:00.000Z');
@@ -40,7 +40,7 @@ describe('ReportsService', () => {
     });
     expect(prisma.payroll.findMany).toHaveBeenNthCalledWith(2, { where: { periodStart }, select: { grossSalary: true } });
     expect(prisma.ledgerEntry.findMany).toHaveBeenCalledWith({
-      where: { kind: { in: [LedgerEntryKind.LESSON_CONSUMPTION, LedgerEntryKind.LESSON_CONSUMPTION_REVERSAL] }, occurredAt: { gte: start, lt: end } },
+      where: { kind: { in: [LedgerEntryKind.LESSON_CONSUMPTION, LedgerEntryKind.LESSON_CONSUMPTION_REVERSAL, LedgerEntryKind.LESSON_CONSUMPTION_CORRECTION] }, occurredAt: { gte: start, lt: end } },
       select: { paidDelta: true, giftDelta: true },
     });
   });
@@ -55,7 +55,7 @@ describe('ReportsService', () => {
     await expect(service.monthly(periodStart)).resolves.toMatchObject({
       cashIncome: '0.00', cashExpense: '0.00', cashNet: '0.00', lessonIncome: '0.00',
       refundFeeIncome: '0.00', manualIncome: '0.00', payrollCost: '0.00', giftCost: '0.00',
-      manualExpense: '0.00', operatingProfit: '0.00',
+      manualExpense: '0.00', operatingExpense: '0.00', operatingProfit: '0.00',
     });
   });
 });

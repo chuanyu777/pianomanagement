@@ -27,6 +27,22 @@ export type CourseAccountBalance = {
   totalBalance: string;
 };
 
+export type CourseAccountLedgerEntry = {
+  entryId: string;
+  occurredAt: string;
+  kind: string;
+  amount: string;
+  paidDelta: string;
+  giftDelta: string;
+  note: string | null;
+  operator: string;
+};
+
+export type CourseAccountLedger = {
+  accountId: string;
+  entries: CourseAccountLedgerEntry[];
+};
+
 export type CourseAccountPreviewSnapshot = CourseAccountBalance & { version: number };
 export type ProjectedCourseAccountBalance = {
   before: CourseAccountBalance;
@@ -54,10 +70,20 @@ export type RecordGiftInput = {
 
 export type ReverseLedgerEntryInput = {
   entryId: string;
+  accountVersion: number;
   occurredAt: Date;
   note?: string | undefined;
   createdById: string;
   commandId: string;
+};
+export type ReverseLedgerEntryPreview = {
+  entryId: string;
+  accountId: string;
+  accountVersion: number;
+  kind: 'PAYMENT' | 'GIFT';
+  amount: string;
+  before: CourseAccountBalance;
+  after: CourseAccountBalance;
 };
 
 const ACCOUNT_BALANCE_SELECT = {
@@ -107,6 +133,40 @@ export class CourseLedgerService {
 
   async getBalance(accountId: string): Promise<CourseAccountBalance> {
     return this.getBalanceWithClient(this.prisma, accountId);
+  }
+
+  async listEntries(accountId: string): Promise<CourseAccountLedger> {
+    const account = await this.prisma.studentCourseAccount.findUnique({
+      where: { id: accountId },
+      select: { id: true },
+    });
+    if (!account) throw new NotFoundException('学生课程账户不存在');
+    const entries = await this.prisma.ledgerEntry.findMany({
+      where: { accountId: account.id },
+      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true,
+        occurredAt: true,
+        kind: true,
+        paidDelta: true,
+        giftDelta: true,
+        note: true,
+        createdBy: { select: { username: true } },
+      },
+    });
+    return {
+      accountId: account.id,
+      entries: entries.map((entry) => ({
+        entryId: entry.id,
+        occurredAt: entry.occurredAt.toISOString(),
+        kind: entry.kind,
+        amount: entry.paidDelta.add(entry.giftDelta).abs().toFixed(2),
+        paidDelta: entry.paidDelta.toFixed(2),
+        giftDelta: entry.giftDelta.toFixed(2),
+        note: entry.note,
+        operator: entry.createdBy.username,
+      })),
+    };
   }
 
   async getPreviewSnapshotInTransaction(
@@ -248,7 +308,35 @@ export class CourseLedgerService {
 
   async reverseEntry(input: ReverseLedgerEntryInput): Promise<CourseAccountBalance> {
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      return await this.prisma.$transaction((tx) => this.reverseEntryInTransaction(tx, input));
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) throw error;
+      return this.resolveCommandConflict(input.commandId, input.createdById);
+    }
+  }
+
+  async previewReverseEntry(entryId: string): Promise<ReverseLedgerEntryPreview> {
+    const original = await this.prisma.ledgerEntry.findUnique({ where: { id: entryId }, select: ENTRY_BALANCE_SELECT });
+    if (!original) throw new NotFoundException('金额流水不存在');
+    if (original.kind !== LedgerEntryKind.PAYMENT && original.kind !== LedgerEntryKind.GIFT) throw new BadRequestException('当前仅支持冲正交费或赠送流水');
+    const [account, existingReversal, before] = await Promise.all([
+      this.prisma.studentCourseAccount.findUnique({ where: { id: original.accountId }, select: { version: true } }),
+      this.prisma.ledgerEntry.findUnique({ where: { reversesEntryId: original.id }, select: { id: true } }),
+      this.getBalance(original.accountId),
+    ]);
+    if (!account) throw new NotFoundException('学生课程账户不存在');
+    if (existingReversal) throw new ConflictException('该金额流水已冲正');
+    const paid = new Prisma.Decimal(before.paidBalance).sub(original.paidDelta);
+    const gift = new Prisma.Decimal(before.giftBalance).sub(original.giftDelta);
+    if (paid.isNegative() || gift.isNegative()) throw new BadRequestException('该流水金额已被使用，冲正后课程账户余额将为负数');
+    return {
+      entryId: original.id, accountId: original.accountId, accountVersion: account.version,
+      kind: original.kind, amount: (original.kind === LedgerEntryKind.PAYMENT ? original.paidDelta : original.giftDelta).toFixed(2),
+      before, after: { accountId: original.accountId, paidBalance: paid.toFixed(2), giftBalance: gift.toFixed(2), totalBalance: paid.add(gift).toFixed(2) },
+    };
+  }
+
+  async reverseEntryInTransaction(tx: LedgerTransaction, input: ReverseLedgerEntryInput): Promise<CourseAccountBalance> {
         await this.periods.assertWritableForDate(input.occurredAt, tx);
         const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
         if (replay) return replay;
@@ -261,11 +349,26 @@ export class CourseLedgerService {
           throw new BadRequestException('当前仅支持冲正交费或赠送流水');
         }
         await this.lockAccount(tx, original.accountId);
+        const account = await tx.studentCourseAccount.findUnique({
+          where: { id: original.accountId },
+          select: { version: true },
+        });
+        if (!account) throw new NotFoundException('学生课程账户不存在');
+        if (account.version !== input.accountVersion) {
+          throw new ConflictException('课程账户已变化，请重新确认冲正');
+        }
         const existingReversal = await tx.ledgerEntry.findUnique({
           where: { reversesEntryId: original.id },
           select: { id: true },
         });
         if (existingReversal) throw new ConflictException('该金额流水已冲正');
+
+        const balance = await this.getBalanceWithClient(tx, original.accountId);
+        const resultingPaidBalance = new Prisma.Decimal(balance.paidBalance).sub(original.paidDelta);
+        const resultingGiftBalance = new Prisma.Decimal(balance.giftBalance).sub(original.giftDelta);
+        if (resultingPaidBalance.isNegative() || resultingGiftBalance.isNegative()) {
+          throw new BadRequestException('该流水金额已被使用，冲正后课程账户余额将为负数');
+        }
 
         await tx.ledgerEntry.create({
           data: {
@@ -284,11 +387,6 @@ export class CourseLedgerService {
         });
         await this.incrementAccountVersion(tx, original.accountId);
         return this.getBalanceWithClient(tx, original.accountId);
-      });
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) throw error;
-      return this.resolveCommandConflict(input.commandId, input.createdById);
-    }
   }
 
   private assertPositiveAmount(amount: Prisma.Decimal): void {

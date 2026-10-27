@@ -13,7 +13,8 @@ const course = {
 describe('CoursesService', () => {
   it('creates a course with a Decimal price and returns a two-decimal string', async () => {
     const create = vi.fn(async () => ({ ...course, name: '钢琴主课' }));
-    const service = new CoursesService({ course: { create } } as never);
+    const transaction = vi.fn(async (callback) => callback({ course: { create } }));
+    const service = new CoursesService({ $transaction: transaction } as never);
 
     const result = await service.create({
       name: ' 钢琴主课 ',
@@ -56,8 +57,11 @@ describe('CoursesService', () => {
   });
 
   it('updates only supplied fields and converts a price string to Decimal', async () => {
-    const update = vi.fn(async () => ({ ...course, name: '陪练', defaultUnitPrice: new Prisma.Decimal('120.50') }));
-    const service = new CoursesService({ course: { update } } as never);
+    const updatedAt = new Date('2026-10-16T00:00:00.000Z');
+    const findUnique = vi.fn().mockResolvedValueOnce({ updatedAt }).mockResolvedValue({ ...course, name: '陪练', defaultUnitPrice: new Prisma.Decimal('120.50') });
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const transaction = vi.fn(async (callback) => callback({ course: { findUnique, updateMany } }));
+    const service = new CoursesService({ $transaction: transaction } as never);
 
     const result = await service.update(course.id, {
       name: '陪练',
@@ -65,8 +69,8 @@ describe('CoursesService', () => {
       isActive: false,
     });
 
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: course.id },
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: course.id, updatedAt },
       data: {
         name: '陪练',
         defaultUnitPrice: expect.any(Prisma.Decimal),

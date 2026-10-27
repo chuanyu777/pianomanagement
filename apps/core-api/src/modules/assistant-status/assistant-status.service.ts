@@ -26,6 +26,7 @@ export type AssistantStatusProbeOptions = {
 type AgentHealth = {
   status?: unknown;
   service?: unknown;
+  modelAvailable?: unknown;
 };
 
 @Injectable()
@@ -45,16 +46,16 @@ export class AssistantStatusService {
 
   private async probe(options: AssistantStatusProbeOptions): Promise<AssistantStatus> {
     const now = options.now ?? (() => new Date());
-    const [coreAvailable, agentAvailable] = await Promise.all([
+    const [coreAvailable, agentHealth] = await Promise.all([
       this.checkCore(),
       this.checkAgentRuntime(options),
     ]);
-    const available = coreAvailable && agentAvailable;
+    const available = coreAvailable && agentHealth.available && agentHealth.modelAvailable;
 
     return {
       available,
       core: { available: coreAvailable },
-      agentRuntime: { available: agentAvailable },
+      agentRuntime: { available: agentHealth.available },
       checkedAt: now().toISOString(),
       message: available ? 'AI 助手已连接' : 'AI 助手暂不可用',
     };
@@ -69,9 +70,9 @@ export class AssistantStatusService {
     }
   }
 
-  private async checkAgentRuntime(options: AssistantStatusProbeOptions): Promise<boolean> {
+  private async checkAgentRuntime(options: AssistantStatusProbeOptions): Promise<{ available: boolean; modelAvailable: boolean }> {
     const agentRuntimeUrl = options.agentRuntimeUrl ?? process.env['AGENT_RUNTIME_URL'];
-    if (!agentRuntimeUrl) return false;
+    if (!agentRuntimeUrl) return { available: false, modelAvailable: false };
 
     const fetchImpl = options.fetchImpl ?? fetch;
     const controller = new AbortController();
@@ -86,12 +87,13 @@ export class AssistantStatusService {
         headers: { accept: 'application/json' },
         signal: controller.signal,
       });
-      if (!response.ok) return false;
+      if (!response.ok) return { available: false, modelAvailable: false };
 
       const payload = (await response.json()) as AgentHealth;
-      return payload.status === 'ok' && payload.service === 'agent-runtime';
+      const available = payload.status === 'ok' && payload.service === 'agent-runtime';
+      return { available, modelAvailable: available && payload.modelAvailable === true };
     } catch {
-      return false;
+      return { available: false, modelAvailable: false };
     } finally {
       clearTimeout(timeout);
     }

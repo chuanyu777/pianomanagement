@@ -14,12 +14,17 @@ import type {
 
 export function createTestRepository(): AgentRuntimeRepository {
   const runs = new Map<string, AgentRunRecord>();
+  const owners = new Map<string, string | null>();
   const events = new Map<string, PersistedAssistantEvent[]>();
   const leases = new Map<string, { ownerToken: string; expiresAt: number; attemptCount: number }>();
   let nextEventId = 1;
 
   return {
+    async getThreadOwner(threadId) { return owners.get(threadId) ?? null; },
     async createRun(input: CreateRunInput) {
+      const owner = owners.get(input.threadId);
+      if (owner !== undefined && owner !== (input.actorKey ?? null)) throw new Error('任务身份或作用域无效');
+      owners.set(input.threadId, input.actorKey ?? null);
       const existing = [...runs.values()].find(
         (run) =>
           run.runId === input.runId ||

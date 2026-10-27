@@ -21,7 +21,7 @@ if (hasDatabase) {
       const status = await service.getStatus({
         agentRuntimeUrl: 'http://agent-runtime.test',
         fetchImpl: vi.fn().mockResolvedValue(
-          new Response(JSON.stringify({ status: 'ok', service: 'agent-runtime' }), {
+          new Response(JSON.stringify({ status: 'ok', service: 'agent-runtime', modelAvailable: true }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),

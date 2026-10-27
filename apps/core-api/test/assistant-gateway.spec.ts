@@ -27,8 +27,8 @@ function createTokens(): CapabilityTokenService {
   return new CapabilityTokenService({ privateKey, publicKey });
 }
 
-function createService(client: AgentRuntimeClient): AssistantGatewayService {
-  return new AssistantGatewayService(client, createTokens());
+function createService(client: Pick<AgentRuntimeClient, 'start' | 'resume' | 'openEvents'> & Partial<Pick<AgentRuntimeClient, 'listThreads' | 'getThread'>>): AssistantGatewayService {
+  return new AssistantGatewayService({ ...client, listThreads: client.listThreads ?? vi.fn(), getThread: client.getThread ?? vi.fn() }, createTokens());
 }
 
 function response(body: unknown, init?: ResponseInit): Response {
@@ -84,6 +84,18 @@ describe('AssistantGatewayService', () => {
         clientRequestId: 'client-request-1',
       }),
     );
+  });
+
+  it('lists and reads only tasks bound to the current actor capability', async () => {
+    const listThreads = vi.fn().mockResolvedValue([{ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed' }]);
+    const getThread = vi.fn().mockResolvedValue({ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null });
+    const service = createService({ start: vi.fn(), resume: vi.fn(), openEvents: vi.fn(), listThreads, getThread });
+    await expect(service.listThreads({ userId, role: 'OWNER' })).resolves.toHaveLength(1);
+    await expect(service.getThread({ userId, role: 'OWNER', threadId })).resolves.toMatchObject({ threadId });
+    const listPayload = JSON.parse(Buffer.from(listThreads.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8')) as { sub: string };
+    const detailPayload = JSON.parse(Buffer.from(getThread.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8')) as { sub: string; threadId: string };
+    expect(listPayload.sub).toBe(userId);
+    expect(detailPayload).toMatchObject({ sub: userId, threadId });
   });
 
   it('resumes a run with a capability scoped to that run', async () => {

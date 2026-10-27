@@ -21,6 +21,7 @@ import type {
   PersistedAssistantEvent,
 } from './persistence/repository.js';
 import type { RunWorker } from './worker/run-worker.js';
+import { trustedCapabilityBinding } from './persistence/trusted-capability.js';
 import {
   InMemoryInternalRequestReplayStore,
   type InternalRequestReplayStore,
@@ -95,6 +96,7 @@ export function buildServer(input: {
   eventHub?: RunEventHub;
   worker?: Pick<RunWorker, 'start' | 'stop'>;
   replayStore?: InternalRequestReplayStore;
+  requireActorBinding?: boolean;
 }): FastifyInstance {
   const app = Fastify({ logger: true });
   const model = createChatModel(input.config);
@@ -161,13 +163,41 @@ export function buildServer(input: {
     return reply.code(500).send({ message: 'Agent Runtime 内部错误' });
   });
 
-  app.get('/health', async () => ({ status: 'ok', service: 'agent-runtime' }));
+  app.get('/health', async () => ({ status: 'ok', service: 'agent-runtime', modelAvailable: Boolean(model) }));
+
+  app.get('/internal/assistant/threads', async (request, reply) => {
+    if (!input.repository.listThreads) return reply.code(501).send({ message: '任务列表暂不可用' });
+    const query = parseBody(z.object({ limit: z.coerce.number().int().min(1).max(50).default(12) }), request.query, reply);
+    if (!query) return;
+    let actorKey: string;
+    try { actorKey = trustedCapabilityBinding(headerValue(request, ASSISTANT_CAPABILITY_HEADER)!).actorKey; }
+    catch { return reply.code(403).send({ message: '无权访问该任务' }); }
+    return reply.send(await input.repository.listThreads(actorKey, query.limit));
+  });
+
+  app.get('/internal/assistant/threads/:threadId', async (request, reply) => {
+    if (!input.repository.getThread) return reply.code(501).send({ message: '任务详情暂不可用' });
+    const params = parseBody(z.object({ threadId: z.string().uuid() }), request.params, reply);
+    if (!params) return;
+    let actorKey: string;
+    try { actorKey = trustedCapabilityBinding(headerValue(request, ASSISTANT_CAPABILITY_HEADER)!, { threadId: params.threadId }).actorKey; }
+    catch { return reply.code(403).send({ message: '无权访问该任务' }); }
+    const thread = await input.repository.getThread(params.threadId, actorKey);
+    return thread ? reply.send(thread) : reply.code(404).send({ message: '任务不存在' });
+  });
 
   app.post('/internal/assistant/runs/start', async (request, reply) => {
     const body = parseBody(AssistantStartRequestSchema, request.body, reply);
     if (!body) return;
     const capability = headerValue(request, ASSISTANT_CAPABILITY_HEADER)!;
-    const persisted = await input.repository.createRun({ ...body, capability });
+    let actorKey: string | undefined;
+    if (input.requireActorBinding) {
+      try { actorKey = trustedCapabilityBinding(capability, { threadId: body.threadId, runId: body.runId }).actorKey; }
+      catch { return reply.code(403).send({ message: '无权访问该任务' }); }
+      const owner = await input.repository.getThreadOwner(body.threadId);
+      if (owner !== null && owner !== actorKey) return reply.code(403).send({ message: '无权访问该任务' });
+    }
+    const persisted = await input.repository.createRun({ ...body, capability, ...(actorKey ? { actorKey } : {}) });
     if (!persisted.created) {
       if (persisted.run.threadId !== body.threadId) {
         return reply.code(409).send({ message: 'runId 与线程不匹配' });
@@ -191,6 +221,7 @@ export function buildServer(input: {
     if (!params || !body) return;
     const record = await input.repository.findRun(params.runId);
     if (!record) return reply.code(404).send({ message: '运行不存在' });
+    if (input.requireActorBinding) return reply.code(409).send({ message: '业务补充请在当前会话发送下一条消息；不能用旧技术审批执行业务。' });
     if (record.threadId !== body.threadId) {
       return reply.code(404).send({ message: '运行不存在' });
     }
@@ -254,6 +285,12 @@ export function buildServer(input: {
     if (!params) return;
     const run = await input.repository.findRun(params.runId);
     if (!run) return reply.code(404).send({ message: '运行不存在' });
+    if (input.requireActorBinding) {
+      try {
+        const binding = trustedCapabilityBinding(headerValue(request, ASSISTANT_CAPABILITY_HEADER)!, { runId: params.runId, threadId: run.threadId });
+        if (await input.repository.getThreadOwner(run.threadId) !== binding.actorKey) return reply.code(403).send({ message: '无权访问该任务' });
+      } catch { return reply.code(403).send({ message: '无权访问该任务' }); }
+    }
     return reply.send(AssistantRunSchema.parse(run));
   });
 
@@ -262,6 +299,12 @@ export function buildServer(input: {
     if (!params) return;
     const record = await input.repository.findRun(params.runId);
     if (!record) return reply.code(404).send({ message: '运行不存在' });
+    if (input.requireActorBinding) {
+      try {
+        const binding = trustedCapabilityBinding(headerValue(request, ASSISTANT_CAPABILITY_HEADER)!, { runId: params.runId, threadId: record.threadId });
+        if (await input.repository.getThreadOwner(record.threadId) !== binding.actorKey) return reply.code(403).send({ message: '无权访问该任务' });
+      } catch { return reply.code(403).send({ message: '无权访问该任务' }); }
+    }
     const lastEventId = headerValue(request, 'last-event-id');
     if (lastEventId !== undefined && !validEventCursor(lastEventId)) {
       return reply.code(400).send({ message: '事件游标不合法' });

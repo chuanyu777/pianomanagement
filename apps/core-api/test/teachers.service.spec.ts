@@ -43,4 +43,98 @@ describe('TeachersService', () => {
       defaultCommissionRate: '0.0000',
     });
   });
+
+  it('creates a teacher profile without creating or inventing a login account', async () => {
+    const profile = {
+      id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7',
+      name: '赵老师',
+      isActive: true,
+      defaultBaseSalary: new Prisma.Decimal('2000.00'),
+      defaultCommissionRate: new Prisma.Decimal('10.0000'),
+      user: null,
+    };
+    const createProfile = vi.fn(async () => profile);
+    const service = new TeachersService({ teacher: { create: createProfile } } as never);
+
+    const result = await service.create({
+      name: ' 赵老师 ',
+      defaultBaseSalary: new Prisma.Decimal('2000.00'),
+      defaultCommissionRate: new Prisma.Decimal('10.0000'),
+    });
+
+    expect(createProfile).toHaveBeenCalledWith(expect.objectContaining({
+      data: {
+        name: '赵老师',
+        defaultBaseSalary: new Prisma.Decimal('2000.00'),
+        defaultCommissionRate: new Prisma.Decimal('10.0000'),
+      },
+    }));
+    expect(result).toEqual({
+      id: profile.id,
+      name: '赵老师',
+      userId: null,
+      username: null,
+      isActive: true,
+      defaultBaseSalary: '2000.00',
+      defaultCommissionRate: '10.0000',
+    });
+  });
+
+  it('creates a profile through the caller transaction for Assistant Confirm', async () => {
+    const createProfile = vi.fn(async () => ({
+      id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7',
+      name: '赵老师',
+      isActive: true,
+      defaultBaseSalary: new Prisma.Decimal('2000.00'),
+      defaultCommissionRate: new Prisma.Decimal('10.0000'),
+      user: null,
+    }));
+    const tx = { teacher: { create: createProfile } };
+    const service = new TeachersService({} as never);
+
+    await service.createProfileInTransaction(tx as never, {
+      name: '赵老师',
+      defaultBaseSalary: new Prisma.Decimal('2000.00'),
+      defaultCommissionRate: new Prisma.Decimal('10.0000'),
+    });
+
+    expect(createProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates teacher compensation through the caller transaction', async () => {
+    const update = vi.fn(async () => ({
+      id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7',
+      name: '赵老师',
+      isActive: true,
+      defaultBaseSalary: new Prisma.Decimal('2500.00'),
+      defaultCommissionRate: new Prisma.Decimal('12.5000'),
+      user: null,
+    }));
+    const tx = { teacher: { update } };
+    const service = new TeachersService({} as never);
+
+    const result = await service.updateCompensationInTransaction(tx as never, 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7', {
+      defaultBaseSalary: new Prisma.Decimal('2500.00'),
+      defaultCommissionRate: new Prisma.Decimal('12.5000'),
+    });
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7' },
+      data: {
+        defaultBaseSalary: new Prisma.Decimal('2500.00'),
+        defaultCommissionRate: new Prisma.Decimal('12.5000'),
+      },
+    }));
+    expect(result.userId).toBeNull();
+    expect(result.username).toBeNull();
+  });
+
+  it('requires username and password together when preserving login creation', async () => {
+    const service = new TeachersService({} as never);
+
+    await expect(service.create({
+      name: '赵老师',
+      username: 'teacher.zhao',
+    } as never)).rejects.toThrow('用户名和密码必须同时提供');
+  });
 });

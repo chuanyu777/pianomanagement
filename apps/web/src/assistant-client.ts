@@ -1,29 +1,17 @@
-export type AssistantRunStatus = 'queued' | 'running' | 'waiting_for_input' | 'completed' | 'failed';
+import type { components } from '@piano/generated-core-client/generated/core-api';
+import {
+  AssistantEventSchema,
+  AssistantRunSchema,
+  WorkspaceDocumentSchema,
+  type AssistantEvent,
+  type AssistantRun,
+  type WorkspaceDocument as ProtocolWorkspaceDocument,
+} from '@piano/assistant-protocol';
 
-export type AssistantRun = {
-  runId: string;
-  threadId: string;
-  status: AssistantRunStatus;
-};
-
-export type WorkspaceBlock =
-  | { type: 'summary'; title: string; text: string }
-  | { type: 'data-table'; columns: { key: string; label: string }[]; rows: Record<string, string | number | boolean | null>[] }
-  | { type: 'alert-list'; alerts: { severity: 'info' | 'warning' | 'error'; title: string; detail?: string }[] }
-  | { type: 'metric-grid'; metrics: { label: string; value: string; tone: 'neutral' | 'positive' | 'warning' }[] }
-  | { type: 'calculation-breakdown'; title: string; lines: { label: string; amount: string }[]; total: string }
-  | { type: 'receipt'; receiptId: string; title: string; status: 'succeeded' | 'failed'; occurredAt: string }
-  | { type: 'action-preview'; previewId: string; actionType: string; schemaVersion: string; title: string; riskLevel: 'L1' | 'L2'; expiresAt: string };
-
-export type WorkspaceDocument = { protocolVersion: '1.0'; title: string; blocks: WorkspaceBlock[] };
-
-export type AssistantUiEvent =
-  | { type: 'assistant.delta'; text: string }
-  | { type: 'assistant.message'; messageId: string; markdown: string }
-  | { type: 'workspace.replace'; document: WorkspaceDocument }
-  | { type: 'clarification.requested'; question: string }
-  | { type: 'run.completed'; runId: string }
-  | { type: 'run.failed'; code: string; message: string; retryable: boolean };
+export type AssistantUiEvent = AssistantEvent;
+export type AssistantRunStatus = AssistantRun['status'];
+export type WorkspaceDocument = ProtocolWorkspaceDocument;
+export type WorkspaceBlock = WorkspaceDocument['blocks'][number];
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TERMINAL_RUN_STATUSES = new Set<AssistantRunStatus>(['completed', 'failed']);
@@ -38,86 +26,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseWorkspaceDocument(value: unknown): WorkspaceDocument | null {
-  if (!isRecord(value) || value.protocolVersion !== '1.0' || typeof value.title !== 'string' ||
-      value.title.trim().length === 0 || !Array.isArray(value.blocks)) return null;
-
-  const blocks: WorkspaceBlock[] = [];
-  for (const rawBlock of value.blocks) {
-    if (!isRecord(rawBlock) || typeof rawBlock.type !== 'string') continue;
-    if (rawBlock.type === 'summary') {
-      if (typeof rawBlock.title !== 'string' || rawBlock.title.trim().length === 0 || typeof rawBlock.text !== 'string') return null;
-      blocks.push({ type: 'summary', title: rawBlock.title, text: rawBlock.text });
-    } else if (rawBlock.type === 'data-table') {
-      if (!Array.isArray(rawBlock.columns) || !Array.isArray(rawBlock.rows)) return null;
-      const columns: Extract<WorkspaceBlock, { type: 'data-table' }>['columns'] = [];
-      for (const column of rawBlock.columns) {
-        if (!isRecord(column) || typeof column.key !== 'string' || column.key.trim().length === 0 ||
-            typeof column.label !== 'string' || column.label.trim().length === 0) return null;
-        columns.push({ key: column.key, label: column.label });
-      }
-      const rows: Extract<WorkspaceBlock, { type: 'data-table' }>['rows'] = [];
-      for (const row of rawBlock.rows) {
-        if (!isRecord(row) || Object.values(row).some((cell) => cell !== null && !['string', 'number', 'boolean'].includes(typeof cell))) return null;
-        rows.push(row as Record<string, string | number | boolean | null>);
-      }
-      blocks.push({ type: 'data-table', columns, rows });
-    } else if (rawBlock.type === 'alert-list') {
-      if (!Array.isArray(rawBlock.alerts)) return null;
-      const alerts: Extract<WorkspaceBlock, { type: 'alert-list' }>['alerts'] = [];
-      for (const rawAlert of rawBlock.alerts) {
-        if (!isRecord(rawAlert) || !['info', 'warning', 'error'].includes(String(rawAlert.severity)) ||
-            typeof rawAlert.title !== 'string' || rawAlert.title.trim().length === 0 ||
-            (rawAlert.detail !== undefined && typeof rawAlert.detail !== 'string')) return null;
-        alerts.push({
-          severity: rawAlert.severity as 'info' | 'warning' | 'error',
-          title: rawAlert.title,
-          ...(typeof rawAlert.detail === 'string' ? { detail: rawAlert.detail } : {}),
-        });
-      }
-      blocks.push({ type: 'alert-list', alerts });
-    } else if (rawBlock.type === 'metric-grid') {
-      if (!Array.isArray(rawBlock.metrics)) return null;
-      const metrics: Extract<WorkspaceBlock, { type: 'metric-grid' }>['metrics'] = [];
-      for (const rawMetric of rawBlock.metrics) {
-        if (!isRecord(rawMetric) || typeof rawMetric.label !== 'string' || rawMetric.label.trim().length === 0 ||
-            typeof rawMetric.value !== 'string' ||
-            (rawMetric.tone !== undefined && !['neutral', 'positive', 'warning'].includes(String(rawMetric.tone)))) return null;
-        metrics.push({
-          label: rawMetric.label,
-          value: rawMetric.value,
-          tone: (rawMetric.tone ?? 'neutral') as 'neutral' | 'positive' | 'warning',
-        });
-      }
-      blocks.push({ type: 'metric-grid', metrics });
-    } else if (rawBlock.type === 'calculation-breakdown') {
-      if (typeof rawBlock.title !== 'string' || rawBlock.title.trim().length === 0 || !Array.isArray(rawBlock.lines) ||
-          typeof rawBlock.total !== 'string' || !/^-?(0|[1-9]\d*)\.\d{2}$/.test(rawBlock.total)) return null;
-      const lines: Extract<WorkspaceBlock, { type: 'calculation-breakdown' }>['lines'] = [];
-      for (const rawLine of rawBlock.lines) {
-        if (!isRecord(rawLine) || typeof rawLine.label !== 'string' || rawLine.label.trim().length === 0 ||
-            typeof rawLine.amount !== 'string' || !/^-?(0|[1-9]\d*)\.\d{2}$/.test(rawLine.amount)) return null;
-        lines.push({ label: rawLine.label, amount: rawLine.amount });
-      }
-      blocks.push({ type: 'calculation-breakdown', title: rawBlock.title, lines, total: rawBlock.total });
-    } else if (rawBlock.type === 'receipt') {
-      if (typeof rawBlock.receiptId !== 'string' || rawBlock.receiptId.trim().length === 0 ||
-          typeof rawBlock.title !== 'string' || rawBlock.title.trim().length === 0 ||
-          !['succeeded', 'failed'].includes(String(rawBlock.status)) || typeof rawBlock.occurredAt !== 'string' ||
-          Number.isNaN(Date.parse(rawBlock.occurredAt))) return null;
-      blocks.push({ type: 'receipt', receiptId: rawBlock.receiptId, title: rawBlock.title,
-        status: rawBlock.status as 'succeeded' | 'failed', occurredAt: rawBlock.occurredAt });
-    } else if (rawBlock.type === 'action-preview') {
-      if (typeof rawBlock.previewId !== 'string' || !UUID_PATTERN.test(rawBlock.previewId) ||
-          typeof rawBlock.actionType !== 'string' || rawBlock.actionType.trim().length === 0 ||
-          typeof rawBlock.schemaVersion !== 'string' || rawBlock.schemaVersion.trim().length === 0 ||
-          typeof rawBlock.title !== 'string' || rawBlock.title.trim().length === 0 ||
-          !['L1', 'L2'].includes(String(rawBlock.riskLevel)) || typeof rawBlock.expiresAt !== 'string' ||
-          Number.isNaN(Date.parse(rawBlock.expiresAt))) return null;
-      blocks.push({ type: 'action-preview', previewId: rawBlock.previewId, actionType: rawBlock.actionType,
-        schemaVersion: rawBlock.schemaVersion, title: rawBlock.title, riskLevel: rawBlock.riskLevel as 'L1' | 'L2', expiresAt: rawBlock.expiresAt });
-    }
-  }
-  return { protocolVersion: '1.0', title: value.title, blocks };
+  const parsed = WorkspaceDocumentSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 export function createAssistantIds(): { threadId: string; clientRequestId: string } {
@@ -128,12 +38,8 @@ export function createAssistantIds(): { threadId: string; clientRequestId: strin
 }
 
 export function parseAssistantRun(value: unknown): AssistantRun | null {
-  if (!isRecord(value) || typeof value.runId !== 'string' || !UUID_PATTERN.test(value.runId) ||
-      typeof value.threadId !== 'string' || !UUID_PATTERN.test(value.threadId) ||
-      !['queued', 'running', 'waiting_for_input', 'completed', 'failed'].includes(String(value.status))) {
-    return null;
-  }
-  return value as AssistantRun;
+  const parsed = AssistantRunSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 export function parseAssistantSseFrame(frame: string): AssistantUiEvent | null {
@@ -157,34 +63,13 @@ export function parseAssistantSseFrame(frame: string): AssistantUiEvent | null {
     return null;
   }
   if (!isRecord(payload) || payload.type !== eventName) return null;
-
-  switch (eventName) {
-    case 'assistant.delta':
-      return typeof payload.text === 'string' ? { type: eventName, text: payload.text } : null;
-    case 'assistant.message':
-      return typeof payload.messageId === 'string' && UUID_PATTERN.test(payload.messageId) && typeof payload.markdown === 'string'
-        ? { type: eventName, messageId: payload.messageId, markdown: payload.markdown }
-        : null;
-    case 'workspace.replace': {
-      const document = parseWorkspaceDocument(payload.document);
-      return document ? { type: eventName, document } : null;
-    }
-    case 'clarification.requested':
-      return typeof payload.question === 'string' && payload.question.trim().length > 0
-        ? { type: eventName, question: payload.question }
-        : null;
-    case 'run.completed':
-      return typeof payload.runId === 'string' && UUID_PATTERN.test(payload.runId)
-        ? { type: eventName, runId: payload.runId }
-        : null;
-    case 'run.failed':
-      return typeof payload.code === 'string' && payload.code.length > 0 && typeof payload.message === 'string' &&
-          payload.message.length > 0 && typeof payload.retryable === 'boolean'
-        ? { type: eventName, code: payload.code, message: payload.message, retryable: payload.retryable }
-        : null;
-    default:
-      return null;
+  if (eventName === 'workspace.replace') {
+    const document = parseWorkspaceDocument(payload.document);
+    if (!document) return null;
+    return { type: eventName, document } as AssistantEvent;
   }
+  const parsed = AssistantEventSchema.safeParse(payload);
+  return parsed.success ? parsed.data : null;
 }
 
 export function isTerminalAssistantEvent(event: AssistantUiEvent): boolean {
@@ -305,7 +190,144 @@ export function isTerminalRunStatus(status: AssistantRunStatus): boolean {
   return TERMINAL_RUN_STATUSES.has(status);
 }
 
+export type AssistantPreviewStatus = components['schemas']['AssistantPreviewStateResponse']['status'];
+export type AssistantPreview = {
+  previewId: string;
+  actionType: string;
+  schemaVersion: string;
+  riskLevel: components['schemas']['AssistantPreviewStateResponse']['riskLevel'];
+  status: AssistantPreviewStatus;
+  expiresAt: string;
+  receipt: Record<string, unknown> | null;
+};
+
 export type AssistantPreviewConfirmation = { previewId: string; status: 'EXECUTED'; receipt: Record<string, unknown> | null };
+export type AssistantPreviewDraft = AssistantPreview & { display: Record<string, unknown> };
+
+export class UnknownConfirmationError extends Error {
+  readonly code = 'UNKNOWN_CONFIRMATION' as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnknownConfirmationError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+function parseAssistantPreview(value: unknown, expectedPreviewId: string): AssistantPreview | null {
+  if (!isRecord(value) || value.previewId !== expectedPreviewId || !UUID_PATTERN.test(expectedPreviewId) ||
+      typeof value.actionType !== 'string' || typeof value.schemaVersion !== 'string' ||
+      (value.riskLevel !== 'L1' && value.riskLevel !== 'L2') ||
+      !(['PENDING', 'EXECUTED', 'CANCELLED', 'EXPIRED', 'STALE'] as const).includes(value.status as AssistantPreviewStatus) ||
+      typeof value.expiresAt !== 'string' || (value.receipt !== null && !isRecord(value.receipt))) return null;
+  return {
+    previewId: expectedPreviewId,
+    actionType: value.actionType,
+    schemaVersion: value.schemaVersion,
+    riskLevel: value.riskLevel,
+    status: value.status as AssistantPreviewStatus,
+    expiresAt: value.expiresAt,
+    receipt: value.receipt as Record<string, unknown> | null,
+  };
+}
+
+export async function createAssistantPreview(input: {
+  token: string | null;
+  path: string;
+  body: Record<string, unknown>;
+  fetchImpl?: typeof fetch;
+}): Promise<AssistantPreviewDraft> {
+  if (!input.token) {
+    notifyAuthExpired();
+    throw new Error('登录状态已失效，请重新登录后再试。');
+  }
+  const response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.path.replace(/^\//, '')}`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${input.token}` },
+    body: JSON.stringify(input.body),
+  });
+  if (!response.ok) {
+    if (response.status === 401) { notifyAuthExpired(); throw new Error('登录状态已失效，请重新登录后再试。'); }
+    if (response.status === 403) throw new Error('当前账号无权创建该预览。');
+    throw new Error(`无法创建操作预览（HTTP ${response.status}），请检查输入后重试。`);
+  }
+  const payload: unknown = await response.json();
+  if (!isRecord(payload) || typeof payload.previewId !== 'string' || !UUID_PATTERN.test(payload.previewId) ||
+      typeof payload.actionType !== 'string' || (payload.schemaVersion !== undefined && typeof payload.schemaVersion !== 'string') ||
+      (payload.riskLevel !== 'L1' && payload.riskLevel !== 'L2') || typeof payload.expiresAt !== 'string' ||
+      !isRecord(payload.display)) throw new Error('服务返回的预览格式无效，请稍后重试。');
+  const preview = typeof payload.schemaVersion === 'string'
+    ? parseAssistantPreview({ ...payload, status: 'PENDING', receipt: null }, payload.previewId)
+    : await getAssistantPreview({ token: input.token, previewId: payload.previewId, ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
+  if (preview && (preview.actionType !== payload.actionType || preview.riskLevel !== payload.riskLevel)) {
+    throw new Error('确认单信息不一致，请重新生成。');
+  }
+  if (!preview) throw new Error('服务返回的预览格式无效，请稍后重试。');
+  return { ...preview, display: payload.display };
+}
+
+export async function getAssistantPreview(input: {
+  token: string | null;
+  previewId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<AssistantPreview> {
+  if (!input.token) {
+    notifyAuthExpired();
+    throw new Error('登录状态已失效，请重新登录后再试。');
+  }
+  if (!UUID_PATTERN.test(input.previewId)) throw new Error('预览标识无效，请重新生成预览。');
+  const response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.previewId}`, {
+    headers: { Accept: 'application/json', Authorization: `Bearer ${input.token}` },
+  });
+  if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthExpired();
+      throw new Error('登录状态已失效，请重新登录后再试。');
+    }
+    if (response.status === 403) throw new Error('当前账号无权读取该预览。');
+    if (response.status === 404) throw new Error('预览不存在或已无法访问，请重新生成预览。');
+    throw new Error(`无法读取预览当前状态（HTTP ${response.status}），请稍后重查。`);
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json() as unknown;
+  } catch {
+    throw new Error('预览状态响应无法读取，请稍后重查。');
+  }
+  const preview = parseAssistantPreview(payload, input.previewId);
+  if (!preview) throw new Error('预览响应格式无效，请刷新后重查。');
+  return preview;
+}
+
+function confirmationFromPreview(preview: AssistantPreview): AssistantPreviewConfirmation {
+  return { previewId: preview.previewId, status: 'EXECUTED', receipt: preview.receipt };
+}
+
+function previewStatusError(status: AssistantPreviewStatus): Error {
+  if (status === 'CANCELLED') return new Error('预览已取消，未执行任何操作。');
+  if (status === 'STALE') return new Error('预览已失效或已被其他请求确认，请重新生成预览。');
+  if (status === 'EXPIRED') return new Error('预览已过期，未执行任何操作。请重新生成预览。');
+  return new Error('预览当前不可确认，请先重查状态。');
+}
+
+async function recoverUnknownConfirmation(input: {
+  token: string;
+  previewId: string;
+  fetchImpl?: typeof fetch;
+  reason?: string;
+}): Promise<AssistantPreviewConfirmation> {
+  const reason = input.reason ? `${input.reason}；` : '';
+  try {
+    const current = await getAssistantPreview(input.fetchImpl
+      ? { token: input.token, previewId: input.previewId, fetchImpl: input.fetchImpl }
+      : { token: input.token, previewId: input.previewId });
+    if (current.status === 'EXECUTED') return confirmationFromPreview(current);
+    throw new UnknownConfirmationError(`${reason}确认请求结果未知，Core 当前状态为 ${current.status}，未再次提交。请先重查预览状态。`);
+  } catch (cause) {
+    if (cause instanceof UnknownConfirmationError) throw cause;
+    throw new UnknownConfirmationError(`${reason}确认请求结果未知，无法核对 Core 当前状态。请先重查预览状态后再决定是否重试。`);
+  }
+}
 
 export async function confirmAssistantPreview(input: {
   token: string | null;
@@ -318,10 +340,27 @@ export async function confirmAssistantPreview(input: {
     throw new Error('登录状态已失效，请重新登录后再试。');
   }
   if (!UUID_PATTERN.test(input.previewId) || !UUID_PATTERN.test(input.idempotencyKey)) throw new Error('预览或确认标识无效，请重新生成预览。');
-  const response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.previewId}/confirm`, {
-    method: 'POST',
-    headers: { Accept: 'application/json', Authorization: `Bearer ${input.token}`, 'Idempotency-Key': input.idempotencyKey },
-  });
+  const current = await getAssistantPreview(input.fetchImpl
+    ? { token: input.token, previewId: input.previewId, fetchImpl: input.fetchImpl }
+    : { token: input.token, previewId: input.previewId });
+  if (current.status === 'EXECUTED') return confirmationFromPreview(current);
+  if (current.status !== 'PENDING') throw previewStatusError(current.status);
+  if (!Number.isFinite(Date.parse(current.expiresAt)) || Date.parse(current.expiresAt) <= Date.now()) {
+    throw new Error('预览已过期，未执行任何操作。请重新生成预览。');
+  }
+  const recover = () => input.fetchImpl
+    ? recoverUnknownConfirmation({ token: input.token!, previewId: input.previewId, fetchImpl: input.fetchImpl })
+    : recoverUnknownConfirmation({ token: input.token!, previewId: input.previewId });
+
+  let response: Response;
+  try {
+    response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.previewId}/confirm`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', Authorization: `Bearer ${input.token}`, 'Idempotency-Key': input.idempotencyKey },
+    });
+  } catch {
+    return recover();
+  }
   if (!response.ok) {
     if (response.status === 401) {
       notifyAuthExpired();
@@ -329,10 +368,19 @@ export async function confirmAssistantPreview(input: {
     }
     if (response.status === 403) throw new Error('当前账号无权确认该预览。');
     if (response.status === 409) throw new Error('预览已失效或已被其他请求确认，请重新生成预览。');
-    throw new Error(`确认失败（HTTP ${response.status}），请稍后重试。`);
+    return recover();
   }
-  const payload: unknown = await response.json();
+  let payload: unknown;
+  try {
+    payload = await response.json() as unknown;
+  } catch {
+    return recover();
+  }
   if (!isRecord(payload) || payload.previewId !== input.previewId || payload.status !== 'EXECUTED' ||
-      (payload.receipt !== null && !isRecord(payload.receipt))) throw new Error('确认响应格式无效，请刷新后核对业务结果。');
+      (payload.receipt !== null && !isRecord(payload.receipt))) {
+    return input.fetchImpl
+      ? recoverUnknownConfirmation({ token: input.token!, previewId: input.previewId, fetchImpl: input.fetchImpl, reason: '确认响应格式无效' })
+      : recoverUnknownConfirmation({ token: input.token!, previewId: input.previewId, reason: '确认响应格式无效' });
+  }
   return { previewId: input.previewId, status: 'EXECUTED', receipt: payload.receipt as Record<string, unknown> | null };
 }

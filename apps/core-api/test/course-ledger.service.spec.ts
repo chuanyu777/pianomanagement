@@ -23,6 +23,7 @@ function makePrisma(options?: { openingPaid?: string; openingGift?: string }) {
     id: accountId,
     openingPaidBalance: new Prisma.Decimal(options?.openingPaid ?? '0.00'),
     openingGiftBalance: new Prisma.Decimal(options?.openingGift ?? '0.00'),
+    version: 0,
   };
   const entries: Entry[] = [];
   const payments: Array<Record<string, unknown>> = [];
@@ -33,7 +34,10 @@ function makePrisma(options?: { openingPaid?: string; openingGift?: string }) {
   const tx = {
     studentCourseAccount: {
       findUnique: vi.fn(async () => account),
-      update: vi.fn(async () => account),
+      update: vi.fn(async ({ data }: { data: { version?: { increment: number } } }) => {
+        if (data.version) account.version += data.version.increment;
+        return account;
+      }),
     },
     paymentRecord: {
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
@@ -89,6 +93,24 @@ function makePrisma(options?: { openingPaid?: string; openingGift?: string }) {
 
 describe('CourseLedgerService', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('returns immutable account ledger facts in reverse chronological order with decimal strings', async () => {
+    const { prisma, tx } = makePrisma();
+    tx.ledgerEntry.findMany.mockResolvedValueOnce([{
+      id: 'entry-1', accountId, kind: 'PAYMENT', paidDelta: new Prisma.Decimal('100.00'),
+      giftDelta: new Prisma.Decimal('0.00'), occurredAt: at, createdById: actorId,
+      commandId: 'command-1', reversesEntryId: null, note: '续费', createdBy: { username: 'owner' },
+    }] as never);
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
+
+    await expect(service.listEntries(accountId)).resolves.toEqual({
+      accountId,
+      entries: [{ entryId: 'entry-1', occurredAt: at.toISOString(), kind: 'PAYMENT', amount: '100.00', paidDelta: '100.00', giftDelta: '0.00', note: '续费', operator: 'owner' }],
+    });
+    expect(tx.ledgerEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { accountId }, orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+    }));
+  });
 
   it('derives each balance from immutable ledger deltas plus the account opening balances', async () => {
     const { prisma, tx, entries } = makePrisma({ openingPaid: '125.30', openingGift: '40.00' });
@@ -212,6 +234,7 @@ describe('CourseLedgerService', () => {
 
     const reversal = await service.reverseEntry({
       entryId: 'original-entry',
+      accountVersion: 0,
       occurredAt: at,
       createdById: actorId,
       commandId: 'reverse-command-1',
@@ -229,6 +252,7 @@ describe('CourseLedgerService', () => {
 
     await expect(service.reverseEntry({
       entryId: 'original-entry',
+      accountVersion: 1,
       occurredAt: at,
       createdById: actorId,
       commandId: 'reverse-command-2',
@@ -245,7 +269,7 @@ describe('CourseLedgerService', () => {
     });
     const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
     const command = {
-      entryId: 'original-gift', occurredAt: at, createdById: actorId, commandId: 'gift-reversal-command',
+      entryId: 'original-gift', accountVersion: 0, occurredAt: at, createdById: actorId, commandId: 'gift-reversal-command',
     };
 
     const first = await service.reverseEntry(command);
@@ -254,5 +278,53 @@ describe('CourseLedgerService', () => {
     expect(entries).toHaveLength(2);
     expect(entries[1]?.giftDelta.eq('-25.00')).toBe(true);
     expect(second).toEqual(first);
+  });
+
+  it.each([
+    { kind: 'PAYMENT', paidDelta: '40.00', giftDelta: '0.00', openingPaid: '0.00', openingGift: '0.00' },
+    { kind: 'GIFT', paidDelta: '0.00', giftDelta: '40.00', openingPaid: '0.00', openingGift: '0.00' },
+  ])('refuses to reverse a $kind entry when its balance pool has already been consumed', async (original) => {
+    const { prisma, tx, entries } = makePrisma({ openingPaid: original.openingPaid, openingGift: original.openingGift });
+    entries.push({
+      id: 'original', accountId, kind: original.kind,
+      paidDelta: new Prisma.Decimal(original.paidDelta), giftDelta: new Prisma.Decimal(original.giftDelta),
+      occurredAt: at, createdById: actorId, commandId: 'source', reversesEntryId: null,
+    });
+    if (original.kind === 'PAYMENT') entries.push({
+      id: 'paid-consumption', accountId, kind: 'LESSON_CONSUMPTION', paidDelta: new Prisma.Decimal('-1.00'),
+      giftDelta: new Prisma.Decimal('0.00'), occurredAt: at, createdById: actorId,
+      commandId: 'consume', reversesEntryId: null,
+    });
+    else entries.push({
+      id: 'gift-consumption', accountId, kind: 'LESSON_CONSUMPTION', paidDelta: new Prisma.Decimal('0.00'),
+      giftDelta: new Prisma.Decimal('-1.00'), occurredAt: at, createdById: actorId,
+      commandId: 'consume', reversesEntryId: null,
+    });
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
+
+    await expect(service.reverseEntry({
+      entryId: 'original', accountVersion: 0, occurredAt: at, createdById: actorId, commandId: 'reverse',
+    })).rejects.toMatchObject({ status: 400 });
+
+    expect(entries).toHaveLength(2);
+    expect(tx.studentCourseAccount.update).not.toHaveBeenCalled();
+  });
+
+  it('checks the account version only after taking the row lock', async () => {
+    const { prisma, tx, entries } = makePrisma();
+    entries.push({
+      id: 'original-entry', accountId, kind: 'PAYMENT', paidDelta: new Prisma.Decimal('10.00'),
+      giftDelta: new Prisma.Decimal('0.00'), occurredAt: at, createdById: actorId,
+      commandId: 'payment-command', reversesEntryId: null,
+    });
+    const service = new CourseLedgerService(prisma as never, { assertWritableForDate: vi.fn() } as never);
+
+    await expect(service.reverseEntry({
+      entryId: 'original-entry', accountVersion: 3, occurredAt: at, createdById: actorId, commandId: 'reverse-stale',
+    })).rejects.toMatchObject({ status: 409 });
+
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(entries).toHaveLength(1);
+    expect(tx.studentCourseAccount.update).not.toHaveBeenCalled();
   });
 });

@@ -18,6 +18,7 @@ import { RefundsModule } from './modules/refunds/refunds.module.js';
 import { StudentCourseAccountsModule } from './modules/student-course-accounts/student-course-accounts.module.js';
 import { StudentsModule } from './modules/students/students.module.js';
 import { TeachersModule } from './modules/teachers/teachers.module.js';
+import { DashboardModule } from './modules/dashboard/dashboard.module.js';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { TeachersModule } from './modules/teachers/teachers.module.js';
     InternalToolsModule,
     CoursesModule,
     CourseLedgerModule,
+    DashboardModule,
     LessonsModule,
     ManualTransactionsModule,
     PeriodsModule,

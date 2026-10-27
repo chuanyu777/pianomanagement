@@ -17,7 +17,7 @@ describe('AssistantStatusService', () => {
       $queryRaw: vi.fn().mockResolvedValue([{ '?column?': 1 }]),
     };
     const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ status: 'ok', service: 'agent-runtime' }), {
+      new Response(JSON.stringify({ status: 'ok', service: 'agent-runtime', modelAvailable: true }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }),
@@ -41,6 +41,12 @@ describe('AssistantStatusService', () => {
       'http://agent-runtime.test/health',
       expect.objectContaining({ method: 'GET' }),
     );
+  });
+
+  it('reports AI unavailable when the runtime is healthy but the model is disabled', async () => {
+    const service = new AssistantStatusService({ $queryRaw: vi.fn().mockResolvedValue([{ ok: 1 }]) } as never);
+    const result = await service.getStatus({ agentRuntimeUrl: 'http://agent-runtime.test', fetchImpl: vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'ok', service: 'agent-runtime', modelAvailable: false }), { status: 200 })), now: () => checkedAt });
+    expect(result).toMatchObject({ available: false, agentRuntime: { available: true }, message: 'AI 助手暂不可用' });
   });
 
   it('degrades safely when Agent Runtime cannot be reached', async () => {

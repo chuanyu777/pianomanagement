@@ -17,6 +17,33 @@ describe('Agent Runtime PostgreSQL repository', () => {
     vi.unstubAllGlobals();
   });
 
+  test('restores task messages only for the bound actor across repository instances', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const actorKey = `task-owner-${crypto.randomUUID()}`;
+    const first = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const second = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const cleanup = new Pool({ connectionString: databaseUrl });
+    try {
+      await first.createRun({ runId, threadId, userMessage: '查询账户', actorKey });
+      await first.appendMessage({ threadId, runId, role: 'assistant', content: '查询完成' });
+      await first.appendEvent(runId, { type: 'workspace.replace', document: { protocolVersion: '1.0', title: '账户结果', blocks: [], sources: [] } });
+      await first.close();
+      const list = await second.listThreads!(actorKey, 12);
+      expect(list).toContainEqual(expect.objectContaining({ threadId, title: '查询账户' }));
+      expect(await second.listThreads!('different-actor', 12)).not.toContainEqual(expect.objectContaining({ threadId }));
+      await expect(second.getThread!(threadId, actorKey)).resolves.toMatchObject({ threadId, messages: [{ role: 'user', content: '查询账户' }, { role: 'assistant', content: '查询完成' }], workspace: { title: '账户结果' } });
+      await expect(second.getThread!(threadId, 'different-actor')).resolves.toBeNull();
+    } finally {
+      await second.close();
+      await cleanup.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_messages WHERE run_id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_runs WHERE id = $1', [runId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await cleanup.end();
+    }
+  }, 30_000);
+
   test('persists run status and event history across repository instances', async () => {
     const runId = crypto.randomUUID();
     const threadId = crypto.randomUUID();
@@ -329,7 +356,7 @@ describe('Agent Runtime PostgreSQL repository', () => {
       });
       firstApp = buildServer({ config, checkpointer: firstCheckpointer, repository: firstRepository, eventHub: firstEventHub, worker: firstWorker });
       const startPath = '/internal/assistant/runs/start';
-      const startBody = { runId, threadId, userMessage: '真实重启恢复验证' };
+      const startBody = { runId, threadId, userMessage: '查看今日经营摘要' };
       const start = await firstApp.inject({
         method: 'POST',
         url: startPath,

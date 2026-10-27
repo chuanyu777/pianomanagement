@@ -40,6 +40,7 @@ enum LedgerEntryKind {
   GIFT_REVERSAL
   LESSON_CONSUMPTION
   LESSON_CONSUMPTION_REVERSAL
+  LESSON_CONSUMPTION_CORRECTION
   REFUND_PAID
   REFUND_GIFT_CLEARING
 }
@@ -102,14 +103,14 @@ model User {
 
 model Teacher {
   id                    String    @id @default(uuid())
-  userId                String    @unique
+  userId                String?   @unique
   name                  String
   isActive              Boolean   @default(true)
   defaultBaseSalary     Decimal   @default(0) @db.Decimal(14, 2)
   defaultCommissionRate Decimal   @default(0) @db.Decimal(7, 4)
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
-  user                  User      @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user                  User?     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   lessons               Lesson[]
   payrolls              Payroll[]
 }
@@ -117,6 +118,7 @@ model Teacher {
 model Student {
   id             String                 @id @default(uuid())
   name           String
+  phone          String?
   notes          String?
   withdrawnAt    DateTime?
   createdAt      DateTime               @default(now())
@@ -204,6 +206,7 @@ model LedgerEntry {
   lessonId        String?              @unique
   refundDetailId  String?
   reversesEntryId String?              @unique
+  correctsEntryId String?              @unique
   createdAt       DateTime             @default(now())
   account         StudentCourseAccount @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   createdBy       User                 @relation(fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
@@ -213,6 +216,8 @@ model LedgerEntry {
   refundDetail    RefundDetail?        @relation(fields: [refundDetailId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   reversesEntry   LedgerEntry?         @relation("LedgerEntryReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   reversedBy      LedgerEntry?         @relation("LedgerEntryReversal")
+  correctsEntry   LedgerEntry?         @relation("LedgerEntryCorrection", fields: [correctsEntryId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  correctedBy     LedgerEntry?         @relation("LedgerEntryCorrection")
 
   @@index([accountId, occurredAt, id])
   @@index([createdById, createdAt])

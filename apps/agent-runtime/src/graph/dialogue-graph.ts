@@ -1,9 +1,10 @@
-import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { z } from 'zod';
 import { WorkspaceDocumentSchema, protocolVersion, type WorkspaceDocument, type WorkspaceResultKind } from '@piano/assistant-protocol';
 import type { CoreToolClient, PaymentPreviewRequest } from '../tools/core-tool-client.js';
 import { CoreDialogueError, type DialogueReadClient, type LessonReadQuery, type LessonReadResult } from '../tools/dialogue-tools.js';
 import { DialogueIntentSchema, type DialogueIntent, type UnderstandIntent } from './dialogue-intent.js';
+import type { IntentParser } from './intent-parser.js';
+import { refusalGuidance } from './refusal-messages.js';
 import { resolveLessonDateRange } from './dialogue-calendar.js';
 import { deterministicMultiStep, DialogueMultiStepPlanSchema, type DialogueMultiStepPlan, type UnderstandMultiStep } from './dialogue-multi-step.js';
 
@@ -171,9 +172,8 @@ function requiredFields(operation: DialogueTask['operation']): string[] {
   }
 }
 
-export function createDialogueGraph(input: { tools: Tools; capability: string; understand?: UnderstandIntent; understandMultiStep?: UnderstandMultiStep; now?: () => Date }) {
+export function createDialogueGraph(input: { tools: Tools; capability: string; understand?: UnderstandIntent; intentParser?: IntentParser; understandMultiStep?: UnderstandMultiStep; now?: () => Date }) {
   type Prepared = { previous: DialogueTask; task: DialogueTask; alreadyExecuted: boolean; multiStepPlan?: DialogueMultiStepPlan; forcedIntent?: DialogueIntent };
-  const State = Annotation.Root({ turn: Annotation<DialogueTurn>(), prepared: Annotation<Prepared>(), intent: Annotation<DialogueIntent>(), result: Annotation<DialogueResult>() });
   const loadContext = async (turn: DialogueTurn): Promise<{ prepared?: Prepared; result?: DialogueResult }> => {
     const parsed = TaskSchema.safeParse(turn.previous);
     const previous = parsed.success ? parsed.data : TaskSchema.parse({});
@@ -252,7 +252,6 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
     if (prepared.forcedIntent) return { intent: prepared.forcedIntent };
     if (/^选择候选:[^:]+:\d+$/u.test(turn.message)) return { intent: { mode:'continue', operation: prepared.task.operation, fields: {}, question:null } };
     if (turn.message.trim() === '取消当前办理') return { intent: { mode:'cancel', operation:null, fields:{}, question:null } };
-    if (!input.understand) return { result: finish(prepared.task, turn.runId, 'AI暂不可用，请使用人工办理入口。', document('AI暂不可用', '未执行任何业务。', [{ type: 'error-recovery', code: 'AI_UNAVAILABLE', message: '请稍后重试，或使用人工办理入口。', actions: ['open-structured-page'] }], 'error')) };
     const userMessage = recoveryCommands.has(turn.message.trim()) ? prepared.previous.lastUserMessage : turn.message;
     if (!userMessage) return { result: ask(prepared.task, turn.runId, '没有可重试的请求，请重新说明要办理的事项。') };
     const calendarDate = businessDate(input.now?.() ?? new Date());
@@ -271,7 +270,17 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         return { intent: { mode:'new', operation:step.operation, fields:step.fields, question:null } };
       }
     }
-    return { intent: DialogueIntentSchema.parse(await input.understand({ businessDate: businessDate(input.now?.() ?? new Date()), task: { status:prepared.task.status,operation: prepared.task.operation, fields: prepared.task.fields, candidates: prepared.task.candidates, references: prepared.task.references, hasPreview: !!prepared.previous.previewId && !prepared.alreadyExecuted, alreadyExecuted: prepared.alreadyExecuted }, userMessage }, signal)) };
+    const context = { businessDate: calendarDate, task: { status:prepared.task.status,operation: prepared.task.operation, fields: prepared.task.fields, candidates: prepared.task.candidates, references: prepared.task.references, hasPreview: !!prepared.previous.previewId && !prepared.alreadyExecuted, alreadyExecuted: prepared.alreadyExecuted }, userMessage };
+    if (input.intentParser) {
+      const parsed = await input.intentParser(context, signal);
+      if (parsed.kind === 'parsed') return { intent: parsed.intent };
+      if (parsed.kind === 'unavailable') {
+        return { result: finish(prepared.task, turn.runId, '助手暂时连不上理解服务，未执行任何业务。你可以先用结构化页面办理，或稍后重试。', document('助手暂不可用', '未执行任何业务。', [{ type:'error-recovery', code:'AI_UNAVAILABLE', message:'理解服务暂不可用，未执行任何业务。', actions:['refresh','open-structured-page'] }], 'error')) };
+      }
+      return { result: ask(prepared.task, turn.runId, '我没太听懂这句话要办什么。可以说得更具体一点，比如"查今天的课表"、"给某位学生交费"或"排一节课"。') };
+    }
+    if (!input.understand) return { result: finish(prepared.task, turn.runId, 'AI暂不可用，请使用人工办理入口。', document('AI暂不可用', '未执行任何业务。', [{ type: 'error-recovery', code: 'AI_UNAVAILABLE', message: '请稍后重试，或使用人工办理入口。', actions: ['open-structured-page'] }], 'error')) };
+    return { intent: DialogueIntentSchema.parse(await input.understand(context, signal)) };
   };
   const process = async (turn: DialogueTurn, prepared: Prepared, intent: DialogueIntent): Promise<DialogueResult> => {
     const { previous } = prepared;
@@ -360,6 +369,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       }
       if (task.operation === 'lessons.read' && f.date && !f.dateFrom) { f.dateFrom = f.date; f.dateTo = f.date; }
       if (!task.operation || task.operation === 'unsupported') {
+        if (intent.question) return finish(task, turn.runId, intent.question, document('需要换个方式办理', intent.question, [], 'clarification'));
         if (/退款手续费.*(?:手工收入|收入)/u.test(turn.message)) return finish(task, turn.runId, '退款手续费由最终退款业务自动形成经营收入，不能再重复登记为手工收入。当前未生成任何预览。', document('不能重复登记退款手续费', '退款手续费应随最终退款自动入账；本次未写入任何业务数据。'));
         if (/退款.*手续费.*\d+(?:\.\d+)?%/u.test(turn.message)) return finish(task, turn.runId, '退款手续费必须填写固定金额；百分比只在预览中根据固定金额换算显示，不能按百分比直接办理。当前未生成任何预览。', document('请填写固定手续费', '请提供固定手续费金额；当前未写入任何业务数据。'));
         if (task.fields.reason==='跨课程抵扣欠费'||/退款.*(?:抵|冲).*(?:欠费)|(?:主课|陪练).*抵.*(?:主课|陪练).*欠费/u.test(turn.message)) return finish(task, turn.runId, '不同课程账户不能相互抵扣欠费；请先分别处理各课程余额。当前未生成退款预览。', document('不能跨课程抵扣', '各课程金额独立核算，当前未写入任何业务数据。'));
@@ -392,7 +402,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const retained = [f.studentName && `学生${f.studentName}`, f.courseName && `课程${f.courseName}`, f.teacherName && `老师${f.teacherName}`, f.amount && `金额${f.amount}`].filter(Boolean).join('、');
         return ask(task, turn.runId, `${retained ? `已保留：${retained}。` : ''}还需要补充：${missing.map(field => labels[field] ?? field).join('、')}。`);
       }
-      if (task.operation === 'student.update' && !f.name && !f.notes) return ask(task, turn.runId, '请说明要修改学生姓名或备注中的哪一项。');
+      if (task.operation === 'student.update' && !f.name && !f.phone && !f.notes) return ask(task, turn.runId, '请说明要修改学生姓名、电话或备注中的哪一项。');
       if (task.operation === 'course.update' && !f.name && !f.defaultUnitPrice && !f.defaultDurationMinutes && !f.isActive) return ask(task, turn.runId, '请说明要修改课程名称、默认单价、时长或启用状态中的哪一项。');
       if (task.operation === 'payroll.adjust') {
         if (!f.baseSalary && !f.commissionRate && !f.bonusAmount && !f.deductionAmount) return ask(task, turn.runId, '请说明要调整当月基本工资、提成比例、奖金或代扣中的哪一项及其数值。');
@@ -672,8 +682,8 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       await withdrawPreviousPreview('生成替代预览');
       let command: Record<string, unknown>;
       switch (task.operation) {
-        case 'student.create': command = { name:f.name, ...(f.notes ? { notes:f.notes } : {}) }; break;
-        case 'student.update': command = { studentId:task.selected.studentId, ...(f.name ? { name:f.name } : {}), ...(f.notes !== undefined ? { notes:f.notes } : {}) }; break;
+        case 'student.create': command = { name:f.name, ...(f.phone ? { phone:f.phone } : {}), ...(f.notes ? { notes:f.notes } : {}) }; break;
+        case 'student.update': command = { studentId:task.selected.studentId, ...(f.name ? { name:f.name } : {}), ...(f.phone !== undefined ? { phone:f.phone } : {}), ...(f.notes !== undefined ? { notes:f.notes } : {}) }; break;
         case 'teacher.create': command = { name:f.name, baseSalary:moneyText(f.baseSalary!), commissionRate:rateText(f.commissionRate!) }; break;
         case 'teacher.compensation.update': command = { teacherId:task.selected.teacherId, baseSalary:moneyText(f.baseSalary!), commissionRate:rateText(f.commissionRate!) }; break;
         case 'course.create': command = { name:f.name, defaultUnitPrice:moneyText(f.defaultUnitPrice!), defaultDurationMinutes:Number(f.defaultDurationMinutes) }; break;
@@ -710,27 +720,42 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
     }
   };
   const failure = (turn: DialogueTurn, task: DialogueTask, error: unknown) => {
-    const message = error instanceof CoreDialogueError ? error.message : 'AI处理暂时失败，请稍后重试。未确认的业务不会自动执行。';
+    const message = error instanceof CoreDialogueError
+      ? (refusalGuidance(error.code, error.status) ?? error.message)
+      : 'AI处理暂时失败，请稍后重试。未确认的业务不会自动执行。';
     const recovery: WorkspaceDocument['blocks'][number] = { type:'error-recovery', code: error instanceof CoreDialogueError ? `CORE_${error.status}` : 'AI_PROCESS_FAILED', message, actions:['refresh','open-structured-page'] };
     const workspace = task.previewId && task.workspace ? { ...task.workspace, resultKind: 'error' as const, blocks:[...task.workspace.blocks, recovery] } : document('暂时无法完成', message, [recovery], 'error');
     return { result: finish(task, turn.runId, message, workspace) };
   };
-  return new StateGraph(State)
-    .addNode('loadContextAndWithdrawPreview', async state => {
-      try { return await loadContext(state.turn); }
-      catch (error) {
-        const parsed = TaskSchema.safeParse(state.turn.previous);
-        const previous = parsed.success ? parsed.data : TaskSchema.parse({});
-        return failure(state.turn, { ...previous, version: previous.version + 1 }, error);
-      }
-    })
-    .addNode('understand', async (state, config) => { try { return await understandTurn(state.turn, state.prepared, config.signal); } catch (error) { return failure(state.turn, state.prepared.task, error); } })
-    .addNode('resolveAndReadOrPreview', async state => {
-      if (state.prepared.multiStepPlan) {
-        const plan = state.prepared.multiStepPlan;
+  const runTurn = async (turn: DialogueTurn, signal?: AbortSignal): Promise<{ result: DialogueResult }> => {
+    let prepared: Prepared;
+    try {
+      const loaded = await loadContext(turn);
+      if (loaded.result) return { result: loaded.result };
+      if (!loaded.prepared) throw new Error('对话上下文缺失');
+      prepared = loaded.prepared;
+    } catch (error) {
+      const parsed = TaskSchema.safeParse(turn.previous);
+      const previous = parsed.success ? parsed.data : TaskSchema.parse({});
+      return { result: failure(turn, { ...previous, version: previous.version + 1 }, error).result };
+    }
+
+    let intent: DialogueIntent;
+    try {
+      const understood = await understandTurn(turn, prepared, signal);
+      if (understood.result) return { result: understood.result };
+      if (!understood.intent) throw new Error('意图缺失');
+      intent = understood.intent;
+    } catch (error) {
+      return { result: failure(turn, prepared.task, error).result };
+    }
+
+    try {
+      if (prepared.multiStepPlan) {
+        const plan = prepared.multiStepPlan;
         const first = plan.steps[0]!;
         const second = plan.steps[1]!;
-        const task = state.prepared.task;
+        const task = prepared.task;
         task.operation = first.operation;
         task.fields = Object.fromEntries(Object.entries(first.fields).filter((entry): entry is [string,string] => entry[1] !== null));
         task.multiStep = { steps:plan.steps,currentStep:0,completedPreviewIds:[] };
@@ -742,18 +767,21 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
                 : operation === 'payroll.cancel-payment' ? '撤销原工资支付' : '重新登记工资支付';
         const describe = (step: typeof first) => `${name(step.operation)}${step.fields.courseName ? `（${step.fields.courseName}` : '（'}${step.fields.amount ? `${moneyText(step.fields.amount)}元` : ''}${step.fields.startsAt ? `，${step.fields.startsAt}` : ''}${step.fields.channel ? `，${step.fields.channel}` : ''}）`;
         const untouched = first.fields.courseName === second.fields.courseName && first.operation === 'payment.preview' && second.operation === 'gift.preview' ? '其他课程（如陪练）不会改动。' : '';
-        const statedTotal = /(?:收|合计)(\d+(?:\.\d{1,2})?)元/u.exec(state.turn.message)?.[1];
+        const statedTotal = /(?:收|合计)(\d+(?:\.\d{1,2})?)元/u.exec(turn.message)?.[1];
         const totalText = statedTotal && first.operation === 'payment.preview' && second.operation === 'payment.preview' ? `原请求总额${moneyText(statedTotal)}元；` : '';
         const answer = `已拆为按顺序分别确认的两步：${totalText}第一步${describe(first)}；第二步${describe(second)}。${untouched}回复“开始第一步”后才生成第一步预览，当前尚未执行。`;
-        return { result:finish(task,state.turn.runId,answer,document('两步办理计划',answer,[],'clarification')) };
+        return { result: finish(task, turn.runId, answer, document('两步办理计划', answer, [], 'clarification')) };
       }
-      const result = await process(state.turn, state.prepared, state.intent);
-      return { result };
-    })
-    .addEdge(START, 'loadContextAndWithdrawPreview')
-    .addConditionalEdges('loadContextAndWithdrawPreview', state => state.result ? END : 'understand')
-    .addConditionalEdges('understand', state => state.result ? END : 'resolveAndReadOrPreview')
-    .addEdge('resolveAndReadOrPreview', END).compile();
+      return { result: await process(turn, prepared, intent) };
+    } catch (error) {
+      return { result: failure(turn, prepared.task, error).result };
+    }
+  };
+
+  return {
+    invoke: async (state: { turn: DialogueTurn }, config?: { signal?: AbortSignal }) =>
+      runTurn(state.turn, config?.signal ?? new AbortController().signal),
+  };
 }
 
 function lessonReferences(lessons: LessonReadResult['lessons']): DialogueTask['references'] {

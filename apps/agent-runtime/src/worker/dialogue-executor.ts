@@ -1,6 +1,7 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createDialogueGraph } from '../graph/dialogue-graph.js';
-import { createModelIntentInterpreter, type UnderstandIntent } from '../graph/dialogue-intent.js';
+import type { UnderstandIntent } from '../graph/dialogue-intent.js';
+import { createIntentParser, type IntentParser } from '../graph/intent-parser.js';
 import { createModelMultiStepInterpreter, type UnderstandMultiStep } from '../graph/dialogue-multi-step.js';
 import type { DialogueTaskStore } from '../persistence/task-store.js';
 import { trustedCapabilityBinding } from '../persistence/trusted-capability.js';
@@ -8,8 +9,26 @@ import type { CoreToolClient } from '../tools/core-tool-client.js';
 import type { DialogueReadClient } from '../tools/dialogue-tools.js';
 import type { RunExecutionContext } from './run-worker.js';
 
-export function createDialogueRunExecutor(input: { tasks: DialogueTaskStore; coreTools: CoreToolClient; reads: DialogueReadClient; model?: BaseChatModel; understand?: UnderstandIntent; understandMultiStep?: UnderstandMultiStep; now?: () => Date; runTimeoutMs: number }) {
-  const understand = input.understand ?? (input.model ? createModelIntentInterpreter(input.model) : undefined);
+export function createDialogueRunExecutor(input: {
+  tasks: DialogueTaskStore;
+  coreTools: CoreToolClient;
+  reads: DialogueReadClient;
+  model?: BaseChatModel;
+  understand?: UnderstandIntent;
+  intentParser?: IntentParser;
+  understandMultiStep?: UnderstandMultiStep;
+  now?: () => Date;
+  runTimeoutMs: number;
+}) {
+  // The parser is the single entry point for understanding. Legacy rules are
+  // shadow-only by default so their accuracy can be compared before removal,
+  // and can be re-enabled as an emergency fallback without a code change.
+  const intentParser = input.intentParser ?? (input.understand
+    ? undefined
+    : createIntentParser(input.model, {
+        shadowRules: process.env['AGENT_INTENT_SHADOW_RULES'] !== 'false',
+        emergencyRuleFallback: process.env['AGENT_INTENT_RULE_FALLBACK'] === 'true',
+      }));
   const understandMultiStep = input.understandMultiStep ?? (input.model ? createModelMultiStepInterpreter(input.model) : undefined);
   return async (context: RunExecutionContext): Promise<void> => {
     const capability = context.run.capability;
@@ -30,7 +49,14 @@ export function createDialogueRunExecutor(input: { tasks: DialogueTaskStore; cor
         readMonthlyConsumption: input.reads.readMonthlyConsumption.bind(input.reads),
         readPeriodPreclose: input.reads.readPeriodPreclose.bind(input.reads),
       });
-      const graph = createDialogueGraph({ tools, capability, ...(understand ? { understand } : {}), ...(understandMultiStep ? { understandMultiStep } : {}), ...(input.now ? { now: input.now } : {}) });
+      const graph = createDialogueGraph({
+        tools,
+        capability,
+        ...(input.understand ? { understand: input.understand } : {}),
+        ...(intentParser ? { intentParser } : {}),
+        ...(understandMultiStep ? { understandMultiStep } : {}),
+        ...(input.now ? { now: input.now } : {}),
+      });
       const { result } = await graph.invoke({ turn: { runId: context.run.runId, threadId: context.run.threadId, message: context.run.userMessage, previous } }, { signal: AbortSignal.any([context.signal, AbortSignal.timeout(input.runTimeoutMs)]) });
       return { state: result.task, result };
     });

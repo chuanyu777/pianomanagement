@@ -3,12 +3,12 @@ import { AIMessage, HumanMessage, SystemMessage, type BaseMessage } from '@langc
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
 // These are orchestration capabilities, not copies of Core domain enums/entities.
-const operationSchema = z.enum(['lessons.read', 'accounts.read', 'ledger.read', 'overview.read', 'report.monthly', 'payroll.read', 'directory.read', 'arrears.read', 'consumption.read', 'period.preclose.read', 'student.create', 'student.update', 'teacher.create', 'teacher.compensation.update', 'course.create', 'course.update', 'course-account.open', 'course-account.price', 'payment.preview', 'gift.preview', 'ledger-entry.reversal', 'lesson.schedule', 'lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal', 'lesson.complete.correction', 'refund.preview', 'payroll.generate', 'payroll.adjust', 'payroll.pay', 'payroll.cancel-payment', 'manual-transaction.create', 'period.close', 'period.reopen', 'unsupported']);
-const fieldNames = ['studentName', 'courseName', 'teacherName', 'dateFrom', 'dateTo', 'date', 'startsAt', 'targetStartsAt', 'amount', 'correctedUnitPrice', 'channel', 'occurredAt', 'paidAt', 'note', 'feeAmount', 'period', 'basis', 'groupBy', 'kind', 'category', 'baseSalary', 'commissionRate', 'bonusAmount', 'bonusNote', 'deductionAmount', 'deductionNote', 'reason', 'weeks', 'status', 'selectionId', 'name', 'notes', 'defaultUnitPrice', 'defaultDurationMinutes', 'isActive', 'currentUnitPrice'] as const;
+export const operationSchema = z.enum(['lessons.read', 'accounts.read', 'ledger.read', 'overview.read', 'report.monthly', 'payroll.read', 'directory.read', 'arrears.read', 'consumption.read', 'period.preclose.read', 'student.create', 'student.update', 'teacher.create', 'teacher.compensation.update', 'course.create', 'course.update', 'course-account.open', 'course-account.price', 'payment.preview', 'gift.preview', 'ledger-entry.reversal', 'lesson.schedule', 'lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal', 'lesson.complete.correction', 'refund.preview', 'payroll.generate', 'payroll.adjust', 'payroll.pay', 'payroll.cancel-payment', 'manual-transaction.create', 'period.close', 'period.reopen', 'unsupported']);
+export const fieldNames = ['studentName', 'courseName', 'teacherName', 'dateFrom', 'dateTo', 'date', 'startsAt', 'targetStartsAt', 'amount', 'correctedUnitPrice', 'channel', 'occurredAt', 'paidAt', 'note', 'feeAmount', 'period', 'basis', 'groupBy', 'kind', 'category', 'baseSalary', 'commissionRate', 'bonusAmount', 'bonusNote', 'deductionAmount', 'deductionNote', 'reason', 'weeks', 'status', 'selectionId', 'name', 'phone', 'notes', 'defaultUnitPrice', 'defaultDurationMinutes', 'isActive', 'currentUnitPrice'] as const;
 type IntentField = typeof fieldNames[number];
 type DialogueOperation = z.infer<typeof operationSchema>;
 
-const operationFields: Record<DialogueOperation, readonly IntentField[]> = {
+export const operationFields: Record<DialogueOperation, readonly IntentField[]> = {
   'lessons.read': ['dateFrom', 'dateTo', 'date', 'studentName', 'courseName', 'teacherName', 'status', 'selectionId'],
   'accounts.read': ['studentName', 'courseName', 'selectionId'],
   'ledger.read': ['studentName', 'courseName', 'dateFrom', 'dateTo', 'selectionId'],
@@ -19,8 +19,8 @@ const operationFields: Record<DialogueOperation, readonly IntentField[]> = {
   'arrears.read': [],
   'consumption.read': ['period', 'groupBy'],
   'period.preclose.read': ['period'],
-  'student.create': ['name', 'notes'],
-  'student.update': ['studentName', 'name', 'notes'],
+  'student.create': ['name', 'phone', 'notes'],
+  'student.update': ['studentName', 'name', 'phone', 'notes'],
   'teacher.create': ['name', 'baseSalary', 'commissionRate'],
   'teacher.compensation.update': ['teacherName', 'baseSalary', 'commissionRate', 'selectionId'],
   'course.create': ['name', 'defaultUnitPrice', 'defaultDurationMinutes'],
@@ -52,10 +52,10 @@ const knownFields = new Set<IntentField>(fieldNames);
 const constrainedFieldValues: Partial<Record<IntentField, readonly string[]>> = { groupBy: ['course', 'teacher', 'student'], isActive: ['true', 'false'] };
 
 export const DialogueIntentSchema = z.object({
-  mode: z.enum(['new', 'continue', 'correct', 'cancel', 'clarify']),
-  operation: operationSchema.nullable(),
-  fields: intentFieldsSchema,
-  question: z.string().max(500).nullable(),
+  mode: z.enum(['new', 'continue', 'correct', 'cancel', 'clarify']).default('new'),
+  operation: operationSchema.nullable().default(null),
+  fields: intentFieldsSchema.default({}),
+  question: z.string().max(500).nullable().default(null),
 }).strict().superRefine((intent, context) => {
   const allowed = intent.operation === null ? knownFields : new Set(operationFields[intent.operation]);
   for (const field of Object.keys(intent.fields)) {
@@ -202,7 +202,7 @@ export function deterministicIntent(context: IntentContext): DialogueIntent | nu
   return null;
 }
 
-function projectModelFields(value: unknown): unknown {
+export function projectModelFields(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const candidate = value as Record<string, unknown>;
   const operation = candidate.operation;

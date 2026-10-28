@@ -220,6 +220,19 @@ describe('AI workspace', () => {
     expect(window.localStorage.getItem('pianomanager.accessToken')).toBeNull();
   });
 
+  it('keeps the stored session when Core API is temporarily unavailable', async () => {
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
+    window.localStorage.setItem('pianomanager.refreshToken', 'refresh-test');
+    window.sessionStorage.setItem('pianomanager.assistant.actor', JSON.stringify({ id: 'u1', username: 'owner', role: 'OWNER' }));
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new TypeError('Failed to fetch'))));
+
+    renderApp('/');
+
+    await waitFor(() => expect(screen.queryByRole('heading', { name: '登录工作台' })).not.toBeInTheDocument());
+    expect(window.localStorage.getItem('pianomanager.accessToken')).toBe('jwt-test');
+    expect(window.localStorage.getItem('pianomanager.refreshToken')).toBe('refresh-test');
+  });
+
   it('verifies the current actor before restoring a role- and teacher-scoped conversation', async () => {
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
     window.sessionStorage.setItem('pianomanager.assistant.actor', JSON.stringify({ id: 'u1', username: 'owner', role: 'OWNER' }));

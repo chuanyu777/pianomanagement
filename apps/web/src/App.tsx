@@ -6,12 +6,12 @@ import { HistoricalPreviewReferenceSchema, WorkspaceDocumentSchema, type Histori
 import type { components } from '@piano/generated-core-client/generated/core-api';
 import { Link, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { AUTH_EXPIRED_EVENT, confirmAssistantPreview, createAssistantIds, getAssistantPreview, isTerminalAssistantEvent, notifyAuthExpired, startAssistantRun, streamAssistantEvents, UnknownConfirmationError, type AssistantRunStatus, type AssistantUiEvent, type WorkspaceBlock, type WorkspaceDocument } from './assistant-client.js';
+import { clearSession, getAccessToken, getRefreshToken, refreshSession, revokeSession, ServiceUnavailableError, SessionExpiredError, storeSession } from './auth-session.js';
 import { PreviewFacts } from './preview-facts.js';
 import { StructuredWorkbench } from './structured-workbench.js';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
-const TOKEN_KEY = 'pianomanager.accessToken';
 
 type NavIconName = 'home' | 'students' | 'schedule' | 'finance' | 'settings';
 type NavItem = { label: string; description: string; path: string; icon: NavIconName };
@@ -72,7 +72,7 @@ function isAuthUser(value: unknown): value is AuthUser {
 }
 
 function getToken(): string | null {
-  return window.localStorage.getItem(TOKEN_KEY);
+  return getAccessToken();
 }
 
 function assistantSessionKey(actor: Pick<AuthUser, 'id' | 'role' | 'teacherId'>): string {
@@ -157,16 +157,36 @@ function getStablePreviewIdempotencyKey(previewId: string, localKeyRef: { curren
   return createdKey;
 }
 
-async function apiRequest<T>(path: string, validate: (value: unknown) => value is T, init?: RequestInit, errorMessages: Partial<Record<number, string>> = {}): Promise<T> {
-  const token = getToken();
+async function sendAuthorized(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   headers.set('Accept', 'application/json');
+  const token = getAccessToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(path, { ...init, headers });
+  try {
+    return await fetch(path, { ...init, headers });
+  } catch {
+    // Network failure / backend restarting is NOT an authentication problem.
+    throw new ServiceUnavailableError();
+  }
+}
+
+async function apiRequest<T>(path: string, validate: (value: unknown) => value is T, init?: RequestInit, errorMessages: Partial<Record<number, string>> = {}): Promise<T> {
+  let response = await sendAuthorized(path, init);
+  if (response.status === 401) {
+    const outcome = await refreshSession();
+    if (outcome === 'refreshed') {
+      response = await sendAuthorized(path, init);
+    } else if (outcome === 'expired') {
+      notifyAuthExpired();
+      throw new SessionExpiredError();
+    } else {
+      throw new ServiceUnavailableError();
+    }
+  }
   if (!response.ok) {
     if (response.status === 401) {
       notifyAuthExpired();
-      throw new Error('登录状态已失效，请重新登录后再试。');
+      throw new SessionExpiredError();
     }
     if (errorMessages[response.status]) throw new Error(errorMessages[response.status]);
     if (response.status === 403) throw new Error('当前账号无权执行此操作。');
@@ -219,16 +239,18 @@ export function App() {
   const [token, setToken] = useState(() => getToken());
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authChecking, setAuthChecking] = useState(() => Boolean(getToken()));
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const clearUserQueryCache = () => {
     void queryClient.cancelQueries();
     queryClient.clear();
   };
-  const onLogin = (accessToken: string, loggedInUser: AuthUser) => {
+  const onLogin = (accessToken: string, refreshToken: string, loggedInUser: AuthUser) => {
     clearUserQueryCache();
     const previousActor = readStoredActor();
     if (previousActor) window.sessionStorage.removeItem(assistantSessionKey(previousActor));
-    window.localStorage.setItem(TOKEN_KEY, accessToken);
+    storeSession(accessToken, refreshToken);
     window.sessionStorage.setItem(ACTOR_SESSION_KEY, JSON.stringify(loggedInUser));
+    setAuthNotice(null);
     setToken(accessToken);
     setUser(loggedInUser);
     setAuthChecking(false);
@@ -236,9 +258,11 @@ export function App() {
   const onLogout = () => {
     clearUserQueryCache();
     const actor = user ?? readStoredActor();
-    window.localStorage.removeItem(TOKEN_KEY);
+    revokeSession();
+    clearSession();
     if (actor) window.sessionStorage.removeItem(assistantSessionKey(actor));
     window.sessionStorage.removeItem(ACTOR_SESSION_KEY);
+    setAuthNotice(null);
     setToken(null);
     setUser(null);
     setAuthChecking(false);
@@ -246,7 +270,8 @@ export function App() {
   useEffect(() => {
     let active = true;
     const currentToken = getToken();
-    if (!currentToken) {
+    const hasRefreshToken = Boolean(getRefreshToken());
+    if (!currentToken && !hasRefreshToken) {
       window.sessionStorage.removeItem(ACTOR_SESSION_KEY);
       setAuthChecking(false);
       return () => { active = false; };
@@ -255,16 +280,24 @@ export function App() {
       .then((currentActor) => {
         if (!active) return;
         window.sessionStorage.setItem(ACTOR_SESSION_KEY, JSON.stringify(currentActor));
+        setAuthNotice(null);
         setUser(currentActor);
         setAuthChecking(false);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!active) return;
-        clearUserQueryCache();
-        window.localStorage.removeItem(TOKEN_KEY);
-        window.sessionStorage.removeItem(ACTOR_SESSION_KEY);
-        setToken(null);
-        setUser(null);
+        // Only an explicit 401 ends the session. A backend restart or network
+        // blip must not wipe stored credentials and kick the user out.
+        if (error instanceof SessionExpiredError) {
+          clearUserQueryCache();
+          clearSession();
+          window.sessionStorage.removeItem(ACTOR_SESSION_KEY);
+          setToken(null);
+          setUser(null);
+        } else {
+          setUser(readStoredActor());
+          setAuthNotice('服务暂时不可用，请稍后重试；你的登录状态已保留。');
+        }
         setAuthChecking(false);
       });
     return () => { active = false; };
@@ -275,8 +308,9 @@ export function App() {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
   });
 
-  if (!token) return <LoginPage onLogin={onLogin} />;
-  if (authChecking || !user) return <main className="login-screen"><p role="status">正在验证登录状态…</p></main>;
+  if (!token) return <LoginPage notice={authNotice} onLogin={onLogin} />;
+  if (authChecking) return <main className="login-screen"><p role="status">正在验证登录状态…</p></main>;
+  if (!user) return <main className="login-screen"><p role="status">{authNotice ?? '正在验证登录状态…'}</p><Button onClick={() => window.location.reload()}>重新加载</Button></main>;
   return (
     <Routes>
       <Route element={<WorkspaceLayout onLogout={onLogout} user={user} />} path="/">
@@ -420,7 +454,7 @@ function AssistantCompanion({ assistantState, section, user, resultTarget, onSho
   </section>;
 }
 
-function LoginPage({ onLogin }: { onLogin: (token: string, user: AuthUser) => void }) {
+function LoginPage({ onLogin, notice }: { onLogin: (token: string, refreshToken: string, user: AuthUser) => void; notice?: string | null }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -441,8 +475,8 @@ function LoginPage({ onLogin }: { onLogin: (token: string, user: AuthUser) => vo
           !hasString(payload.user, 'id') || !hasString(payload.user, 'username') || !hasString(payload.user, 'role')) {
         throw new Error('登录响应格式无效');
       }
-      const loginPayload = payload as { accessToken: string; user: Record<string, unknown> };
-      onLogin(loginPayload.accessToken, {
+      const loginPayload = payload as { accessToken: string; refreshToken?: unknown; user: Record<string, unknown> };
+      onLogin(loginPayload.accessToken, typeof loginPayload.refreshToken === 'string' ? loginPayload.refreshToken : '', {
         id: loginPayload.user.id as string,
         username: loginPayload.user.username as string,
         role: loginPayload.user.role as string,
@@ -464,6 +498,7 @@ function LoginPage({ onLogin }: { onLogin: (token: string, user: AuthUser) => vo
         <Title level={1}>登录工作台</Title>
         <p className="intro-copy">使用琴行管理账号查看真实业务数据。</p>
         {error && <Alert className="login-error" type="error" showIcon message={error} />}
+        {!error && notice && <Alert className="login-error" type="warning" showIcon message={notice} />}
         <form className="login-form" onSubmit={submit}>
           <label htmlFor="username">用户名</label>
           <Input autoComplete="username" id="username" onChange={(event) => setUsername(event.target.value)} required value={username} />

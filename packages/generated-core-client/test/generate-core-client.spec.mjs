@@ -18,15 +18,15 @@ describe('Core OpenAPI generator tool', () => {
   it('uses the package-local default input and generated output', () => {
     const parsed = parseArgs([]);
 
-    expect(parsed.input).toMatch(/packages\/generated-core-client\/openapi\.json$/);
-    expect(parsed.output).toMatch(/packages\/generated-core-client\/src\/generated\/core-api\.ts$/);
+    expect(parsed.input).toMatch(/packages[\\/]generated-core-client[\\/]openapi\.json$/);
+    expect(parsed.output).toMatch(/packages[\\/]generated-core-client[\\/]src[\\/]generated[\\/]core-api\.ts$/);
   });
 
   it('accepts explicit paths relative to the package root', () => {
     const parsed = parseArgs(['--input', '../../apps/core-api/openapi.json', '--output', 'src/generated/custom.ts']);
 
-    expect(parsed.input).toMatch(/apps\/core-api\/openapi\.json$/);
-    expect(parsed.output).toMatch(/packages\/generated-core-client\/src\/generated\/custom\.ts$/);
+    expect(parsed.input).toMatch(/apps[\\/]core-api[\\/]openapi\.json$/);
+    expect(parsed.output).toMatch(/packages[\\/]generated-core-client[\\/]src[\\/]generated[\\/]custom\.ts$/);
   });
 
   it('rejects an unknown option before touching the filesystem', () => {

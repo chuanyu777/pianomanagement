@@ -1,4 +1,5 @@
 import type { components } from '@piano/generated-core-client/generated/core-api';
+import { getAccessToken, refreshSession } from './auth-session.js';
 import {
   AssistantEventSchema,
   AssistantRunSchema,
@@ -19,6 +20,33 @@ export const AUTH_EXPIRED_EVENT = 'pianomanager.authExpired';
 
 export function notifyAuthExpired(): void {
   if (typeof window !== 'undefined') window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+}
+
+/**
+ * Sends a request with the current access token. On 401 it refreshes the session
+ * once (rotating the refresh token) and retries, so an expired access token does
+ * not tear down a live AI session. A rejected refresh keeps the original 401 so
+ * callers still end the session.
+ */
+async function sendWithSession(
+  input: { token: string | null; fetchImpl?: typeof fetch },
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  const send = (token: string | null) =>
+    (input.fetchImpl ?? fetch)(url, {
+      ...init,
+      headers: {
+        ...(init.headers as Record<string, string> | undefined),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+  const first = await send(input.token);
+  if (first.status !== 401) return first;
+  const outcome = await refreshSession(input.fetchImpl);
+  if (outcome !== 'refreshed') return first;
+  const freshToken = getAccessToken();
+  return freshToken ? send(freshToken) : first;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -87,9 +115,9 @@ export async function startAssistantRun(input: {
     notifyAuthExpired();
     throw new Error('登录状态已失效，请重新登录后再试。');
   }
-  const response = await (input.fetchImpl ?? fetch)('/api/assistant/runs', {
+  const response = await sendWithSession(input, '/api/assistant/runs', {
     method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${input.token}` },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ message: input.message, threadId: input.threadId, clientRequestId: input.clientRequestId }),
   });
   if (!response.ok) {
@@ -122,10 +150,9 @@ export async function streamAssistantEvents(input: {
     notifyAuthExpired();
     throw new Error('登录状态已失效，请重新登录后再试。');
   }
-  const response = await (input.fetchImpl ?? fetch)(`/api/assistant/runs/${input.run.runId}/events`, {
+  const response = await sendWithSession(input, `/api/assistant/runs/${input.run.runId}/events`, {
     headers: {
       Accept: 'text/event-stream',
-      Authorization: `Bearer ${input.token}`,
       'x-thread-id': input.run.threadId,
     },
     signal: input.signal,
@@ -244,9 +271,9 @@ export async function createAssistantPreview(input: {
     notifyAuthExpired();
     throw new Error('登录状态已失效，请重新登录后再试。');
   }
-  const response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.path.replace(/^\//, '')}`, {
+  const response = await sendWithSession(input, `/api/assistant/previews/${input.path.replace(/^\//, '')}`, {
     method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${input.token}` },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(input.body),
   });
   if (!response.ok) {
@@ -283,8 +310,8 @@ export async function getAssistantPreview(input: {
     throw new Error('登录状态已失效，请重新登录后再试。');
   }
   if (!UUID_PATTERN.test(input.previewId)) throw new Error('预览标识无效，请重新生成预览。');
-  const response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.previewId}`, {
-    headers: { Accept: 'application/json', Authorization: `Bearer ${input.token}` },
+  const response = await sendWithSession(input, `/api/assistant/previews/${input.previewId}`, {
+    headers: { Accept: 'application/json' },
   });
   if (!response.ok) {
     if (response.status === 401) {
@@ -361,9 +388,9 @@ export async function confirmAssistantPreview(input: {
 
   let response: Response;
   try {
-    response = await (input.fetchImpl ?? fetch)(`/api/assistant/previews/${input.previewId}/confirm`, {
+    response = await sendWithSession(input, `/api/assistant/previews/${input.previewId}/confirm`, {
       method: 'POST',
-      headers: { Accept: 'application/json', Authorization: `Bearer ${input.token}`, 'Idempotency-Key': input.idempotencyKey },
+      headers: { Accept: 'application/json', 'Idempotency-Key': input.idempotencyKey },
     });
   } catch {
     return recover();

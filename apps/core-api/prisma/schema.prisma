@@ -99,6 +99,21 @@ model User {
   manualTransactions ManualTransaction[]
   closedPeriods      ClosedPeriod[] @relation("PeriodClosedBy")
   reopenedPeriods    ClosedPeriod[] @relation("PeriodReopenedBy")
+  refreshTokens      RefreshToken[]
+}
+
+model RefreshToken {
+  id                String    @id @default(uuid())
+  userId            String
+  tokenHash         String    @unique
+  expiresAt         DateTime
+  createdAt         DateTime  @default(now())
+  revokedAt         DateTime?
+  replacedByTokenId String?
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Teacher {

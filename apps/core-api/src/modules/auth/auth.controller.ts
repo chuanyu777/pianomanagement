@@ -1,5 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiProperty, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Get, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiNoContentResponse, ApiOkResponse, ApiProperty, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { UserRole } from '../../generated/prisma/client.js';
 import { AuthService, type LoginResult } from './auth.service.js';
@@ -14,6 +14,11 @@ class LoginBody {
 
   @ApiProperty({ type: String, minLength: 1, maxLength: 128, format: 'password' })
   password!: string;
+}
+
+class RefreshTokenBody {
+  @ApiProperty({ type: String, minLength: 1, maxLength: 200 })
+  refreshToken!: string;
 }
 
 class PublicUserResponse implements PublicUser {
@@ -34,11 +39,17 @@ class LoginResponse implements LoginResult {
   @ApiProperty({ type: String })
   accessToken!: string;
 
+  @ApiProperty({ type: String })
+  refreshToken!: string;
+
   @ApiProperty({ enum: ['Bearer'] })
   tokenType!: 'Bearer';
 
   @ApiProperty({ type: Number, minimum: 60 })
   expiresInSeconds!: number;
+
+  @ApiProperty({ type: Number, minimum: 600 })
+  refreshExpiresInSeconds!: number;
 
   @ApiProperty({ type: PublicUserResponse })
   user!: PublicUserResponse;
@@ -47,6 +58,10 @@ class LoginResponse implements LoginResult {
 const LoginBodySchema = z.object({
   username: z.string().max(80),
   password: z.string().max(128),
+}).strict();
+
+const RefreshTokenBodySchema = z.object({
+  refreshToken: z.string().min(1).max(200),
 }).strict();
 
 @ApiTags('Auth')
@@ -61,6 +76,25 @@ export class AuthController {
     const parsed = LoginBodySchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
     return this.auth.login(parsed.data);
+  }
+
+  @Post('refresh')
+  @ApiBody({ type: RefreshTokenBody })
+  @ApiOkResponse({ type: LoginResponse })
+  refresh(@Body() body: unknown): Promise<LoginResult> {
+    const parsed = RefreshTokenBodySchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    return this.auth.refresh(parsed.data.refreshToken);
+  }
+
+  @Post('logout')
+  @HttpCode(204)
+  @ApiBody({ type: RefreshTokenBody })
+  @ApiNoContentResponse()
+  logout(@Body() body: unknown): Promise<void> {
+    const parsed = RefreshTokenBodySchema.safeParse(body);
+    if (!parsed.success) return Promise.resolve();
+    return this.auth.logout(parsed.data.refreshToken);
   }
 
   @Get('me')

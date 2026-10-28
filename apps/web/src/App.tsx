@@ -1,23 +1,26 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { createPortal } from 'react-dom';
 import { Alert, Button, Card, Input, Tag, Typography } from 'antd';
-import { WorkspaceDocumentSchema } from '@piano/assistant-protocol';
+import { HistoricalPreviewReferenceSchema, WorkspaceDocumentSchema, type HistoricalPreviewReference } from '@piano/assistant-protocol';
 import type { components } from '@piano/generated-core-client/generated/core-api';
 import { Link, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { AUTH_EXPIRED_EVENT, confirmAssistantPreview, createAssistantIds, getAssistantPreview, isTerminalAssistantEvent, notifyAuthExpired, startAssistantRun, streamAssistantEvents, UnknownConfirmationError, type AssistantRunStatus, type AssistantUiEvent, type WorkspaceBlock, type WorkspaceDocument } from './assistant-client.js';
+import { PreviewFacts } from './preview-facts.js';
 import { StructuredWorkbench } from './structured-workbench.js';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
 const TOKEN_KEY = 'pianomanager.accessToken';
 
-type NavIconName = 'home' | 'students' | 'schedule' | 'finance';
+type NavIconName = 'home' | 'students' | 'schedule' | 'finance' | 'settings';
 type NavItem = { label: string; description: string; path: string; icon: NavIconName };
 const navItems: NavItem[] = [
   { label: '今日中枢', description: 'AI 协同入口', path: '/', icon: 'home' },
   { label: '学生与账户', description: '学生与资金', path: '/students', icon: 'students' },
   { label: '排课与课消', description: '周视图与课消', path: '/schedule', icon: 'schedule' },
   { label: '收支与报表', description: '经营与现金', path: '/finance', icon: 'finance' },
+  { label: '教师与课程', description: '基础资料', path: '/settings', icon: 'settings' },
 ];
 const suggestions = ['查看今日排课', '查看这个月收入', '今天经营情况怎么样'];
 
@@ -31,8 +34,8 @@ type AssistantState = {
 type AuthUser = { id: string; username: string; role: string; teacherId?: string };
 type ConversationMessage = { id: string; role: 'user' | 'assistant'; text: string };
 type WorkspaceWithTaskVersion = WorkspaceDocument & { taskVersion?: number };
-type WorkspaceState = { document: WorkspaceDocument; threadId: string };
-type PersistedAssistantSession = { threadId: string; messages: ConversationMessage[]; workspace?: WorkspaceDocument; workspaceThreadId?: string; confirmedPreviewIds?: string[] };
+type WorkspaceState = { document: WorkspaceDocument; threadId: string; requireCoreDisplay?: boolean };
+type PersistedAssistantSession = { threadId: string; messages: ConversationMessage[]; workspace?: WorkspaceDocument; workspaceThreadId?: string; requireCorePreviewDisplay?: boolean; confirmedPreviewIds?: string[] };
 type CandidateSelectionHandler = (candidateId: string, taskVersion?: number) => void;
 type ClearConversationHandler = () => void;
 type PreviewConfirmationHandler = (previewId: string) => void;
@@ -108,6 +111,7 @@ function readAssistantSession(actor: AuthUser | null): PersistedAssistantSession
       messages,
       ...(parsedWorkspaceWithTaskVersion ? { workspace: parsedWorkspaceWithTaskVersion } : {}),
       ...(typeof value.workspaceThreadId === 'string' ? { workspaceThreadId: value.workspaceThreadId } : {}),
+      ...(value.requireCorePreviewDisplay === true ? { requireCorePreviewDisplay: true } : {}),
       ...(Array.isArray(value.confirmedPreviewIds) ? { confirmedPreviewIds: value.confirmedPreviewIds.filter((id): id is string => typeof id === 'string') } : {}),
     };
   } catch {
@@ -153,7 +157,7 @@ function getStablePreviewIdempotencyKey(previewId: string, localKeyRef: { curren
   return createdKey;
 }
 
-async function apiRequest<T>(path: string, validate: (value: unknown) => value is T, init?: RequestInit): Promise<T> {
+async function apiRequest<T>(path: string, validate: (value: unknown) => value is T, init?: RequestInit, errorMessages: Partial<Record<number, string>> = {}): Promise<T> {
   const token = getToken();
   const headers = new Headers(init?.headers);
   headers.set('Accept', 'application/json');
@@ -164,6 +168,7 @@ async function apiRequest<T>(path: string, validate: (value: unknown) => value i
       notifyAuthExpired();
       throw new Error('登录状态已失效，请重新登录后再试。');
     }
+    if (errorMessages[response.status]) throw new Error(errorMessages[response.status]);
     if (response.status === 403) throw new Error('当前账号无权执行此操作。');
     throw new Error(`请求失败 (${response.status})`);
   }
@@ -183,7 +188,8 @@ function useAssistantState() {
 type OverviewLesson = components['schemas']['DashboardLesson'];
 type DashboardOverview = components['schemas']['DashboardOverview'];
 type AssistantTaskSummary = { threadId: string; title: string; lastActivityAt: string; latestStatus: string | null };
-type AssistantTaskDetail = AssistantTaskSummary & { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>; workspace: WorkspaceDocument | null };
+type AssistantTaskDetail = AssistantTaskSummary & { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>; workspace: WorkspaceDocument | null; historicalPreviews: HistoricalPreviewReference[] };
+const TASK_HISTORY_ACCESS_MESSAGE = '该任务不存在或当前账号无权访问，请返回任务列表查看。';
 
 function isOverviewLesson(value: unknown): value is OverviewLesson {
   return isRecord(value) && hasString(value, 'id') && hasString(value, 'startsAt') && hasString(value, 'endsAt') && hasString(value, 'status') &&
@@ -199,20 +205,26 @@ function isDashboardOverview(value: unknown): value is DashboardOverview {
   return students && finance && preclose && recent;
 }
 function isTaskSummary(value: unknown): value is AssistantTaskSummary { return isRecord(value) && hasString(value, 'threadId') && hasString(value, 'title') && hasString(value, 'lastActivityAt') && (value.latestStatus === null || typeof value.latestStatus === 'string'); }
-function isTaskDetail(value: unknown): value is AssistantTaskDetail { if (!isTaskSummary(value) || !isRecord(value)) return false; const record = value as unknown as Record<string, unknown>; const messages = record['messages']; return Array.isArray(messages) && messages.every((message: unknown) => isRecord(message) && hasString(message, 'id') && (message.role === 'user' || message.role === 'assistant') && hasString(message, 'content') && hasString(message, 'createdAt')) && (record['workspace'] === null || WorkspaceDocumentSchema.safeParse(record['workspace']).success); }
+function isTaskDetail(value: unknown): value is AssistantTaskDetail { if (!isTaskSummary(value) || !isRecord(value)) return false; const record = value as unknown as Record<string, unknown>; const messages = record['messages']; const historicalPreviews = record['historicalPreviews']; return Array.isArray(messages) && messages.every((message: unknown) => isRecord(message) && hasString(message, 'id') && (message.role === 'user' || message.role === 'assistant') && hasString(message, 'content') && hasString(message, 'createdAt')) && (record['workspace'] === null || WorkspaceDocumentSchema.safeParse(record['workspace']).success) && Array.isArray(historicalPreviews) && historicalPreviews.every((preview: unknown) => HistoricalPreviewReferenceSchema.safeParse(preview).success); }
 function overviewMoney(value: string | undefined): string {
   return value ? `¥${value}` : '—';
 }
 function overviewRecordKind(value: string): string { return ({ PAYMENT: '交费', GIFT: '赠送', LESSON_CONSUMPTION: '课消', LESSON_CONSUMPTION_REVERSAL: '课消冲正', PAYMENT_REVERSAL: '交费冲正', GIFT_REVERSAL: '赠送冲正', REFUND_PAID: '退款', REFUND_GIFT_CLEARING: '赠送清零' } as Record<string, string>)[value] ?? value; }
-function useHomeOverview() {
-  return useQuery({ queryKey: ['home-overview'], queryFn: () => apiRequest('/api/dashboard/overview', isDashboardOverview), refetchInterval: 30_000 });
+function useHomeOverview(user: AuthUser | null) {
+  return useQuery({ queryKey: ['home-overview', user?.id ?? null, user?.role ?? null, user?.teacherId ?? null], queryFn: () => apiRequest('/api/dashboard/overview', isDashboardOverview), refetchInterval: 30_000 });
 }
 
 export function App() {
+  const queryClient = useQueryClient();
   const [token, setToken] = useState(() => getToken());
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authChecking, setAuthChecking] = useState(() => Boolean(getToken()));
+  const clearUserQueryCache = () => {
+    void queryClient.cancelQueries();
+    queryClient.clear();
+  };
   const onLogin = (accessToken: string, loggedInUser: AuthUser) => {
+    clearUserQueryCache();
     const previousActor = readStoredActor();
     if (previousActor) window.sessionStorage.removeItem(assistantSessionKey(previousActor));
     window.localStorage.setItem(TOKEN_KEY, accessToken);
@@ -222,6 +234,7 @@ export function App() {
     setAuthChecking(false);
   };
   const onLogout = () => {
+    clearUserQueryCache();
     const actor = user ?? readStoredActor();
     window.localStorage.removeItem(TOKEN_KEY);
     if (actor) window.sessionStorage.removeItem(assistantSessionKey(actor));
@@ -247,6 +260,7 @@ export function App() {
       })
       .catch(() => {
         if (!active) return;
+        clearUserQueryCache();
         window.localStorage.removeItem(TOKEN_KEY);
         window.sessionStorage.removeItem(ACTOR_SESSION_KEY);
         setToken(null);
@@ -270,6 +284,7 @@ export function App() {
         <Route element={<OwnerOnlyPage user={user}><StructuredBusinessPage section="students" /></OwnerOnlyPage>} path="students" />
         <Route element={<StructuredBusinessPage section="schedule" />} path="schedule" />
         <Route element={<OwnerOnlyPage user={user}><StructuredBusinessPage section="finance" /></OwnerOnlyPage>} path="finance" />
+        <Route element={<OwnerOnlyPage user={user}><StructuredBusinessPage section="settings" /></OwnerOnlyPage>} path="settings" />
         <Route element={<TaskHistoryPage />} path="tasks/:threadId" />
         <Route element={<OwnerOnlyPage user={user}><StructuredBusinessPage section="students" /></OwnerOnlyPage>} path="structured/students" />
         <Route element={<StructuredBusinessPage section="schedule" />} path="structured/schedule" />
@@ -290,16 +305,44 @@ function OwnerOnlyPage({ children, user }: { children: ReactNode; user: AuthUser
 function TaskHistoryPage() {
   const { threadId = '' } = useParams();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { user } = useOutletContext<{ user: AuthUser | null }>();
-  const task = useQuery({ queryKey: ['assistant-task', threadId], queryFn: () => apiRequest(`/api/assistant/tasks/${encodeURIComponent(threadId)}`, isTaskDetail), enabled: UUID_PATTERN.test(threadId) });
-  return <section className="task-history-page"><div className="task-history-head"><div><span className="eyebrow accent-eyebrow">PERSISTED TASK</span><Title level={1}>{task.data?.title ?? '任务详情'}</Title><p>消息来自 Agent Runtime 持久化记录，并按当前登录身份隔离。</p></div><div className="task-history-actions"><Button onClick={() => navigate('/')}>返回工作台</Button><Button disabled={!task.data} onClick={() => { if (!task.data) return; writeAssistantSession(user, { threadId: task.data.threadId, messages: task.data.messages.map((message) => ({ id: message.id, role: message.role, text: message.content })), ...(task.data.workspace ? { workspace: task.data.workspace, workspaceThreadId: task.data.threadId } : {}) }); navigate('/'); }} type="primary">继续此任务</Button></div></div>{task.isLoading ? <div className="loading-state">正在读取任务…</div> : task.isError ? <Alert message="暂时无法读取任务" description={task.error.message} type="error" showIcon /> : <div className="task-transcript">{task.data?.messages.map((message) => <article className={`task-message ${message.role}`} key={message.id}><header><strong>{message.role === 'user' ? '你' : 'AI 助手'}</strong><time>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(message.createdAt))}</time></header><p>{formatAssistantReply(message.content)}</p></article>)}</div>}</section>;
+  const task = useQuery({
+    queryKey: ['assistant-task', user?.id, user?.role, user?.teacherId ?? null, threadId],
+    queryFn: () => apiRequest(`/api/assistant/tasks/${encodeURIComponent(threadId)}`, isTaskDetail, undefined, { 403: TASK_HISTORY_ACCESS_MESSAGE, 404: TASK_HISTORY_ACCESS_MESSAGE }),
+    enabled: Boolean(user) && UUID_PATTERN.test(threadId),
+  });
+  const invalidateHomeAfterConfirmation = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ['home-overview'] });
+    void queryClient.invalidateQueries({ queryKey: ['assistant-tasks'] });
+  }, [queryClient]);
+  const workspace = task.data?.workspace;
+  const workspaceForRecovery = workspace?.blocks.some((block) => block.type === 'action-preview')
+    ? { ...workspace, blocks: workspace.blocks.filter((block) => block.type === 'action-preview') }
+    : workspace;
+  const currentWorkspacePreviewIds = new Set(workspace?.blocks.flatMap((block) => block.type === 'action-preview' ? [block.previewId] : []) ?? []);
+  const historicalPreviews = task.data?.historicalPreviews.filter((preview, index, all) => all.findIndex((candidate) => candidate.previewId === preview.previewId) === index) ?? [];
+  return <section className="task-history-page">
+    <div className="task-history-head"><div><span className="eyebrow accent-eyebrow">PERSISTED TASK</span><Title level={1}>{task.data?.title ?? '任务详情'}</Title><p>消息和确认单按当前登录身份重新读取；执行状态与回执以系统当前记录为准。</p></div><div className="task-history-actions"><Button onClick={() => navigate('/')}>返回工作台</Button><Button disabled={!task.data} onClick={() => { if (!task.data) return; writeAssistantSession(user, { threadId: task.data.threadId, messages: task.data.messages.map((message) => ({ id: message.id, role: message.role, text: message.content })), ...(workspaceForRecovery ? { workspace: workspaceForRecovery, workspaceThreadId: task.data.threadId, requireCorePreviewDisplay: true } : {}) }); navigate('/'); }} type="primary">继续此任务</Button></div></div>
+    {task.isLoading ? <div className="loading-state">正在读取任务…</div> : task.isError ? <Alert message="暂时无法读取任务" description={task.error.message} type="error" showIcon /> : <>
+      {task.data && <div className="task-transcript">{task.data.messages.map((message) => <article className={`task-message ${message.role}`} key={message.id}><header><strong>{message.role === 'user' ? '你' : 'AI 助手'}</strong><time>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(message.createdAt))}</time></header><p>{formatAssistantReply(message.content)}</p></article>)}</div>}
+      <section aria-label="历史确认单列表" className="task-history-workspace">
+        {historicalPreviews.length ? historicalPreviews.map((preview, index) => <div className="task-history-preview-step" key={preview.previewId}>
+          <span className="eyebrow">第 {index + 1} 步</span>
+          <PreviewConfirmationCard confirmAllowed={currentWorkspacePreviewIds.has(preview.previewId)} interactionDisabled={false} key={preview.previewId} onConfirmed={invalidateHomeAfterConfirmation} preview={{ type: 'action-preview', ...preview, title: `第 ${index + 1} 步确认单` }} previewRecheckVersion={0} requireCoreDisplay />
+        </div>) : <p className="workspace-empty">此任务没有已保存的确认单。</p>}
+      </section>
+    </>}
+  </section>;
 }
 
-function StructuredBusinessPage({ section }: { section: 'students' | 'schedule' | 'finance' }) {
+function StructuredBusinessPage({ section }: { section: 'students' | 'schedule' | 'finance' | 'settings' }) {
   const { assistantState, user } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null }>();
+  const [resultTarget, setResultTarget] = useState<HTMLDivElement | null>(null);
+  const [showResult, setShowResult] = useState(false);
   return <section className={`business-page business-page-${section}`}>
-    <AssistantCompanion assistantState={assistantState} section={section} user={user} />
-    <div className="business-workspace panel-surface"><StructuredWorkbench section={section} role={user?.role ?? ''} /></div>
+    <AssistantCompanion assistantState={assistantState} section={section} user={user} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} />
+    <div aria-label="业务工作区" className="business-workspace panel-surface"><div hidden={showResult}><StructuredWorkbench section={section} role={user?.role ?? ''} /></div><div hidden={!showResult} ref={setResultTarget} /><div hidden={!showResult} className="business-result-actions"><Button onClick={() => setShowResult(false)}>返回业务功能</Button></div></div>
   </section>;
 }
 
@@ -307,10 +350,12 @@ const pageAssistantCopy = {
   students: { title: '学生与账户', welcome: '你可以按姓名或联系电话查学生，也可以让我协助办理交费、赠送、退款或课程改价。所有资金变更都会先生成确认单。', suggestions: ['查找学生账户', '查看冻结学生', '办理学生交费'] },
   schedule: { title: '排课与课消', welcome: '你可以查询任意日期的排课，也可以让我协助排课、调课、取消或确认上课。', suggestions: ['查看今天排课', '查看明天排课', '调整上课时间'] },
   finance: { title: '收支与报表', welcome: '经营结果和现金收支会分开说明。你也可以办理工资、手工收支和关账。', suggestions: ['查看本月经营利润', '查看这个月收入', '检查能否关账'] },
+  settings: { title: '教师与课程', welcome: '在这里维护教师资料、默认薪酬和课程信息，也可以告诉我你想要办理的事项。', suggestions: ['查看教师', '查看课程', '新增课程'] },
 } as const;
 
-function AssistantCompanion({ assistantState, section, user }: { assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null }) {
+function AssistantCompanion({ assistantState, section, user, resultTarget, onShowResult }: { assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; resultTarget: HTMLDivElement | null; onShowResult: () => void }) {
   const copy = pageAssistantCopy[section];
+  const queryClient = useQueryClient();
   const initialRef = useRef<PersistedAssistantSession | null>(null);
   if (!initialRef.current) initialRef.current = newConversation(user);
   const [threadId] = useState(() => initialRef.current?.threadId ?? createAssistantIds().threadId);
@@ -319,11 +364,13 @@ function AssistantCompanion({ assistantState, section, user }: { assistantState:
   const [reply, setReply] = useState('');
   const [status, setStatus] = useState<'idle' | 'running' | 'waiting' | 'done' | 'failed'>('idle');
   const [workspace, setWorkspace] = useState<WorkspaceDocument | undefined>(() => initialRef.current?.workspace);
+  const [workspaceThreadId, setWorkspaceThreadId] = useState(() => initialRef.current?.workspaceThreadId ?? threadId);
+  const [previewRecheckVersion, setPreviewRecheckVersion] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    writeAssistantSession(user, { threadId, messages, ...(workspace ? { workspace, workspaceThreadId: threadId } : {}) });
-  }, [messages, threadId, user, workspace]);
+    writeAssistantSession(user, { threadId, messages, ...(workspace ? { workspace, workspaceThreadId } : {}) });
+  }, [messages, threadId, user, workspace, workspaceThreadId]);
   useEffect(() => () => controllerRef.current?.abort(), []);
 
   const append = (role: ConversationMessage['role'], text: string) => {
@@ -346,20 +393,29 @@ function AssistantCompanion({ assistantState, section, user }: { assistantState:
       await streamAssistantEvents({ token: getToken(), run, signal: controller.signal, onEvent: (event) => {
         if (event.type === 'assistant.delta') { streamedReply += event.text; setReply(streamedReply); }
         if (event.type === 'assistant.message') { streamedReply = event.markdown; setReply(streamedReply); }
-        if (event.type === 'workspace.replace') setWorkspace(event.document);
+        if (event.type === 'workspace.replace') { setWorkspace(event.document); setWorkspaceThreadId(threadId); onShowResult(); }
         if (event.type === 'clarification.requested') { append('assistant', event.question); streamedReply = ''; setReply(''); setStatus('waiting'); return true; }
         if (event.type === 'run.failed') { append('assistant', event.message); streamedReply = ''; setReply(''); setStatus('failed'); return true; }
         if (event.type === 'run.completed') { if (streamedReply) append('assistant', streamedReply); streamedReply = ''; setReply(''); setStatus('done'); return true; }
         return false;
       } });
     } catch (error) {
-      if (!controller.signal.aborted) { append('assistant', error instanceof Error ? error.message : '暂时无法连接助手。'); setStatus('failed'); }
+      if (!controller.signal.aborted) { append('assistant', error instanceof Error ? error.message : '暂时无法连接助手。'); setStatus('failed'); setPreviewRecheckVersion((current) => current + 1); }
     }
+  };
+  const selectCandidate = (candidateId: string, taskVersion?: number) => {
+    if (status === 'running' || workspaceThreadId !== threadId || !workspace?.blocks.some((block) => block.type === 'entity-picker' && block.candidates.some((candidate) => candidate.id === candidateId))) return;
+    void send(`选择候选:${candidateId}${typeof taskVersion === 'number' ? `:${taskVersion}` : ''}`);
+  };
+  const recoverWorkspace = (action: RecoveryAction) => {
+    if (status !== 'running') void send(action === 'refresh' ? '刷新当前结果' : '重新生成预览');
   };
   const visibleMessages = messages.slice(-8);
   return <section aria-label={`${copy.title}经营助手`} className="page-assistant panel-surface">
     <div className="page-assistant-head"><div><span className="eyebrow">AI OPERATING ASSISTANT</span><Title level={2}>{copy.title}</Title><p>对话、补充信息、确认和结果都在这里连续呈现</p></div><span className={`assistant-availability ${assistantState.data?.available ? 'is-online' : ''}`}>{assistantState.data?.available ? '在线' : '暂不可用'}</span></div>
-    <div className="page-chat-stream"><div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{copy.welcome}</p></div>{visibleMessages.map((message) => <div className={`chat-message ${message.role}`} key={message.id}><span className="chat-avatar">{message.role === 'user' ? (user?.username.slice(0, 1).toUpperCase() || '你') : 'AI'}</span><p>{formatAssistantReply(message.text)}</p></div>)}{reply && <div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{formatAssistantReply(reply)}</p></div>}{workspace && <Link className="workspace-result-link" to="/">已生成「{workspace.title}」，到工作台查看完整结果 →</Link>}</div>
+    <div className="page-chat-stream"><div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{copy.welcome}</p></div>{visibleMessages.map((message) => <div className={`chat-message ${message.role}`} key={message.id}><span className="chat-avatar">{message.role === 'user' ? (user?.username.slice(0, 1).toUpperCase() || '你') : 'AI'}</span><p>{formatAssistantReply(message.text)}</p></div>)}{reply && <div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{formatAssistantReply(reply)}</p></div>}</div>
+    {workspace && <button className="workspace-result-link" onClick={onShowResult} type="button">查看本次对话结果 →</button>}
+    {workspace && resultTarget && createPortal(<section aria-label="AI 工作区结果" className="business-ai-workspace"><div className="context-heading"><div><span className="eyebrow">CURRENT TASK</span><Title level={3}>本次对话结果</Title></div></div><WorkspaceContent document={workspace} interactionDisabled={status === 'running' || workspaceThreadId !== threadId} isCurrentWorkspace={workspaceThreadId === threadId} onCandidateSelect={selectCandidate} onPreviewConfirmed={() => { void queryClient.invalidateQueries(); }} onRecoveryAction={recoverWorkspace} previewRecheckVersion={previewRecheckVersion} /></section>, resultTarget)}
     <div className="page-chat-composer"><div className="page-quick-prompts">{copy.suggestions.map((item) => <button disabled={status === 'running'} key={item} onClick={() => setPrompt(item)} type="button">{item}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void send(prompt); }}><TextArea aria-label={`${copy.title}经营问题`} autoSize={{ minRows: 2, maxRows: 4 }} disabled={status === 'running'} onChange={(event) => setPrompt(event.target.value)} placeholder="直接描述你想查询或办理的事情…" value={prompt} /><Button disabled={!prompt.trim() || status === 'running'} htmlType="submit" type="primary">{status === 'running' ? '处理中…' : '发送 ↑'}</Button></form></div>
   </section>;
 }
@@ -434,8 +490,8 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
   const assistantState = useAssistantState();
   const isAssistantWorkspace = location.pathname === '/';
   const normalizedPath = location.pathname.replace(/^\/structured/, '') || '/';
-  const setWorkspace = useCallback((document: WorkspaceDocument | null, threadId?: string) => {
-    setWorkspaceState(document && threadId ? { document, threadId } : null);
+  const setWorkspace = useCallback((document: WorkspaceDocument | null, threadId?: string, requireCoreDisplay = false) => {
+    setWorkspaceState(document && threadId ? { document, threadId, ...(requireCoreDisplay ? { requireCoreDisplay: true } : {}) } : null);
   }, []);
   const registerCandidateSelection = useCallback((handler: CandidateSelectionHandler) => {
     candidateSelectionRef.current = handler;
@@ -505,6 +561,7 @@ function NavIcon({ name }: { name: NavIconName }) {
   if (name === 'home') return <svg viewBox="0 0 24 24"><path d="M4 13.5 12 6l8 7.5" /><path d="M7 11.5V20h10v-8.5" /></svg>;
   if (name === 'students') return <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3" /><path d="M6 20c.7-4 2.7-6 6-6s5.3 2 6 6" /></svg>;
   if (name === 'schedule') return <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="14" rx="2" /><path d="M8 3v6M16 3v6M4 11h16" /></svg>;
+  if (name === 'settings') return <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5zM9 5v14M14 9h2M14 13h2" /></svg>;
   return <svg viewBox="0 0 24 24"><path d="M5 20V10M12 20V4M19 20v-7" /><path d="M3 20h18" /></svg>;
 }
 
@@ -519,7 +576,7 @@ function WorkspaceHome() {
     assistantState: ReturnType<typeof useAssistantState>;
     onLogout: () => void;
     user: AuthUser | null;
-    setWorkspace: (workspace: WorkspaceDocument | null, threadId?: string) => void;
+    setWorkspace: (workspace: WorkspaceDocument | null, threadId?: string, requireCoreDisplay?: boolean) => void;
     setActiveThreadId: (threadId: string | null) => void;
     setWorkspaceInteractionDisabled: (disabled: boolean) => void;
     setPreviewRecheckVersion: (update: (current: number) => number) => void;
@@ -534,6 +591,7 @@ function WorkspaceHome() {
   const [messages, setMessages] = useState<ConversationMessage[]>(() => initialSessionRef.current?.messages ?? []);
   const [workspace, setLocalWorkspace] = useState<WorkspaceDocument | null>(() => initialSessionRef.current?.workspace ?? null);
   const [workspaceThreadId, setWorkspaceThreadId] = useState(() => initialSessionRef.current?.workspaceThreadId ?? initialSessionRef.current?.threadId ?? threadId);
+  const [requireCorePreviewDisplay, setRequireCorePreviewDisplay] = useState(() => initialSessionRef.current?.requireCorePreviewDisplay === true);
   const [confirmedPreviewIds, setConfirmedPreviewIds] = useState<Set<string>>(() => new Set(initialSessionRef.current?.confirmedPreviewIds ?? []));
   const controllerRef = useRef<AbortController | null>(null);
   const replyRef = useRef('');
@@ -546,18 +604,19 @@ function WorkspaceHome() {
   }, [isBusy, setWorkspaceInteractionDisabled]);
   useEffect(() => {
     setActiveThreadId(threadId);
-    if (workspace) setWorkspace(workspace, workspaceThreadId);
+    if (workspace) setWorkspace(workspace, workspaceThreadId, requireCorePreviewDisplay);
     return () => setActiveThreadId(null);
-  }, [setActiveThreadId, setWorkspace, threadId, workspace, workspaceThreadId]);
+  }, [requireCorePreviewDisplay, setActiveThreadId, setWorkspace, threadId, workspace, workspaceThreadId]);
 
   useEffect(() => {
     writeAssistantSession(user, {
       threadId,
       messages,
       ...(workspace ? { workspace, workspaceThreadId } : {}),
+      ...(requireCorePreviewDisplay ? { requireCorePreviewDisplay: true } : {}),
       ...(confirmedPreviewIds.size > 0 ? { confirmedPreviewIds: [...confirmedPreviewIds] } : {}),
     });
-  }, [confirmedPreviewIds, messages, threadId, user, workspace, workspaceThreadId]);
+  }, [confirmedPreviewIds, messages, requireCorePreviewDisplay, threadId, user, workspace, workspaceThreadId]);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
@@ -576,7 +635,7 @@ function WorkspaceHome() {
   const receiveWorkspace = (document: WorkspaceDocument) => {
     setLocalWorkspace(document);
     setWorkspaceThreadId(threadId);
-    setWorkspace(document, threadId);
+    setWorkspace(document, threadId, requireCorePreviewDisplay);
   };
 
   const handleEvent = (event: AssistantUiEvent): boolean => {
@@ -696,6 +755,7 @@ function WorkspaceHome() {
     setMessages([]);
     setLocalWorkspace(null);
     setWorkspaceThreadId(newThreadId);
+    setRequireCorePreviewDisplay(false);
     setConfirmedPreviewIds(new Set());
     setWorkspace(null);
     setRunStatus('idle');
@@ -732,17 +792,17 @@ function WorkspaceHome() {
       <div className="home-intro"><div><span className="eyebrow accent-eyebrow">AI-FIRST OPERATING DESK</span><Title id="welcome-heading" level={1}>把经营问题交给工作台。</Title>
         <p className="intro-copy">今天先处理什么？用自然语言描述目标，查询结果和待确认操作都会在同一处连续呈现。</p></div>
         <div className="date-chip"><span className="date-label">业务日</span><strong>尚未设置</strong></div></div>
-      {isUnavailable && <Alert className="availability-alert" description="助手暂时无法回答问题，你仍可以使用学生、排课和收支页面。" title="助手暂时不可用" showIcon type="warning" />}
+      {isUnavailable && <Alert className="availability-alert" description={user?.role === 'TEACHER' ? '助手暂时无法回答问题，你仍可以使用排课页面。' : '助手暂时无法回答问题，你仍可以使用学生、排课和收支页面。'} title="助手暂时不可用" showIcon type="warning" />}
       <Card className="prompt-card" variant="borderless">
         <div className="card-heading"><div><span className="eyebrow">OPERATING THREAD</span><Title level={3}>今天先处理什么？</Title></div><span className={`assistant-availability ${isUnavailable ? '' : 'is-online'}`}>{isUnavailable ? '暂不可用' : '在线'}</span></div>
         <section aria-label="对话历史" className="conversation-history home-conversation">
-          {messages.length === 0 && <div className="conversation-message conversation-message-assistant welcome-message"><span className="chat-avatar">AI</span><div><strong>AI 助手</strong><p>早上好。你可以直接查询今天的排课、本月经营情况，或办理学生账户和日常经营事项。</p></div></div>}
+          {messages.length === 0 && <div className="conversation-message conversation-message-assistant welcome-message"><span className="chat-avatar">AI</span><div><strong>AI 助手</strong><p>{user?.role === 'TEACHER' ? '早上好。你可以查看自己的课表，办理调课、请假或确认上课。' : '早上好。你可以直接查询今天的排课、本月经营情况，或办理学生账户和日常经营事项。'}</p></div></div>}
           {messages.map((message) => <div className={`conversation-message conversation-message-${message.role}`} key={message.id}>
             <span className="chat-avatar">{message.role === 'user' ? (user?.username.slice(0, 1).toUpperCase() || '你') : 'AI'}</span><div><strong>{message.role === 'user' ? '你' : 'AI 助手'}</strong><p>{formatAssistantReply(message.text)}</p></div>
           </div>)}
           {reply && <div className="conversation-message conversation-message-assistant"><span className="chat-avatar">AI</span><div><strong>AI 助手</strong><p aria-live="polite">{formatAssistantReply(reply)}</p></div></div>}
         </section>
-        <div className="suggestion-row" aria-label="示例入口"><span className="suggestion-label">可以从这里开始</span>{suggestions.map((suggestion) => <button className="suggestion-button" disabled={isBusy} key={suggestion} onClick={() => setPrompt(suggestion)} type="button">{suggestion}</button>)}</div>
+        <div className="suggestion-row" aria-label="示例入口"><span className="suggestion-label">可以从这里开始</span>{(user?.role === 'TEACHER' ? ['查看今日排课', '查看明天排课', '查看我的课程业绩'] : suggestions).map((suggestion) => <button className="suggestion-button" disabled={isBusy} key={suggestion} onClick={() => setPrompt(suggestion)} type="button">{suggestion}</button>)}</div>
         <form onSubmit={submit}>
           <TextArea aria-label="经营问题" autoSize={{ minRows: 2, maxRows: 4 }} disabled={isBusy} onChange={(event) => setPrompt(event.target.value)} placeholder="直接描述你想查询或办理的事情…" value={prompt} />
           <div className="prompt-footer"><Text className="prompt-hint">{isUnavailable ? 'AI 服务当前不可用，提交后会显示连接结果。' : '消息将发送给 AI 助手；写入操作仍须由你确认。'}</Text><div className="prompt-actions">{isBusy && <Button onClick={() => void submitMessage('取消当前办理', true)} size="small">取消当前办理</Button>}<Button disabled={prompt.trim().length === 0 || isBusy} loading={runStatus === 'connecting'} htmlType="submit" type="primary">{isBusy ? '处理中…' : '发送消息'} <span aria-hidden="true">↗</span></Button></div></div>
@@ -762,7 +822,7 @@ function WorkspaceHome() {
 
 function HomeOverview({ user, overview }: { user: AuthUser | null; overview: ReturnType<typeof useHomeOverview> }) {
   const navigate = useNavigate();
-  const tasks = useQuery({ queryKey: ['assistant-tasks'], queryFn: () => apiRequest('/api/assistant/tasks', (value): value is AssistantTaskSummary[] => Array.isArray(value) && value.every(isTaskSummary)), refetchInterval: 30_000 });
+  const tasks = useQuery({ queryKey: ['assistant-tasks', user?.id ?? null, user?.role ?? null, user?.teacherId ?? null], queryFn: () => apiRequest('/api/assistant/tasks', (value): value is AssistantTaskSummary[] => Array.isArray(value) && value.every(isTaskSummary)), refetchInterval: 30_000 });
   const isOwner = user?.role === 'OWNER';
   const lessons = overview.data?.today.lessons ?? [];
   const pendingCount = overview.data?.today.pendingCount ?? 0;
@@ -781,7 +841,7 @@ function HomeOverview({ user, overview }: { user: AuthUser | null; overview: Ret
       <section className="overview-panel" aria-labelledby="today-lessons-heading"><div className="overview-panel-heading"><div><span className="eyebrow">TODAY</span><h4 id="today-lessons-heading">今日排课</h4><p>{lessons.length ? `共 ${lessons.length} 节，状态来自实时排课` : '今天暂无排课记录'}</p></div><button onClick={() => navigate('/schedule')} type="button">进入排课 →</button></div>
         {overview.isError ? <Alert message="暂时无法读取经营概览" type="warning" showIcon /> : lessons.length ? <div className="overview-list">{lessons.slice(0, 4).map((lesson) => <div className="overview-list-row" key={lesson.id}><strong>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(lesson.startsAt))}</strong><span>{lesson.student.name} · {lesson.course.name}</span><Tag>{lesson.status === 'COMPLETED' ? '已完成' : lesson.status === 'CANCELLED' ? '已取消' : '待处理'}</Tag></div>)}</div> : <div className="overview-empty">创建排课后，今日课程会显示在这里。</div>}
       </section>
-      <section className="overview-panel" aria-labelledby="overview-actions-heading"><div className="overview-panel-heading"><div><span className="eyebrow">QUICK ENTRY</span><h4 id="overview-actions-heading">常用入口</h4><p>直接查看和办理日常业务。</p></div></div><div className="overview-actions">{isOwner && <><button onClick={() => navigate('/students')} type="button"><strong>学生与账户</strong><span>查找学生、课程账户和余额 →</span></button><button onClick={() => navigate('/finance')} type="button"><strong>收支与报表</strong><span>月度结果、工资和关账 →</span></button></>}</div><div className="recent-tasks"><span className="eyebrow">RECENT TASKS</span>{tasks.data?.slice(0, 3).map((task) => <button key={task.threadId} onClick={() => navigate(`/tasks/${task.threadId}`)} type="button"><span>{task.title}</span><em>{task.latestStatus === 'completed' ? '已完成' : task.latestStatus === 'failed' ? '需重试' : '进行中'}</em></button>)}{tasks.isError ? <small>任务列表暂不可用</small> : !tasks.isLoading && !tasks.data?.length && <small>暂无已保存任务</small>}</div>{blockers.length > 0 && <Alert className="overview-alert" message="本月关账存在阻断项" description={blockers.slice(0, 2).map((item) => item.message).join('；')} showIcon type="warning" />}</section>
+      <section className="overview-panel" aria-labelledby="overview-actions-heading"><div className="overview-panel-heading"><div><span className="eyebrow">QUICK ENTRY</span><h4 id="overview-actions-heading">常用入口</h4><p>直接查看和办理日常业务。</p></div></div><div className="overview-actions">{isOwner && <><button onClick={() => navigate('/students')} type="button"><strong>学生与账户</strong><span>查找学生、课程账户和余额 →</span></button><button onClick={() => navigate('/finance')} type="button"><strong>收支与报表</strong><span>月度结果、工资和关账 →</span></button></>}</div><div className="recent-tasks"><span className="eyebrow">RECENT TASKS</span>{tasks.data?.slice(0, 3).map((task) => <button key={task.threadId} onClick={() => navigate(`/tasks/${task.threadId}`)} type="button"><span>{task.title}</span><em>{task.latestStatus === 'completed' ? '已回复' : task.latestStatus === 'failed' ? '需重试' : '进行中'}</em></button>)}{tasks.isError ? <small>任务列表暂不可用</small> : !tasks.isLoading && !tasks.data?.length && <small>暂无已保存任务</small>}</div>{blockers.length > 0 && <Alert className="overview-alert" message="本月关账存在阻断项" description={blockers.slice(0, 2).map((item) => item.message).join('；')} showIcon type="warning" />}</section>
     </div>
     {isOwner && overview.data && <div className="overview-panels"><section className="overview-panel"><div className="overview-panel-heading"><div><span className="eyebrow">ATTENTION</span><h4>待处理事项</h4><p>截至 {formatDateTime(overview.data.asOf)}</p></div></div><div className="overview-actions"><button onClick={() => navigate('/students')} type="button"><strong>欠费学生</strong><span>{overview.data.students?.arrearsCount ?? '—'} 人 →</span></button><button onClick={() => navigate('/finance?tab=payroll')} type="button"><strong>待支付工资</strong><span>{overview.data.preclose?.unpaidPayrollCount ?? '—'} 笔 →</span></button></div></section><section className="overview-panel"><div className="overview-panel-heading"><div><span className="eyebrow">RECENT ACTIVITY</span><h4>最近账户流水</h4><p>按业务发生时间倒序</p></div><button onClick={() => navigate('/students')} type="button">查看账户 →</button></div>{overview.data.recentRecords?.length ? <div className="overview-list">{overview.data.recentRecords.map((record) => <div className="overview-list-row" key={record.id}><strong>{formatDateTime(record.occurredAt)}</strong><span>{record.studentName} · {record.courseName}</span><span>{overviewRecordKind(record.kind)} · 实付 {record.paidDelta} / 赠送 {record.giftDelta}</span></div>)}</div> : <div className="overview-empty">暂无账户流水</div>}</section></div>}
   </section>;
@@ -806,15 +866,39 @@ function ContextPanel({ activeThreadId, interactionDisabled, onCandidateSelect, 
   user: AuthUser | null;
   workspace: WorkspaceState | null;
 }) {
-  const navigate = useNavigate();
-  const overview = useHomeOverview();
+  const overview = useHomeOverview(user);
   const isCurrentWorkspace = workspace !== null && workspace.threadId === activeThreadId;
-  const document = workspace?.document as WorkspaceWithTaskVersion | undefined;
-  const taskVersion = typeof document?.taskVersion === 'number' && Number.isInteger(document.taskVersion) ? document.taskVersion : undefined;
   return <div className="context-inner"><div className="context-heading"><div><span className="eyebrow">OPERATING WORKSPACE</span><Title level={3}>经营工作区</Title></div><button aria-label="清空上下文" className="clear-button" onClick={onClear} type="button">清空</button></div>
-    {workspace ? <div aria-label="工作区内容" className="live-workspace">
-      <Title className="live-workspace-title" level={5}>{workspace.document.title}</Title>
-      {workspace.document.blocks.map((block, index) => {
+    {workspace ? <WorkspaceContent
+      document={workspace.document}
+      interactionDisabled={interactionDisabled}
+      isCurrentWorkspace={isCurrentWorkspace}
+      onCandidateSelect={onCandidateSelect}
+      onPreviewConfirmed={onPreviewConfirmed}
+      onRecoveryAction={onRecoveryAction}
+      previewRecheckVersion={previewRecheckVersion}
+      requireCoreDisplay={workspace.requireCoreDisplay ?? false}
+    /> : <HomeOverview user={user} overview={overview} />}
+  </div>;
+}
+
+function WorkspaceContent({ document, interactionDisabled, isCurrentWorkspace, onCandidateSelect, onPreviewConfirmed, onRecoveryAction, previewRecheckVersion, requireCoreDisplay = false }: {
+  document: WorkspaceDocument;
+  interactionDisabled: boolean;
+  isCurrentWorkspace: boolean;
+  onCandidateSelect: CandidateSelectionHandler;
+  onPreviewConfirmed: PreviewConfirmationHandler;
+  onRecoveryAction: RecoveryActionHandler;
+  previewRecheckVersion: number;
+  requireCoreDisplay?: boolean;
+}) {
+  const navigate = useNavigate();
+  const taskVersion = typeof (document as WorkspaceWithTaskVersion).taskVersion === 'number' && Number.isInteger((document as WorkspaceWithTaskVersion).taskVersion)
+    ? (document as WorkspaceWithTaskVersion).taskVersion
+    : undefined;
+  return <div aria-label="工作区内容" className="live-workspace">
+      <Title className="live-workspace-title" level={5}>{document.title}</Title>
+      {document.blocks.map((block, index) => {
         if (block.type === 'summary') return <section className="workspace-summary" key={`summary-${index}`}><strong>{block.title}</strong><p>{block.text}</p></section>;
         if (block.type === 'entity-picker') return <section aria-label="候选实体" className="workspace-summary entity-picker" key={`entity-picker-${index}`}><strong>{block.title}</strong><div className="entity-candidates">{block.candidates.map((candidate) => <button aria-label={`选择候选：${candidate.label}`} className="entity-candidate" disabled={!isCurrentWorkspace || interactionDisabled} key={candidate.id} onClick={() => { if (!interactionDisabled) onCandidateSelect(candidate.id, taskVersion); }} type="button"><span>{candidate.label}</span>{candidate.description && <small>{candidate.description}</small>}</button>)}</div></section>;
         if (block.type === 'data-table') return <div className="workspace-table-wrap" key={`table-${index}`}><table aria-label="查询结果" className="workspace-table"><thead><tr>{block.columns.map((column) => <th key={column.key} scope="col">{column.label}</th>)}</tr></thead><tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{block.columns.map((column) => <td key={column.key}>{String(row[column.key] ?? '—')}</td>)}</tr>)}</tbody></table></div>;
@@ -828,36 +912,70 @@ function ContextPanel({ activeThreadId, interactionDisabled, onCandidateSelect, 
         if (block.type === 'ledger-detail') return <section aria-label="流水明细" className="workspace-summary ledger-detail" key={`ledger-${index}`}><strong>流水明细</strong><p>账户：{block.accountId}</p>{block.entries.map((entry) => <div className="ledger-entry" key={entry.id}><div><strong>{entry.description}</strong><span>{formatDateTime(entry.occurredAt)}</span></div><span>实收 {entry.paidDelta} · 赠送 {entry.giftDelta}</span></div>)}</section>;
         if (block.type === 'calculation-breakdown') return <section aria-label="金额计算" className="workspace-summary" key={`calculation-${index}`}><strong>{block.title}</strong>{block.lines.map((line) => <p key={line.label}>{line.label}：¥{line.amount}</p>)}<p><strong>合计：¥{block.total}</strong></p></section>;
         if (block.type === 'receipt') return <ReceiptBlockView block={block} key={`receipt-${index}`} />;
-        if (block.type === 'action-preview') return <PreviewConfirmationCard interactionDisabled={interactionDisabled} key={block.previewId} onConfirmed={onPreviewConfirmed} preview={block} previewRecheckVersion={previewRecheckVersion} />;
+        if (block.type === 'action-preview') return <PreviewConfirmationCard interactionDisabled={interactionDisabled} key={block.previewId} onConfirmed={onPreviewConfirmed} preview={block} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCoreDisplay} />;
         if (block.type === 'error-recovery') return <section aria-label="错误恢复" className="workspace-summary error-recovery" key={`error-${index}`}><Alert message={block.message} showIcon type="error" /><div className="recovery-actions">{block.actions.map((action) => <button className="recovery-action" disabled={interactionDisabled} key={action} onClick={() => { if (action === 'open-structured-page') navigate('/finance'); else onRecoveryAction(action); }} type="button">{action === 'refresh' ? '刷新结果' : action === 'repreview' ? '重新生成预览' : '打开结构化页面'}</button>)}</div></section>;
         return null;
       })}
-      {workspace.document.sources.length > 0 && <section aria-label="数据来源" className="workspace-summary workspace-sources"><strong>数据来源</strong>{workspace.document.sources.map((source) => <div className="source-row" key={`${source.type}-${source.id}`}><span>{source.label}</span><small>{source.type} · {source.id}</small></div>)}</section>}
-      {workspace.document.blocks.length === 0 && <p className="workspace-empty">当前结果没有可展示的工作区内容。</p>}
-    </div> : <HomeOverview user={user} overview={overview} />}
-  </div>;
+      {document.sources.length > 0 && <section aria-label="数据来源" className="workspace-summary workspace-sources"><strong>数据来源</strong>{document.sources.map((source) => <div className="source-row" key={`${source.type}-${source.id}`}><span>{source.label}</span><small>{source.type} · {source.id}</small></div>)}</section>}
+      {document.blocks.length === 0 && <p className="workspace-empty">当前结果没有可展示的工作区内容。</p>}
+    </div>;
 }
 
-function PreviewConfirmationCard({ interactionDisabled, onConfirmed, preview, previewRecheckVersion }: { interactionDisabled: boolean; onConfirmed: PreviewConfirmationHandler; preview: Extract<WorkspaceBlock, { type: 'action-preview' }>; previewRecheckVersion: number }) {
-  const [status, setStatus] = useState<'unknown' | 'loading' | 'pending' | 'confirming' | 'executed' | 'cancelled' | 'stale' | 'expired' | 'failed'>('unknown');
+type PreviewCardData = Pick<Extract<WorkspaceBlock, { type: 'action-preview' }>, 'type' | 'previewId' | 'actionType' | 'schemaVersion' | 'riskLevel' | 'title'> & { expiresAt?: string };
+
+function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, onConfirmed, preview, previewRecheckVersion, requireCoreDisplay }: { confirmAllowed?: boolean; interactionDisabled: boolean; onConfirmed: PreviewConfirmationHandler; preview: PreviewCardData; previewRecheckVersion: number; requireCoreDisplay: boolean }) {
+  const [status, setStatus] = useState<'unknown' | 'loading' | 'pending' | 'confirming' | 'executed' | 'cancelled' | 'stale' | 'expired' | 'failed' | 'mismatch'>('unknown');
   const [message, setMessage] = useState('');
   const [receipt, setReceipt] = useState<Record<string, unknown> | null>(null);
+  const [coreDisplay, setCoreDisplay] = useState<Record<string, unknown> | null>(null);
+  const [coreActionType, setCoreActionType] = useState<string | null>(null);
+  const [coreExpiresAt, setCoreExpiresAt] = useState<string | null>(null);
+  const [corePreviewRead, setCorePreviewRead] = useState(false);
   const idempotencyKeyRef = useRef<string | null>(null);
+  const confirmingRef = useRef(false);
   const onConfirmedRef = useRef(onConfirmed);
   onConfirmedRef.current = onConfirmed;
+
+  const applyCurrentPreview = (current: Awaited<ReturnType<typeof getAssistantPreview>>) => {
+    setCorePreviewRead(true);
+    setReceipt(current.receipt);
+    setCoreDisplay(current.display ?? null);
+    setCoreActionType(current.actionType);
+    setCoreExpiresAt(current.expiresAt);
+    if (current.status === 'EXECUTED') {
+      setStatus('executed');
+      setMessage('已确认并执行。');
+      onConfirmedRef.current(current.previewId);
+      return;
+    }
+    const metadataMismatch = current.actionType !== preview.actionType || current.schemaVersion !== preview.schemaVersion || current.riskLevel !== preview.riskLevel;
+    if (current.status === 'PENDING' && metadataMismatch) {
+      setStatus('mismatch');
+      setMessage('历史确认单与当前预览不一致，已禁止确认。请重新生成确认单。');
+      return;
+    }
+    if (requireCoreDisplay && current.status === 'PENDING' && !current.display) {
+      setStatus('mismatch');
+      setMessage('系统未提供当前确认内容，已禁止确认。请重新生成确认单。');
+      return;
+    }
+    const locallyExpired = current.status === 'PENDING' && Date.parse(current.expiresAt) <= Date.now();
+    setStatus(locallyExpired ? 'expired' : current.status.toLowerCase() as 'pending' | 'cancelled' | 'expired' | 'stale');
+    setMessage(current.status === 'PENDING' && !confirmAllowed ? '历史待确认步骤仅供查看，不能直接执行。' : '');
+  };
 
   useEffect(() => {
     let active = true;
     setStatus('loading');
     setMessage('');
+    setReceipt(null);
+    setCoreDisplay(null);
+    setCoreActionType(null);
+    setCoreExpiresAt(null);
+    setCorePreviewRead(false);
     void getAssistantPreview({ token: getToken(), previewId: preview.previewId }).then((current) => {
       if (!active) return;
-      setReceipt(current.receipt);
-      const locallyExpired = current.status === 'PENDING' && Date.parse(current.expiresAt) <= Date.now();
-      const nextStatus = locallyExpired ? 'expired' : current.status.toLowerCase() as 'pending' | 'executed' | 'cancelled' | 'expired' | 'stale';
-      setStatus(nextStatus);
-      setMessage(current.status === 'EXECUTED' ? '已确认并执行。' : '');
-      if (current.status === 'EXECUTED') onConfirmedRef.current(current.previewId);
+      applyCurrentPreview(current);
     }).catch((cause) => {
       if (!active) return;
       setReceipt(null);
@@ -865,27 +983,29 @@ function PreviewConfirmationCard({ interactionDisabled, onConfirmed, preview, pr
       setMessage(cause instanceof Error ? cause.message : '无法读取预览当前状态，请稍后重查。');
     });
     return () => { active = false; };
-  }, [preview.previewId, previewRecheckVersion]);
+  }, [confirmAllowed, preview.actionType, preview.previewId, preview.riskLevel, preview.schemaVersion, previewRecheckVersion]);
 
   useEffect(() => {
-    const expiresAt = Date.parse(preview.expiresAt);
-    const remaining = expiresAt - Date.now();
+    const expiresAt = coreExpiresAt ?? (!requireCoreDisplay ? preview.expiresAt ?? null : null);
+    if (!expiresAt) return undefined;
+    const remaining = Date.parse(expiresAt) - Date.now();
     if (!Number.isFinite(remaining) || remaining <= 0) {
       setStatus((current) => current === 'pending' ? 'expired' : current);
       return undefined;
     }
     const timer = window.setTimeout(() => setStatus((current) => current === 'pending' ? 'expired' : current), Math.min(remaining, 2_147_483_647));
     return () => window.clearTimeout(timer);
-  }, [preview.expiresAt]);
+  }, [coreExpiresAt, preview.expiresAt, requireCoreDisplay]);
 
   const confirm = async () => {
-    if (interactionDisabled || (status !== 'pending' && status !== 'failed')) return;
+    if (!confirmAllowed || interactionDisabled || confirmingRef.current || (status !== 'pending' && status !== 'failed')) return;
     const idempotencyKey = getStablePreviewIdempotencyKey(preview.previewId, idempotencyKeyRef);
     if (!idempotencyKey) {
       setStatus('failed');
       setMessage('当前浏览器无法安全生成确认标识，请稍后重试。');
       return;
     }
+    confirmingRef.current = true;
     setStatus('confirming');
     setMessage('');
     try {
@@ -902,46 +1022,56 @@ function PreviewConfirmationCard({ interactionDisabled, onConfirmed, preview, pr
       }
       setStatus('failed');
       setMessage(cause instanceof Error ? cause.message : '确认失败，请稍后重试。');
+    } finally {
+      confirmingRef.current = false;
     }
   };
-  const statusMessage = status === 'cancelled' ? '预览已取消，未执行任何操作。' : status === 'stale' ? '预览已失效，未执行任何操作。请重新生成预览。' : status === 'expired' ? '预览已过期，未执行任何操作。请重新生成预览。' : undefined;
+  const statusMessage = status === 'mismatch' ? message : status === 'pending' && !confirmAllowed ? message : status === 'cancelled' ? '预览已取消，未执行任何操作。' : status === 'stale' ? '预览已失效，未执行任何操作。请重新生成预览。' : status === 'expired' ? '预览已过期，未执行任何操作。请重新生成预览。' : undefined;
+  const canShowDetails = !requireCoreDisplay || corePreviewRead;
+  const currentExpiresAt = coreExpiresAt ?? (!requireCoreDisplay ? preview.expiresAt ?? null : null);
   return <section aria-label="操作预览" className="workspace-summary preview-card">
-    <strong>{preview.title}</strong>
-    <p className="preview-guidance">确认前请核对预览内容；确认后才会写入真实业务数据。</p>
-    <p className="preview-expiry">有效期至 {formatDateTime(preview.expiresAt)}</p>
-    <details className="preview-technical-details">
-      <summary>查看技术详情</summary>
-      <dl>
-        <div className="receipt-row"><dt>动作类型</dt><dd>{preview.actionType}</dd></div>
-        <div className="receipt-row"><dt>数据版本</dt><dd>{preview.schemaVersion}</dd></div>
-        <div className="receipt-row"><dt>风险代码</dt><dd>{preview.riskLevel}</dd></div>
-        <div className="receipt-row"><dt>预览编号</dt><dd>{preview.previewId}</dd></div>
-      </dl>
-    </details>
-    {status === 'loading' && <Alert className="preview-alert" message="正在核对 Core 当前状态…" showIcon type="info" />}
-    {status === 'unknown' && <Alert className="preview-alert" message={message || '无法读取预览当前状态，尚未确认。'} showIcon type="warning" />}
+    {canShowDetails ? <>
+      <strong>{typeof coreDisplay?.title === 'string' ? coreDisplay.title : preview.title}</strong>
+      <p className="preview-guidance">确认前请核对预览内容；确认后才会写入真实业务数据。</p>
+      {coreDisplay && <section aria-label="当前确认单内容" className="preview-core-display">
+        {typeof coreDisplay.summary === 'string' && <p>{coreDisplay.summary}</p>}
+        <PreviewFacts value={coreDisplay} actionType={coreActionType ?? preview.actionType} />
+      </section>}
+      {currentExpiresAt && <p className="preview-expiry">有效期至 {formatDateTime(currentExpiresAt)}</p>}
+      <details className="preview-technical-details">
+        <summary>查看技术详情</summary>
+        <dl>
+          <div className="receipt-row"><dt>动作类型</dt><dd>{preview.actionType}</dd></div>
+          <div className="receipt-row"><dt>数据版本</dt><dd>{preview.schemaVersion}</dd></div>
+          <div className="receipt-row"><dt>风险代码</dt><dd>{preview.riskLevel}</dd></div>
+          <div className="receipt-row"><dt>预览编号</dt><dd>{preview.previewId}</dd></div>
+        </dl>
+      </details>
+      {status === 'loading' && <Alert className="preview-alert" message="正在核对系统当前确认单…" showIcon type="info" />}
+      {status === 'unknown' && <Alert className="preview-alert" message={message || '无法读取预览当前状态，尚未确认。'} showIcon type="warning" />}
+    </> : <Alert className="preview-alert" message={status === 'loading' ? '正在核对系统当前确认单…' : message || '暂时无法读取当前确认单，请稍后重查。'} showIcon type={status === 'loading' ? 'info' : 'warning'} />}
     {statusMessage && <Alert className="preview-alert" message={statusMessage} showIcon type="warning" />}
     {status === 'executed' ? <>
       <Alert message={message} showIcon type="success" />
       <ReceiptResult receipt={receipt} />
     </> : <>
-      {message && status !== 'unknown' && <Alert className="preview-alert" message={message} showIcon type="error" />}
+      {message && status !== 'unknown' && status !== 'mismatch' && !(status === 'pending' && !confirmAllowed) && <Alert className="preview-alert" message={message} showIcon type="error" />}
       {status === 'unknown' ? <Button disabled={interactionDisabled} onClick={() => {
         setStatus('loading');
         setMessage('');
-        void getAssistantPreview({ token: getToken(), previewId: preview.previewId }).then((current) => {
-          setReceipt(current.receipt);
-          const locallyExpired = current.status === 'PENDING' && Date.parse(current.expiresAt) <= Date.now();
-          setStatus(locallyExpired ? 'expired' : current.status.toLowerCase() as 'pending' | 'executed' | 'cancelled' | 'expired' | 'stale');
-          setMessage(current.status === 'EXECUTED' ? '已确认并执行。' : '');
-          if (current.status === 'EXECUTED') onConfirmedRef.current(current.previewId);
-        }).catch((cause) => {
+        setReceipt(null);
+        setCoreDisplay(null);
+        setCoreActionType(null);
+        setCoreExpiresAt(null);
+        setCorePreviewRead(false);
+        void getAssistantPreview({ token: getToken(), previewId: preview.previewId }).then(applyCurrentPreview).catch((cause) => {
           setStatus('unknown');
           setMessage(cause instanceof Error ? cause.message : '无法读取预览当前状态，请稍后重查。');
         });
-      }} type="default">重查预览状态</Button> : (status === 'pending' || status === 'failed' || status === 'confirming') && <Button danger={preview.riskLevel === 'L2'} disabled={interactionDisabled || status === 'confirming'} loading={status === 'confirming'} onClick={confirm} type="primary">
+      }} type="default">重查预览状态</Button> : (status === 'pending' || status === 'failed' || status === 'confirming') && confirmAllowed && <Button danger={preview.riskLevel === 'L2'} disabled={interactionDisabled || status === 'confirming'} loading={status === 'confirming'} onClick={confirm} type="primary">
         {status === 'failed' ? '重试确认' : preview.riskLevel === 'L2' ? '确认并登记' : '确认执行'}
       </Button>}
+      {status === 'mismatch' && <Button disabled type="default">确认单信息不一致</Button>}
       {status === 'expired' && <Button disabled type="default">预览已过期</Button>}
       {status === 'stale' && <Button disabled type="default">预览已失效</Button>}
       {status === 'cancelled' && <Button disabled type="default">预览已取消</Button>}

@@ -108,7 +108,7 @@ describe('dialogue actor and capability boundaries', () => {
   it('lists and reads persisted tasks through the actor binding derived from the signed capability', async () => {
     const base = createTestRepository();
     const listThreads = vi.fn().mockResolvedValue([{ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed' }]);
-    const getThread = vi.fn().mockResolvedValue({ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null });
+    const getThread = vi.fn().mockResolvedValue({ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews: [] });
     const app = buildTestServer({ ...base, listThreads, getThread }, true);
     const claims = { sub: 'owner-user', role: 'OWNER', threadId, runId };
     try {
@@ -144,8 +144,12 @@ describe('dialogue actor and capability boundaries', () => {
   });
 
   it('production binding rejects same-thread actors with different sub, role, or teacherId on start, history, and SSE', async () => {
-    const repository = createTestRepository();
-    const app = buildTestServer(repository, true);
+    const baseRepository = createTestRepository();
+    const getThread = vi.fn(async (requestedThreadId: string, actorKey: string) => {
+      if (await baseRepository.getThreadOwner(requestedThreadId) !== actorKey) return null;
+      return { threadId: requestedThreadId, title: '授权任务', lastActivityAt: '2026-10-28T00:00:00.000Z', latestStatus: 'completed' as const, messages: [], workspace: null, historicalPreviews: [{ previewId: '30000000-0000-4000-8000-000000000003', actionType: 'lesson.complete', schemaVersion: 'lesson.complete.v1', riskLevel: 'L1' as const }] };
+    });
+    const app = buildTestServer({ ...baseRepository, getThread }, true);
     const owner = { sub: 'owner-user', role: 'TEACHER', teacherId: teacherOneId, threadId, runId };
     const variants = [
       { sub: 'other-user', role: 'TEACHER', teacherId: teacherOneId },
@@ -156,11 +160,24 @@ describe('dialogue actor and capability boundaries', () => {
     try {
       await expect(startRun(app, owner)).resolves.toMatchObject({ statusCode: 200 });
 
+      const ownerThreadPath = `/internal/assistant/threads/${threadId}`;
+      const ownerThread = await app.inject({ method: 'GET', url: ownerThreadPath, headers: signedHeaders('GET', ownerThreadPath, undefined, capability(owner)) });
+      expect(ownerThread.statusCode).toBe(200);
+      expect(ownerThread.json()).toMatchObject({ historicalPreviews: [{ previewId: '30000000-0000-4000-8000-000000000003' }] });
+
       for (const [index, variant] of variants.entries()) {
         const startClaims = { ...variant, threadId, runId: `${index + 1}200271f-06a4-45e6-bdb8-6c59b843a1fa` };
         const historyClaims = { ...variant, threadId, runId };
         const start = await startRun(app, startClaims, '越权启动');
         expect(start.statusCode).toBe(403);
+
+        const threadHistoryPath = `/internal/assistant/threads/${threadId}`;
+        const threadHistory = await app.inject({
+          method: 'GET',
+          url: threadHistoryPath,
+          headers: signedHeaders('GET', threadHistoryPath, undefined, capability(historyClaims)),
+        });
+        expect(threadHistory.statusCode).toBe(404);
 
         const historyPath = `/internal/assistant/runs/${runId}`;
         const history = await app.inject({

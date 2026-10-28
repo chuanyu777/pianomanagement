@@ -199,6 +199,7 @@ export type AssistantPreview = {
   status: AssistantPreviewStatus;
   expiresAt: string;
   receipt: Record<string, unknown> | null;
+  display?: Record<string, unknown>;
 };
 
 export type AssistantPreviewConfirmation = { previewId: string; status: 'EXECUTED'; receipt: Record<string, unknown> | null };
@@ -219,7 +220,8 @@ function parseAssistantPreview(value: unknown, expectedPreviewId: string): Assis
       typeof value.actionType !== 'string' || typeof value.schemaVersion !== 'string' ||
       (value.riskLevel !== 'L1' && value.riskLevel !== 'L2') ||
       !(['PENDING', 'EXECUTED', 'CANCELLED', 'EXPIRED', 'STALE'] as const).includes(value.status as AssistantPreviewStatus) ||
-      typeof value.expiresAt !== 'string' || (value.receipt !== null && !isRecord(value.receipt))) return null;
+      typeof value.expiresAt !== 'string' || (value.receipt !== null && !isRecord(value.receipt)) ||
+      (value.display !== undefined && !isRecord(value.display))) return null;
   return {
     previewId: expectedPreviewId,
     actionType: value.actionType,
@@ -228,6 +230,7 @@ function parseAssistantPreview(value: unknown, expectedPreviewId: string): Assis
     status: value.status as AssistantPreviewStatus,
     expiresAt: value.expiresAt,
     receipt: value.receipt as Record<string, unknown> | null,
+    ...(isRecord(value.display) ? { display: value.display } : {}),
   };
 }
 
@@ -249,6 +252,10 @@ export async function createAssistantPreview(input: {
   if (!response.ok) {
     if (response.status === 401) { notifyAuthExpired(); throw new Error('登录状态已失效，请重新登录后再试。'); }
     if (response.status === 403) throw new Error('当前账号无权创建该预览。');
+    if (response.status === 400 || response.status === 409) {
+      const payload: unknown = await response.json().catch(() => null);
+      if (isRecord(payload) && typeof payload.message === 'string' && payload.message.trim() && payload.message.length <= 500) throw new Error(payload.message);
+    }
     throw new Error(`无法创建操作预览（HTTP ${response.status}），请检查输入后重试。`);
   }
   const payload: unknown = await response.json();
@@ -322,10 +329,10 @@ async function recoverUnknownConfirmation(input: {
       ? { token: input.token, previewId: input.previewId, fetchImpl: input.fetchImpl }
       : { token: input.token, previewId: input.previewId });
     if (current.status === 'EXECUTED') return confirmationFromPreview(current);
-    throw new UnknownConfirmationError(`${reason}确认请求结果未知，Core 当前状态为 ${current.status}，未再次提交。请先重查预览状态。`);
+    throw new UnknownConfirmationError(`${reason}确认请求结果未知，系统当前状态为 ${current.status}，未再次提交。请先重查预览状态。`);
   } catch (cause) {
     if (cause instanceof UnknownConfirmationError) throw cause;
-    throw new UnknownConfirmationError(`${reason}确认请求结果未知，无法核对 Core 当前状态。请先重查预览状态后再决定是否重试。`);
+    throw new UnknownConfirmationError(`${reason}确认请求结果未知，无法核对系统当前状态。请先重查预览状态后再决定是否重试。`);
   }
 }
 
@@ -367,7 +374,11 @@ export async function confirmAssistantPreview(input: {
       throw new Error('登录状态已失效，请重新登录后再试。');
     }
     if (response.status === 403) throw new Error('当前账号无权确认该预览。');
-    if (response.status === 409) throw new Error('预览已失效或已被其他请求确认，请重新生成预览。');
+    if (response.status === 409) {
+      const payload: unknown = await response.json().catch(() => null);
+      if (isRecord(payload) && typeof payload.message === 'string' && payload.message.trim() && payload.message.length <= 500) throw new Error(payload.message);
+      throw new Error('预览已失效或已被其他请求确认，请重新生成预览。');
+    }
     return recover();
   }
   let payload: unknown;

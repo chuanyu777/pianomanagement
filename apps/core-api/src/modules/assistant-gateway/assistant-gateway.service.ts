@@ -9,6 +9,7 @@ import {
 import {
   AssistantEventSchema,
   encodeSseEvent,
+  type WorkspaceDocument,
   type AssistantResumeInput,
 } from '@piano/assistant-protocol';
 import { CapabilityTokenService } from '../../common/capability/capability-token.service.js';
@@ -29,6 +30,19 @@ const SAFE_STREAM_ERROR = {
   message: 'AI 助手服务暂时不可用，请稍后重试',
   retryable: true,
 };
+
+function sanitizeTaskWorkspace(workspace: WorkspaceDocument | null): WorkspaceDocument | null {
+  if (!workspace || !workspace.blocks.some((block) => block.type === 'action-preview')) return workspace;
+  return {
+    protocolVersion: workspace.protocolVersion,
+    title: '历史任务确认单',
+    ...(workspace.resultKind ? { resultKind: workspace.resultKind } : {}),
+    blocks: workspace.blocks
+      .filter((block): block is Extract<WorkspaceDocument['blocks'][number], { type: 'action-preview' }> => block.type === 'action-preview')
+      .map((block) => ({ ...block, title: '历史确认单' })),
+    sources: [],
+  };
+}
 
 export type StartAssistantRunInput = {
   userId: string;
@@ -141,7 +155,8 @@ export class AssistantGatewayService {
   async getThread(input: { userId: string; role: UserRole; teacherId?: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail> {
     const capability = this.issueCapability(input.userId, input.role, input.teacherId, input.threadId, randomUUID());
     try {
-      return await this.agentRuntime.getThread({ capability, threadId: input.threadId, ...(input.traceId ? { traceId: input.traceId } : {}) });
+      const detail = await this.agentRuntime.getThread({ capability, threadId: input.threadId, ...(input.traceId ? { traceId: input.traceId } : {}) });
+      return { ...detail, workspace: sanitizeTaskWorkspace(detail.workspace) };
     } catch (error) {
       throw this.toPublicError(error);
     }

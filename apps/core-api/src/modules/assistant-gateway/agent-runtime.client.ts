@@ -5,6 +5,7 @@ import {
   HttpException,
   GatewayTimeoutException,
   Injectable,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
@@ -12,6 +13,7 @@ import {
   AssistantRunSchema,
   AssistantResumeRequestSchema,
   AssistantStartRequestSchema,
+  HistoricalPreviewReferenceSchema,
   WorkspaceDocumentSchema,
   type AssistantResumeInput,
 } from '@piano/assistant-protocol';
@@ -56,6 +58,7 @@ const AgentThreadSummarySchema = z.object({
 const AgentThreadDetailSchema = AgentThreadSummarySchema.extend({
   messages: z.array(z.object({ id: z.string().uuid(), role: z.enum(['user', 'assistant']), content: z.string(), createdAt: z.string().datetime() })),
   workspace: WorkspaceDocumentSchema.nullable(),
+  historicalPreviews: z.array(HistoricalPreviewReferenceSchema).default([]),
 });
 export type AgentThreadSummary = z.infer<typeof AgentThreadSummarySchema>;
 export type AgentThreadDetail = z.infer<typeof AgentThreadDetailSchema>;
@@ -189,12 +192,12 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
 
   getThread(input: { capability: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail> {
     assertUuid(input.threadId);
-    return this.getJson(`/internal/assistant/threads/${encodeURIComponent(input.threadId)}`, input.capability, AgentThreadDetailSchema, input.traceId);
+    return this.getJson(`/internal/assistant/threads/${encodeURIComponent(input.threadId)}`, input.capability, AgentThreadDetailSchema, input.traceId, { hideTaskExistence: true });
   }
 
-  private async getJson<T>(path: string, capability: string, schema: z.ZodType<T>, traceId?: string): Promise<T> {
+  private async getJson<T>(path: string, capability: string, schema: z.ZodType<T>, traceId?: string, options?: { hideTaskExistence?: boolean }): Promise<T> {
     const url = `${this.#baseUrl}${path}`;
-    const response = await this.request(url, { method: 'GET', headers: this.headers(url, 'GET', capability, traceId, 'application/json') });
+    const response = await this.request(url, { method: 'GET', headers: this.headers(url, 'GET', capability, traceId, 'application/json') }, options);
     let payload: unknown;
     try { payload = await response.json(); } catch { throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE); }
     const parsed = schema.safeParse(payload);
@@ -256,13 +259,16 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
     return headers;
   }
 
-  private async request(url: string, init: RequestInit): Promise<Response> {
+  private async request(url: string, init: RequestInit, options?: { hideTaskExistence?: boolean }): Promise<Response> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
       const response = await this.#fetch(url, { ...init, signal: controller.signal });
       if (response.ok) return response;
       await response.body?.cancel();
+      if (options?.hideTaskExistence && (response.status === 403 || response.status === 404)) {
+        throw new NotFoundException('任务不存在或当前账号无权访问，请返回任务列表查看可用任务。');
+      }
       if (response.status === 403) throw new ForbiddenException('当前账号无权访问该AI任务，请新建会话。');
       if (response.status === 409) throw new ConflictException('AI任务状态已变化，请重新核对。');
       throw new ServiceUnavailableException(PUBLIC_UNAVAILABLE_MESSAGE);

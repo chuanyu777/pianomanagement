@@ -39,6 +39,14 @@ export const ActionPreviewBlockSchema = z.object({
   expiresAt: z.iso.datetime(),
 });
 
+export const HistoricalPreviewReferenceSchema = z.object({
+  previewId: z.string().uuid(),
+  actionType: z.string().min(1),
+  schemaVersion: z.string().min(1),
+  riskLevel: RiskLevelSchema,
+});
+export type HistoricalPreviewReference = z.infer<typeof HistoricalPreviewReferenceSchema>;
+
 export const ReceiptBlockSchema = z.object({
   type: z.literal('receipt'),
   receiptId: z.string().min(1),

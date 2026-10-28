@@ -16,6 +16,18 @@ const threadId = '9eb3b8c3-b730-4e49-baa0-0b4de36b9345';
 const previewId = '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d';
 
 describe('assistant client', () => {
+  it('explains a business conflict when creating a preview without exposing server errors', async () => {
+    const create = (status: number, message: string) => createAssistantPreview({ token: 'jwt', path: 'structured-action', body: {}, fetchImpl: vi.fn(async () => new Response(JSON.stringify({ statusCode: status, message }), { status })) });
+    await expect(create(409, '业务月份已关账，不能登记收支')).rejects.toThrow('业务月份已关账，不能登记收支');
+    await expect(create(500, 'internal secret')).rejects.not.toThrow('internal secret');
+  });
+  it('explains a business conflict returned when a pending preview is confirmed', async () => {
+    const pending = JSON.stringify({ previewId, actionType: 'period.close', schemaVersion: 'period.close.v1', riskLevel: 'L2', status: 'PENDING', expiresAt: '2099-10-28T00:00:00.000Z', receipt: null });
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => String(url).endsWith('/confirm')
+      ? new Response(JSON.stringify({ message: '该月份已经关账' }), { status: 409 })
+      : new Response(pending));
+    await expect(confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl })).rejects.toThrow('该月份已经关账');
+  });
   it.each(['student.create', 'lesson.schedule'])('reads the authoritative version when %s preview creation omits schemaVersion', async (actionType) => {
     const draft = { previewId, actionType, riskLevel: 'L2', expiresAt: '2099-10-21T02:00:00.000Z', display: { title: '确认操作' } };
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(init?.method === 'POST' ? draft : { ...draft, schemaVersion: `${actionType}.v1`, status: 'PENDING', receipt: null }), { status: 200 }));
@@ -206,8 +218,25 @@ describe('assistant client', () => {
     })).rejects.toThrow('确认响应格式无效');
   });
 
-  it('reads the current preview with JWT and rejects a response for another preview', async () => {
+  it('reads the current preview with JWT, preserves the current display, and rejects a response for another preview', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      previewId,
+      actionType: 'course-account.payment',
+      schemaVersion: 'course-account.payment.v1',
+      riskLevel: 'L2',
+      status: 'PENDING',
+      expiresAt: '2099-10-21T02:00:00.000Z',
+      receipt: null,
+      display: { title: '当前收款确认', studentName: '小林', amount: '120.00' },
+    }), { status: 200 }));
+
+    const current = await getAssistantPreview({ token: 'jwt-current-user', previewId, fetchImpl: fetchMock });
+    expect(current.display).toEqual({ title: '当前收款确认', studentName: '小林', amount: '120.00' });
+    expect(fetchMock).toHaveBeenCalledWith(`/api/assistant/previews/${previewId}`, expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer jwt-current-user' }),
+    }));
+
+    await expect(getAssistantPreview({ token: 'jwt', previewId, fetchImpl: vi.fn(async () => new Response(JSON.stringify({
       previewId: '1f1d4de6-36cb-4ec2-904d-c522927d8d0c',
       actionType: 'course-account.payment',
       schemaVersion: 'course-account.payment.v1',
@@ -215,13 +244,8 @@ describe('assistant client', () => {
       status: 'PENDING',
       expiresAt: '2099-10-21T02:00:00.000Z',
       receipt: null,
-    }), { status: 200 }));
-
-    await expect(getAssistantPreview({ token: 'jwt', previewId, fetchImpl: fetchMock }))
+    }), { status: 200 })) }))
       .rejects.toThrow('预览响应格式无效');
-    expect(fetchMock).toHaveBeenCalledWith(`/api/assistant/previews/${previewId}`, expect.objectContaining({
-      headers: expect.objectContaining({ Authorization: 'Bearer jwt' }),
-    }));
   });
 
   it('checks Core after an unknown confirmation result and returns the real executed receipt', async () => {
@@ -286,7 +310,7 @@ describe('assistant client', () => {
     });
     const result = confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl: fetchMock });
     await expect(result).rejects.toBeInstanceOf(UnknownConfirmationError);
-    await expect(result).rejects.toThrow('无法核对 Core 当前状态');
+    await expect(result).rejects.toThrow('无法核对系统当前状态');
     expect(reads).toBe(2);
     expect(confirmations).toBe(1);
   });

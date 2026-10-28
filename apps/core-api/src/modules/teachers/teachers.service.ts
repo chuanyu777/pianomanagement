@@ -19,6 +19,8 @@ export type CreateTeacherInput = {
   defaultCommissionRate?: Prisma.Decimal;
 };
 
+export type OpenTeacherLoginAccountInput = { username: string; password: string };
+
 export type UpdateTeacherCompensationInput = {
   defaultBaseSalary: Prisma.Decimal;
   defaultCommissionRate: Prisma.Decimal;
@@ -130,6 +132,33 @@ export class TeachersService {
         });
       });
       return toSummary(teacher);
+    } catch (error) {
+      if (isUniqueConstraintError(error)) throw new ConflictException('用户名已存在');
+      throw error;
+    }
+  }
+
+  async openLoginAccount(id: string, input: OpenTeacherLoginAccountInput): Promise<TeacherSummary> {
+    const username = input.username.trim();
+    if (!username || username.length > 80 || input.password.length < 12 || input.password.length > 128) {
+      throw new ConflictException('登录账号信息不合法');
+    }
+    const passwordHash = await bcrypt.hash(input.password, BCRYPT_COST);
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: { username, passwordHash, role: UserRole.TEACHER },
+          select: { id: true },
+        });
+        const bound = await tx.teacher.updateMany({
+          where: { id, userId: null },
+          data: { userId: user.id },
+        });
+        if (bound.count !== 1) throw new ConflictException('教师已绑定登录账号或资料不存在');
+        const teacher = await tx.teacher.findUnique({ where: { id }, select: TEACHER_SUMMARY_SELECT });
+        if (!teacher) throw new ConflictException('教师已绑定登录账号或资料不存在');
+        return toSummary(teacher);
+      });
     } catch (error) {
       if (isUniqueConstraintError(error)) throw new ConflictException('用户名已存在');
       throw error;

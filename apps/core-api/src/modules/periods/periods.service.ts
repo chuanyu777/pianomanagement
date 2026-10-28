@@ -56,6 +56,16 @@ export class PeriodsService {
     actorId: string,
   ): Promise<ClosedPeriodSummary> {
     await this.assertCloseableInTransaction(tx, periodStart);
+    const reclaimed = await tx.closedPeriod.updateMany({
+      where: { periodStart, reopenedAt: { not: null } },
+      data: { closedAt: new Date(), closedById: actorId, reopenedAt: null, reopenedById: null, reopenReason: null },
+    });
+    if (reclaimed.count === 1) {
+      return tx.closedPeriod.findUniqueOrThrow({
+        where: { periodStart },
+        select: { periodStart: true, closedAt: true, reopenedAt: true, reopenReason: true },
+      });
+    }
     try {
       const closed = await tx.closedPeriod.create({
         data: { periodStart, closedById: actorId },

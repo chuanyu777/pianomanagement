@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ASSISTANT_CAPABILITY_HEADER,
   AssistantEventSchema,
+  HistoricalPreviewReferenceSchema,
   AssistantResumeRequestSchema,
   AssistantStartRequestSchema,
   INTERNAL_REQUEST_NONCE_HEADER,
@@ -56,6 +57,18 @@ describe('assistant protocol', () => {
       title: '错误类型',
       blocks: [],
     })).toThrow();
+  });
+
+  it('shares the minimal historical preview reference without carrying historical display snapshots', () => {
+    const reference = {
+      previewId: '20000000-0000-4000-8000-000000000002',
+      actionType: 'course-account.payment',
+      schemaVersion: 'course-account.payment.v1',
+      riskLevel: 'L2',
+    };
+    expect(HistoricalPreviewReferenceSchema.parse(reference)).toEqual(reference);
+    expect(() => HistoricalPreviewReferenceSchema.parse({ ...reference, title: '旧学生 / ¥120.00' })).not.toThrow();
+    expect(HistoricalPreviewReferenceSchema.parse({ ...reference, title: '旧学生 / ¥120.00' })).not.toHaveProperty('title');
   });
 
   it('encodes a validated SSE event', () => {

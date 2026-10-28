@@ -3,8 +3,10 @@ import { Pool, type PoolClient } from 'pg';
 import {
   AssistantEventSchema,
   AssistantRunSchema,
+  HistoricalPreviewReferenceSchema,
   type AssistantEvent,
   type AssistantRun,
+  type HistoricalPreviewReference,
   type WorkspaceDocument,
 } from '@piano/assistant-protocol';
 
@@ -32,6 +34,7 @@ export type AssistantThreadSummary = {
 export type AssistantThreadDetail = AssistantThreadSummary & {
   messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>;
   workspace: WorkspaceDocument | null;
+  historicalPreviews: HistoricalPreviewReference[];
 };
 
 export interface CreateRunInput {
@@ -247,13 +250,50 @@ export function createAgentRuntimeRepository(input: {
       );
       const row = thread.rows[0];
       if (!row) return null;
-      const [latestRun, messages, latestWorkspace] = await Promise.all([
+      const [latestRun, messages, latestWorkspace, previewEvents] = await Promise.all([
         pool.query<{ status: AssistantRun['status'] }>(`SELECT status FROM ${schema}.agent_runs WHERE thread_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [threadId]),
         pool.query<{ id: string; role: 'user' | 'assistant'; content: string; created_at: Date }>(`SELECT id, role, content, created_at FROM ${schema}.agent_messages WHERE thread_id = $1 ORDER BY created_at ASC, id ASC LIMIT 500`, [threadId]),
         pool.query<{ payload: unknown }>(`SELECT event.payload FROM ${schema}.agent_run_events AS event JOIN ${schema}.agent_runs AS run ON run.id = event.run_id WHERE run.thread_id = $1 AND event.event_type = 'workspace.replace' ORDER BY event.event_id DESC LIMIT 1`, [threadId]),
+        pool.query<{ preview_id: string; action_type: string; schema_version: string; risk_level: string; event_id: string; block_order: string }>(
+          `SELECT refs.preview ->> 'previewId' AS preview_id,
+                  refs.preview ->> 'actionType' AS action_type,
+                  refs.preview ->> 'schemaVersion' AS schema_version,
+                  refs.preview ->> 'riskLevel' AS risk_level,
+                  event.event_id::text AS event_id,
+                  refs.block_order::text AS block_order
+             FROM ${schema}.agent_run_events AS event
+             JOIN ${schema}.agent_runs AS run ON run.id = event.run_id
+             CROSS JOIN LATERAL (
+               SELECT event.payload -> 'preview' AS preview, 0::bigint AS block_order
+                WHERE event.event_type = 'action.previewed'
+               UNION ALL
+               SELECT blocks.block AS preview, blocks.ordinality AS block_order
+                 FROM jsonb_array_elements(COALESCE(event.payload #> '{document,blocks}', '[]'::jsonb)) WITH ORDINALITY AS blocks(block, ordinality)
+                WHERE event.event_type = 'workspace.replace'
+                  AND blocks.block ->> 'type' = 'action-preview'
+             ) AS refs
+            WHERE run.thread_id = $1
+              AND event.event_type IN ('action.previewed', 'workspace.replace')
+            ORDER BY event.event_id ASC, refs.block_order ASC`,
+          [threadId],
+        ),
       ]);
       const latestUser = [...messages.rows].reverse().find((message) => message.role === 'user');
       const workspaceEvent = AssistantEventSchema.safeParse(latestWorkspace.rows[0]?.payload);
+      const historicalPreviews: HistoricalPreviewReference[] = [];
+      const seenPreviewIds = new Set<string>();
+      for (const event of previewEvents.rows) {
+        if (seenPreviewIds.has(event.preview_id)) continue;
+        const reference = HistoricalPreviewReferenceSchema.safeParse({
+          previewId: event.preview_id,
+          actionType: event.action_type,
+          schemaVersion: event.schema_version,
+          riskLevel: event.risk_level,
+        });
+        if (!reference.success) continue;
+        seenPreviewIds.add(reference.data.previewId);
+        historicalPreviews.push(reference.data);
+      }
       return {
         threadId: row.id,
         title: row.title?.trim() || latestUser?.content.slice(0, 60) || '新对话',
@@ -261,6 +301,7 @@ export function createAgentRuntimeRepository(input: {
         latestStatus: latestRun.rows[0]?.status ?? null,
         messages: messages.rows.map((message) => ({ id: message.id, role: message.role, content: message.content, createdAt: message.created_at.toISOString() })),
         workspace: workspaceEvent.success && workspaceEvent.data.type === 'workspace.replace' ? workspaceEvent.data.document : null,
+        historicalPreviews,
       };
     },
     async createRun(runInput) {

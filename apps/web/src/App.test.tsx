@@ -30,12 +30,123 @@ describe('AI workspace', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Agent Runtime unavailable')));
   });
 
+  it('clears the shared query cache and scopes home queries when switching from owner to teacher', async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    const ownerTaskTitle = '仅店主可见的历史任务';
+    const ownerStudentName = '仅店主可见的学生';
+    let currentRole: 'OWNER' | 'TEACHER' = 'OWNER';
+    const overview = (role: 'OWNER' | 'TEACHER') => ({
+      asOf: '2026-10-28T00:00:00.000Z', businessDate: '2026-10-28',
+      today: { total: role === 'OWNER' ? 1 : 0, pendingCount: 0, completedCount: 0, lessons: role === 'OWNER' ? [{ id: 'owner-lesson', startsAt: '2026-10-28T01:00:00.000Z', endsAt: '2026-10-28T02:00:00.000Z', status: 'SCHEDULED', student: { id: 'owner-student', name: ownerStudentName }, course: { id: 'owner-course', name: '店主课程' } }] : [] },
+      students: role === 'OWNER' ? { total: 1, frozenCount: 0, arrearsCount: 0 } : null,
+      finance: role === 'OWNER' ? { period: '2026-10', operatingProfit: '800.00', cashNet: '800.00' } : null,
+      preclose: role === 'OWNER' ? { period: '2026-10', closed: false, unpaidPayrollCount: 0, blockers: [] } : null,
+      recentRecords: null,
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'shared-user', username: currentRole === 'OWNER' ? 'owner' : 'teacher', role: currentRole, ...(currentRole === 'TEACHER' ? { teacherId: 'teacher-identity' } : {}) }));
+      if (path === '/api/auth/login') {
+        currentRole = 'TEACHER';
+        return new Response(JSON.stringify({ accessToken: 'teacher-token', user: { id: 'teacher-user', username: 'teacher', role: 'TEACHER', teacherId: 'teacher-identity' } }));
+      }
+      if (path === '/api/assistant/status') return new Response(JSON.stringify({ available: false, core: { available: true }, agentRuntime: { available: false }, checkedAt: '2026-10-28T00:00:00.000Z', message: '助手暂不可用' }));
+      if (path === '/api/dashboard/overview') return new Response(JSON.stringify(overview(currentRole)));
+      if (path === '/api/assistant/tasks') return new Response(JSON.stringify(currentRole === 'OWNER' ? [{ threadId: '10000000-0000-4000-8000-000000000001', title: ownerTaskTitle, lastActivityAt: '2026-10-28T00:00:00.000Z', latestStatus: 'completed' }] : []));
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    window.localStorage.setItem('pianomanager.accessToken', 'owner-token');
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/']}><App /></MemoryRouter></QueryClientProvider>);
+
+    expect(await screen.findByText(ownerTaskTitle)).toBeInTheDocument();
+    await waitFor(() => expect(queryClient.getQueryCache().findAll({ queryKey: ['home-overview'] }).some((query) => query.state.data !== undefined)).toBe(true));
+    expect(queryClient.getQueryCache().findAll({ queryKey: ['home-overview'] })[0]?.state.data).toMatchObject({ today: { lessons: [{ student: { name: ownerStudentName } }] } });
+    queryClient.setQueryData(['structured-lessons', 'owner-week'], [{ student: { name: ownerStudentName } }]);
+    await user.click(screen.getByRole('button', { name: '退出登录' }));
+
+    expect(await screen.findByRole('heading', { name: '登录工作台' })).toBeInTheDocument();
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(queryClient.getQueryData(['structured-lessons', 'owner-week'])).toBeUndefined();
+    await user.type(screen.getByLabelText('用户名'), 'teacher');
+    await user.type(screen.getByLabelText('密码'), 'teacher-password');
+    await user.click(screen.getByRole('button', { name: /登\s*录/ }));
+
+    expect(await screen.findByText('teacher')).toBeInTheDocument();
+    await waitFor(() => expect(queryClient.getQueryData(['assistant-tasks', 'teacher-user', 'TEACHER', 'teacher-identity'])).toEqual([]));
+    expect(screen.queryByText(ownerTaskTitle)).not.toBeInTheDocument();
+    expect(screen.queryByText(ownerStudentName)).not.toBeInTheDocument();
+    expect(queryClient.getQueryCache().find({ queryKey: ['home-overview', 'teacher-user', 'TEACHER', 'teacher-identity'] })).toBeDefined();
+  });
+
+  it('clears cached business data when login succeeds', async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(['structured-lessons', '2026-10-28'], [{ student: { name: 'private cached lesson' } }]);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/auth/login') return new Response(JSON.stringify({ accessToken: 'next-token', user: { id: 'next-user', username: 'owner', role: 'OWNER' } }));
+      if (path === '/api/assistant/status') return new Response(JSON.stringify({ available: false, core: { available: true }, agentRuntime: { available: false }, checkedAt: '2026-10-28T00:00:00.000Z', message: '助手暂不可用' }));
+      if (path === '/api/dashboard/overview') return new Response(JSON.stringify({ asOf: '2026-10-28T00:00:00.000Z', businessDate: '2026-10-28', today: { total: 0, pendingCount: 0, completedCount: 0, lessons: [] }, students: null, finance: null, preclose: null, recentRecords: null }));
+      if (path === '/api/assistant/tasks') return new Response('[]');
+      return new Response('{}', { status: 404 });
+    }));
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/']}><App /></MemoryRouter></QueryClientProvider>);
+    await user.type(screen.getByLabelText('用户名'), 'owner');
+    await user.type(screen.getByLabelText('密码'), 'password');
+    await user.click(screen.getByRole('button', { name: /登\s*录/ }));
+    await screen.findByText('owner');
+    expect(queryClient.getQueryData(['structured-lessons', '2026-10-28'])).toBeUndefined();
+  });
+
+  it('clears cached business data when stored-token authentication fails', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(['structured-lessons', '2026-10-28'], [{ student: { name: 'private cached lesson' } }]);
+    window.localStorage.setItem('pianomanager.accessToken', 'expired-token');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ message: 'Unauthorized' }), { status: 401 })));
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/']}><App /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByRole('heading', { name: '登录工作台' })).toBeInTheDocument();
+    expect(queryClient.getQueryData(['structured-lessons', '2026-10-28'])).toBeUndefined();
+  });
+
   it('requires login before showing authenticated pages', () => {
     renderApp();
 
     expect(screen.getByRole('heading', { name: '登录工作台' })).toBeInTheDocument();
     expect(screen.getByLabelText('用户名')).toBeInTheDocument();
   });
+
+  it('allows an owner to open a course account for a student without one', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
+    const student = { id: 's1', name: '测试学生', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-28T00:00:00Z', updatedAt: '2026-10-28T00:00:00Z' };
+    const accountPreviewId = '1f1d4de6-36cb-4ec2-904d-c522927d8d0c';
+    const accountPreview = { previewId: accountPreviewId, actionType: 'course-account.open', schemaVersion: 'course-account.open.v1', riskLevel: 'L2', expiresAt: '2099-10-28T00:00:00.000Z', display: { title: '开通课程账户' } };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'u1', username: 'owner', role: 'OWNER' }));
+      if (path === '/api/students') return new Response(JSON.stringify([student]));
+      if (path === '/api/courses') return new Response(JSON.stringify([{ id: 'c1', name: '主课', defaultUnitPrice: '200.00', defaultDurationMinutes: 45, isActive: true }]));
+      if (path.includes('/course-accounts')) return new Response('[]');
+      if (path === '/api/assistant/previews/structured-action') return new Response(JSON.stringify(accountPreview), { status: 201 });
+      if (path === `/api/assistant/previews/${accountPreviewId}`) return new Response(JSON.stringify({ ...accountPreview, status: 'PENDING', receipt: null }));
+      if (path === `/api/assistant/previews/${accountPreviewId}/confirm` && init?.method === 'POST') return new Response(JSON.stringify({ previewId: accountPreviewId, status: 'EXECUTED', receipt: { accountId: 'a1' } }));
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderApp('/students');
+    await user.click(await screen.findByRole('button', { name: '开通课程账户' }, { timeout: 5000 }));
+    expect(await screen.findByRole('combobox', { name: '选择课程' })).toBeInTheDocument();
+    await user.click(screen.getByRole('combobox', { name: '选择课程' }));
+    await user.click(await screen.findByText('主课 · 默认 ¥200.00'));
+    await user.click(screen.getByRole('button', { name: '生成确认单' }));
+    await user.click(await screen.findByRole('button', { name: '确认执行' }));
+    expect(await screen.findByText('执行回执')).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => path === '/api/students').length).toBeGreaterThanOrEqual(2));
+    const call = fetchMock.mock.calls.find(([path]) => path === '/api/assistant/previews/structured-action');
+    expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({ actionType: 'course-account.open', command: { studentId: 's1', courseId: 'c1' } });
+  }, 15000);
 
   it('uses the approved AI operating-center shell on authenticated pages', async () => {
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
@@ -134,6 +245,31 @@ describe('AI workspace', () => {
     expect(new Headers(meCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
   });
 
+  it('does not label an AI reply as a completed business action in recent tasks', async () => {
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'u1', username: 'owner', role: 'OWNER' }));
+      if (path === '/api/assistant/tasks') return new Response(JSON.stringify([{ threadId: '9eb3b8c3-b730-4e49-baa0-0b4de36b9345', title: '待确认的登记', lastActivityAt: '2026-10-28T00:00:00Z', latestStatus: 'completed' }]));
+      return new Response('{}', { status: 404 });
+    }));
+    renderApp('/');
+    const taskButton = await screen.findByRole('button', { name: /待确认的登记/ });
+    expect(taskButton).toHaveTextContent('已回复');
+    expect(taskButton).not.toHaveTextContent('已完成');
+  });
+
+  it('offers teachers only relevant suggested questions on the home page', async () => {
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input) === '/api/auth/me'
+      ? new Response(JSON.stringify({ id: 'u1', username: 'teacher', role: 'TEACHER', teacherId: 't1' }))
+      : new Response('{}', { status: 404 })));
+    renderApp('/');
+    expect(await screen.findByRole('button', { name: '查看今日排课' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '查看这个月收入' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/办理学生账户和日常经营事项/)).not.toBeInTheDocument();
+  });
+
   it('hides owner-only navigation and blocks direct owner routes for teachers', async () => {
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -224,7 +360,7 @@ describe('AI workspace', () => {
       if (path.startsWith('/api/students/') && path.endsWith('/course-accounts')) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
       if (path === '/api/assistant/previews/lessons/complete') return Promise.resolve(new Response(JSON.stringify({ previewId: '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d', actionType: 'lesson.complete', schemaVersion: 'lesson.complete.v1', riskLevel: 'L2', display: { title: '确认上课', summary: '确认课程完成' }, expiresAt: '2099-10-21T02:00:00.000Z' }), { status: 201 }));
       if (path === '/api/assistant/previews/0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d') return Promise.resolve(new Response(JSON.stringify({ ...previewState('0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d'), actionType: 'lesson.complete', schemaVersion: 'lesson.complete.v1' }), { status: 200 }));
-      if (path === '/api/assistant/previews/0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d/confirm') return Promise.resolve(new Response(JSON.stringify({ previewId: '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d', status: 'EXECUTED', receipt: { lessonId: 'l1' } }), { status: 200 }));
+      if (path === '/api/assistant/previews/0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d/confirm') return Promise.resolve(new Response(JSON.stringify({ previewId: '0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d', status: 'EXECUTED', receipt: { actionType: 'lesson.complete', lessonId: 'l1', status: 'COMPLETED', startsAt: `${today}T10:00:00+08:00`, endsAt: `${today}T11:00:00+08:00`, unitPriceSnapshot: '120.00', idempotencyKey: 'technical-key' } }), { status: 200 }));
       return Promise.resolve(new Response('{}', { status: 404 }));
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -237,7 +373,10 @@ describe('AI workspace', () => {
     await user.click(screen.getByRole('button', { name: '确认执行' }));
     expect(await screen.findByText('课程已确认完成')).toBeInTheDocument();
     expect(await screen.findByText('执行回执')).toBeInTheDocument();
-    expect(screen.getByText('l1')).toBeInTheDocument();
+    expect(screen.getAllByText('已完成').length).toBeGreaterThan(0);
+    expect(screen.getByText('上课计费单价')).toBeInTheDocument();
+    expect(screen.getAllByText('¥120.00').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/l1|technical-key/)).not.toBeInTheDocument();
     const completeCall = fetchMock.mock.calls.find(([path]) => path === '/api/assistant/previews/lessons/complete');
     expect(new Headers(completeCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
     const confirmCall = fetchMock.mock.calls.find(([path]) => path === '/api/assistant/previews/0f0d4de6-36cb-4f99-9b5d-4e1f70f4af9d/confirm');

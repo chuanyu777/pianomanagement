@@ -6,6 +6,41 @@ const periodStart = new Date('2026-10-01T00:00:00.000Z');
 const decimal = (value: string): Prisma.Decimal => new Prisma.Decimal(value);
 
 describe('ReportsService', () => {
+  it('returns a complete day cash ledger, retains reversals in the original collection period, and aggregates authoritative amounts', async () => {
+    const range = { start: new Date('2026-10-26T16:00:00.000Z'), end: new Date('2026-10-27T16:00:00.000Z') };
+    const prisma = {
+      paymentRecord: { findMany: vi.fn().mockResolvedValue([
+        { id: 'pay-live', amount: decimal('120.00'), occurredAt: new Date('2026-10-27T01:00:00Z'), channel: 'CASH', note: null, account: { student: { name: '小雨' }, course: { name: '钢琴课' } }, ledgerEntry: { reversedBy: null } },
+        { id: 'pay-reversed', amount: decimal('50.00'), occurredAt: new Date('2026-10-27T02:00:00Z'), channel: 'CASH', note: '误录', account: { student: { name: '小林' }, course: { name: '钢琴课' } }, ledgerEntry: { reversedBy: { id: 'reversal-1', occurredAt: new Date('2026-11-02T01:00:00Z') } } },
+      ]) },
+      refundRecord: { findMany: vi.fn().mockResolvedValue([{ id: 'refund-1', actualRefundAmount: decimal('81.00'), totalPaidRefund: decimal('90.00'), feeAmount: decimal('9.00'), occurredAt: new Date('2026-10-27T03:00:00Z'), channel: 'BANK_TRANSFER', note: null, student: { name: '小周' } }]) },
+      payroll: { findMany: vi.fn().mockResolvedValue([{ id: 'payroll-1', netSalary: decimal('70.50'), paidAt: new Date('2026-10-27T04:00:00Z'), paymentChannel: 'BANK_TRANSFER', paymentNote: '十月工资', teacher: { name: '王老师' } }]) },
+      manualTransaction: { findMany: vi.fn().mockResolvedValue([
+        { id: 'manual-in', kind: ManualTransactionKind.INCOME, incomeCategory: 'BOOK_SALE', expenseCategory: null, amount: decimal('20.00'), occurredAt: new Date('2026-10-27T05:00:00Z'), channel: 'CASH', note: null },
+        { id: 'manual-out', kind: ManualTransactionKind.EXPENSE, incomeCategory: null, expenseCategory: 'RENT_PROPERTY', amount: decimal('12.00'), occurredAt: new Date('2026-10-27T06:00:00Z'), channel: 'CASH', note: '房租' },
+      ]) },
+    };
+
+    const result = await new ReportsService(prisma as never).cashFlow({ range, periodType: 'DAY', period: '2026-10-27' });
+
+    expect(result).toMatchObject({
+      periodType: 'DAY', period: '2026-10-27', cashIncome: '190.00', cashExpense: '163.50', cashNet: '26.50',
+      items: [
+        { id: 'manual-out', type: 'MANUAL_EXPENSE', direction: 'EXPENSE', amount: '12.00', category: 'RENT_PROPERTY' },
+        { id: 'manual-in', type: 'MANUAL_INCOME', direction: 'INCOME', amount: '20.00', category: 'BOOK_SALE' },
+        { id: 'payroll-1', type: 'PAYROLL', direction: 'EXPENSE', amount: '70.50', counterparty: '王老师' },
+        { id: 'refund-1', type: 'REFUND', direction: 'EXPENSE', amount: '81.00', counterparty: '小周', feeAmount: '9.00' },
+        { id: 'pay-reversed', type: 'PAYMENT', direction: 'INCOME', amount: '50.00', reversal: { ledgerEntryId: 'reversal-1', occurredAt: new Date('2026-11-02T01:00:00Z') } },
+        { id: 'pay-live', type: 'PAYMENT', direction: 'INCOME', amount: '120.00', counterparty: '小雨 · 钢琴课' },
+      ],
+    });
+    expect(result.items.find(({ id }) => id === 'pay-reversed')?.reversal).toMatchObject({ ledgerEntryId: 'reversal-1' });
+    expect(prisma.paymentRecord.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { occurredAt: { gte: range.start, lt: range.end } }, select: expect.objectContaining({ ledgerEntry: { select: { reversedBy: { select: { id: true, occurredAt: true } } } } }) }));
+    expect(prisma.refundRecord.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { occurredAt: { gte: range.start, lt: range.end } } }));
+    expect(prisma.payroll.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { status: PayrollStatus.PAID, paidAt: { gte: range.start, lt: range.end } } }));
+    expect(prisma.manualTransaction.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { occurredAt: { gte: range.start, lt: range.end } } }));
+  });
+
   it('computes cash flow by payment date and operating result from ledger, payroll, gifts, refunds and all manual activity', async () => {
     const prisma = {
       paymentRecord: { findMany: vi.fn().mockResolvedValue([{ amount: decimal('100.00') }]) },

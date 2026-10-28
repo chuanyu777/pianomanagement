@@ -34,6 +34,7 @@ describe('InternalToolsService.dashboardSummary', () => {
     prisma.student.findMany.mockResolvedValue([
       { withdrawnAt: null, courseAccounts: [{ createdAt: new Date('2026-09-01T00:00:00Z'), lessons: [] }] },
       { withdrawnAt: null, courseAccounts: [{ createdAt: new Date('2026-10-02T00:00:00Z'), lessons: [] }] },
+      { withdrawnAt: null, courseAccounts: [] },
     ]);
     prisma.studentCourseAccount.findMany.mockResolvedValue([
       { studentId: 'student-1', openingPaidBalance: new Prisma.Decimal('10'), ledgerEntries: [{ paidDelta: new Prisma.Decimal('-12') }] },

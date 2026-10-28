@@ -1027,17 +1027,21 @@ export class AssistantActionsService {
     this.manualTransactions.validateInput(domainInput);
     await this.periods.assertWritableForDate(occurredAt);
     const periodStart = businessMonthStart(occurredAt);
+    const categoryFields = {
+      ...(incomeCategory ? { incomeCategory } : {}),
+      ...(expenseCategory ? { expenseCategory } : {}),
+    };
+    const direction = kind === ManualTransactionKind.INCOME ? '收入' : '支出';
     return this.saveStructuredPreview(input, {
       command: {
         kind, amount: amount.toFixed(2),
-        ...(incomeCategory ? { incomeCategory } : {}),
-        ...(expenseCategory ? { expenseCategory } : {}),
+        ...categoryFields,
         channel, occurredAt: occurredAt.toISOString(), note: note ?? null,
       },
       display: {
-        title: kind === ManualTransactionKind.INCOME ? '登记其他收入' : '登记经营支出',
-        summary: `${kind === ManualTransactionKind.INCOME ? '收入' : '支出'} ¥${amount.toFixed(2)}`,
-        kind, amount: amount.toFixed(2), channel, occurredAt: occurredAt.toISOString(),
+        title: kind === ManualTransactionKind.INCOME ? '登记经营收入' : '登记经营支出',
+        summary: `${direction} ¥${amount.toFixed(2)}${note ? ` · 备注 ${note}` : ''}`,
+        kind, ...categoryFields, amount: amount.toFixed(2), channel, occurredAt: occurredAt.toISOString(), note: note ?? null,
       },
       resourceVersions: { periodStart: periodStart.toISOString(), periodState: 'OPEN' },
       resourceType: 'manual-transaction', resourceId: periodStart.toISOString(),
@@ -1859,6 +1863,29 @@ export class AssistantActionsService {
     const idempotencyKey = requireText(input.idempotencyKey, 'idempotencyKey');
     const actor = await this.loadActor(actorUserId);
     const normalized = await this.lessons.previewSingle(input, actor);
+    const [account, teacher] = await Promise.all([
+      this.prisma.studentCourseAccount.findUnique({
+        where: { id: normalized.normalizedCommand.accountId },
+        select: { student: { select: { name: true } }, course: { select: { name: true } } },
+      }),
+      this.prisma.teacher.findUnique({
+        where: { id: normalized.normalizedCommand.teacherId },
+        select: { name: true },
+      }),
+    ]);
+    if (!account) throw new NotFoundException('学生课程账户不存在');
+    if (!teacher) throw new NotFoundException('授课教师不存在');
+    const startsAt = normalized.normalizedCommand.startsAt.toISOString();
+    const endsAt = normalized.normalizedCommand.endsAt.toISOString();
+    const display = {
+      title: '单节排课',
+      summary: `${account.student.name} · ${account.course.name} · ${teacher.name}，请核对上课时间。`,
+      studentName: account.student.name,
+      courseName: account.course.name,
+      teacherName: teacher.name,
+      startsAt,
+      endsAt,
+    };
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
     try {
       const result = await this.prisma.$transaction(async (tx) => {
@@ -1872,7 +1899,7 @@ export class AssistantActionsService {
             startsAt: normalized.normalizedCommand.startsAt.toISOString(),
             endsAt: normalized.normalizedCommand.endsAt.toISOString(),
           } as unknown as Prisma.InputJsonObject,
-          displayJson: { title: '单节排课', summary: '确认后创建一节排课记录。' },
+          displayJson: display as Prisma.InputJsonObject,
           resourceVersionsJson: {
             ...normalized.resourceVersions,
             conflicts: normalized.resourceVersions.conflicts.map((conflict) => ({

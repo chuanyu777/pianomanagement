@@ -37,4 +37,13 @@ describe('public auth and teacher controllers', () => {
     );
     expect(create).not.toHaveBeenCalled();
   });
+
+  it('exposes teacher login provisioning only behind owner JWT and role guards', () => {
+    expect(Reflect.getMetadata('__guards__', TeachersController)).toEqual([JwtAuthGuard, RolesGuard]);
+    expect(Reflect.getMetadata(REQUIRED_ROLES, TeachersController)).toEqual([UserRole.OWNER]);
+    const openLoginAccount = vi.fn();
+    const teachers = new TeachersController({ openLoginAccount } as never);
+    expect(() => teachers.openLoginAccount('not-a-uuid', { username: 'teacher', password: 'a-safe-password' })).toThrow('请求参数不合法');
+    expect(openLoginAccount).not.toHaveBeenCalled();
+  });
 });

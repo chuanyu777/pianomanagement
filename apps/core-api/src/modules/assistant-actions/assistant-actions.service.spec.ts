@@ -40,6 +40,8 @@ function setup(overrides: Record<string, unknown> = {}) {
   const prisma = {
     user: { findUnique: vi.fn(async () => ({ ...owner, isActive: true, teacher: null })) },
     actionPreview: { findUnique: vi.fn(async () => previewRow) },
+    studentCourseAccount: { findUnique: vi.fn(async () => ({ student: { name: '小林' }, course: { name: '钢琴主课' } })) },
+    teacher: { findUnique: vi.fn(async () => ({ name: '王老师' })) },
     businessAuditEvent: tx.businessAuditEvent,
     $transaction: vi.fn(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
   };
@@ -75,18 +77,41 @@ describe('AssistantActionsService single lesson preview/confirm', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
   it('persists a normalized preview and audit while deferring lesson creation', async () => {
-    const { service, tx, lessons } = setup();
+    const { service, tx, lessons, prisma } = setup();
     const result = await service.createSingleLessonPreview({
       ...command, actorUserId: owner.id, runId: 'run-1', requestId: 'request-1', idempotencyKey: 'key-1',
     });
-    expect(result).toMatchObject({ previewId: 'preview-1', actionType: 'lesson.schedule.single' });
+    expect(result).toMatchObject({
+      previewId: 'preview-1',
+      actionType: 'lesson.schedule.single',
+      display: expect.objectContaining({
+        studentName: '小林', courseName: '钢琴主课', teacherName: '王老师',
+        summary: '小林 · 钢琴主课 · 王老师，请核对上课时间。',
+        startsAt: command.startsAt.toISOString(), endsAt: command.endsAt.toISOString(),
+      }),
+    });
     expect(tx.actionPreview.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
       normalizedCommandJson: expect.objectContaining({ startsAt: command.startsAt.toISOString(), endsAt: command.endsAt.toISOString() }),
+      displayJson: expect.objectContaining({
+        title: '单节排课',
+        studentName: '小林',
+        courseName: '钢琴主课',
+        teacherName: '王老师',
+        summary: '小林 · 钢琴主课 · 王老师，请核对上课时间。',
+        startsAt: command.startsAt.toISOString(),
+        endsAt: command.endsAt.toISOString(),
+      }),
       resourceVersionsJson: expect.objectContaining({ accountVersion: 3 }),
       status: 'PENDING',
     }) }));
-    expect(tx.businessAuditEvent.create).toHaveBeenCalledOnce();
+    expect(lessons.previewSingle).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'account-1', teacherId: 'teacher-1' }), owner);
+    expect(prisma.studentCourseAccount.findUnique).toHaveBeenCalledWith({
+      where: { id: 'account-1' },
+      select: { student: { select: { name: true } }, course: { select: { name: true } } },
+    });
+    expect(prisma.teacher.findUnique).toHaveBeenCalledWith({ where: { id: 'teacher-1' }, select: { name: true } });
     expect(lessons.createSingleInTransaction).not.toHaveBeenCalled();
+    expect(tx.businessAuditEvent.create).toHaveBeenCalledOnce();
   });
 
   it('confirms through LessonsService and stores the receipt in the same transaction', async () => {
@@ -163,6 +188,68 @@ describe('AssistantActionsService single lesson preview/confirm', () => {
       { lessonVersion: 4, accountVersion: 3, courseDurationMinutes: 45, endsAt: new Date('2026-11-03T01:45:00.000Z') });
     expect(context.tx.actionPreview.update).toHaveBeenCalledOnce();
     expect(context.tx.businessAuditEvent.create).toHaveBeenCalledOnce();
+  });
+});
+
+describe('AssistantActionsService manual transaction Preview display', () => {
+  it.each([
+    { kind: 'INCOME', inputField: 'incomeCategory', inputCategory: '卖书', expectedCategory: 'BOOK_SALE', outputField: 'incomeCategory', oppositeField: 'expenseCategory', title: '登记经营收入' },
+    { kind: 'EXPENSE', inputField: 'expenseCategory', inputCategory: '房租', expectedCategory: 'RENT_PROPERTY', outputField: 'expenseCategory', oppositeField: 'incomeCategory', title: '登记经营支出' },
+  ])('includes the validated $outputField and trimmed note in the Preview display', async (scenario) => {
+    const previewRow = {
+      id: 'manual-preview-1',
+      actionType: 'manual-transaction.create',
+      riskLevel: 'L2',
+      normalizedCommandJson: {},
+      displayJson: {},
+      resourceVersionsJson: {},
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const tx = {
+      actionPreview: { create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...previewRow, ...data })) },
+      businessAuditEvent: { create: vi.fn(async () => ({ id: 'audit-manual-1' })) },
+    };
+    const prisma = {
+      user: { findUnique: vi.fn(async () => ({ ...owner, isActive: true, teacher: null })) },
+      actionPreview: { findUnique: vi.fn(async () => previewRow) },
+      businessAuditEvent: tx.businessAuditEvent,
+      $transaction: vi.fn(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
+    };
+    const manualTransactions = { validateInput: vi.fn() };
+    const periods = { assertWritableForDate: vi.fn(async () => undefined) };
+    const service = new AssistantActionsService(prisma as never, {} as never, {} as never, undefined, manualTransactions as never, undefined, periods as never);
+
+    const result = await service.createStructuredActionPreview({
+      actorUserId: owner.id,
+      runId: 'run-manual-1',
+      requestId: 'request-manual-1',
+      idempotencyKey: 'key-manual-1',
+      actionType: 'manual-transaction.create',
+      command: {
+        kind: scenario.kind,
+        [scenario.inputField]: scenario.inputCategory,
+        amount: '100.00',
+        channel: 'CASH',
+        occurredAt: '2026-10-28T08:00:00.000Z',
+        note: '  业务备注  ',
+      },
+    });
+
+    const createInput = tx.actionPreview.create.mock.calls[0]?.[0];
+    const display = createInput?.data.displayJson as Record<string, unknown> | undefined;
+    expect(display).toMatchObject({
+      title: scenario.title,
+      [scenario.outputField]: scenario.expectedCategory,
+      note: '业务备注',
+    });
+    expect(display).not.toHaveProperty(scenario.oppositeField);
+    expect(String(display?.summary)).not.toContain(scenario.expectedCategory);
+    expect(result).toMatchObject({ display: expect.objectContaining({ [scenario.outputField]: scenario.expectedCategory, note: '业务备注' }) });
+    expect(manualTransactions.validateInput).toHaveBeenCalledWith(expect.objectContaining({
+      kind: scenario.kind,
+      [scenario.outputField]: scenario.expectedCategory,
+      note: '业务备注',
+    }));
   });
 });
 

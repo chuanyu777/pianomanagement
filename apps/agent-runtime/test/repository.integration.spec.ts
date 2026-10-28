@@ -44,6 +44,45 @@ describe('Agent Runtime PostgreSQL repository', () => {
     }
   }, 30_000);
 
+  test('restores ordered unique preview references from persisted events without historical display snapshots', async () => {
+    const firstRunId = crypto.randomUUID();
+    const secondRunId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const actorKey = `preview-history-owner-${crypto.randomUUID()}`;
+    const firstPreview = { type: 'action-preview' as const, previewId: '20000000-0000-4000-8000-000000000001', actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', title: 'PRIVATE OLD STUDENT ¥80.00', riskLevel: 'L2' as const, expiresAt: '2026-10-28T00:00:00.000Z' };
+    const secondPreview = { ...firstPreview, previewId: '20000000-0000-4000-8000-000000000002', actionType: 'lesson.complete', schemaVersion: 'lesson.complete.v1', title: 'PRIVATE OLD LESSON', riskLevel: 'L1' as const };
+    const first = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const second = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const cleanup = new Pool({ connectionString: databaseUrl });
+    try {
+      await first.createRun({ runId: firstRunId, threadId, userMessage: '第一步', actorKey });
+      await first.appendEvent(firstRunId, { type: 'action.previewed', preview: firstPreview });
+      await first.appendEvent(firstRunId, { type: 'workspace.replace', document: { protocolVersion: '1.0', title: '第一步确认单', blocks: [firstPreview], sources: [] } });
+      await first.updateRun({ runId: firstRunId, status: 'completed' });
+      await first.createRun({ runId: secondRunId, threadId, userMessage: '继续第二步', actorKey });
+      await first.appendEvent(secondRunId, { type: 'workspace.replace', document: { protocolVersion: '1.0', title: 'PRIVATE LATEST WORKSPACE SNAPSHOT', blocks: [secondPreview], sources: [] } });
+      await first.appendEvent(secondRunId, { type: 'action.previewed', preview: secondPreview });
+
+      await first.close();
+      const restored = await second.getThread!(threadId, actorKey);
+      expect(restored?.historicalPreviews).toEqual([
+        { previewId: firstPreview.previewId, actionType: firstPreview.actionType, schemaVersion: firstPreview.schemaVersion, riskLevel: firstPreview.riskLevel },
+        { previewId: secondPreview.previewId, actionType: secondPreview.actionType, schemaVersion: secondPreview.schemaVersion, riskLevel: secondPreview.riskLevel },
+      ]);
+      expect(JSON.stringify(restored?.historicalPreviews)).not.toContain('PRIVATE');
+      expect(restored?.workspace?.title).toBe('PRIVATE LATEST WORKSPACE SNAPSHOT');
+      await expect(second.getThread!(threadId, `different-role-${actorKey}`)).resolves.toBeNull();
+    } finally {
+      await first.close().catch(() => undefined);
+      await second.close().catch(() => undefined);
+      await cleanup.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = ANY($1::uuid[])', [[firstRunId, secondRunId]]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_messages WHERE run_id = ANY($1::uuid[])', [[firstRunId, secondRunId]]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_runs WHERE id = ANY($1::uuid[])', [[firstRunId, secondRunId]]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await cleanup.end();
+    }
+  }, 30_000);
+
   test('persists run status and event history across repository instances', async () => {
     const runId = crypto.randomUUID();
     const threadId = crypto.randomUUID();

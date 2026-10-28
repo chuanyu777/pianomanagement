@@ -137,4 +137,55 @@ describe('TeachersService', () => {
       username: 'teacher.zhao',
     } as never)).rejects.toThrow('用户名和密码必须同时提供');
   });
+
+  it('opens a login account for an existing profile in one transaction', async () => {
+    const createUser = vi.fn(async () => ({ id: 'd63788c6-8e3f-4e98-9a10-720af1cbd997' }));
+    const updateTeacher = vi.fn(async () => ({
+      id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7', name: '王老师', isActive: true,
+      defaultBaseSalary: new Prisma.Decimal('0.00'), defaultCommissionRate: new Prisma.Decimal('0.0000'),
+      user: { id: 'd63788c6-8e3f-4e98-9a10-720af1cbd997', username: 'teacher.wang' },
+    }));
+    const transaction = vi.fn(async (callback) => callback({ user: { create: createUser }, teacher: { updateMany: vi.fn(async () => ({ count: 1 })), findUnique: updateTeacher } }));
+    const service = new TeachersService({ $transaction: transaction } as never);
+
+    const result = await service.openLoginAccount('a4952324-d3cb-4983-ae8e-e8c35dafcfa7', {
+      username: ' teacher.wang ', password: 'a-safe-teacher-password',
+    });
+
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(createUser).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ username: 'teacher.wang', role: UserRole.TEACHER, passwordHash: expect.stringMatching(/^\$2[aby]\$/) }),
+      select: { id: true },
+    }));
+    expect(updateTeacher).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7' }, select: expect.any(Object) }));
+    expect(result).toMatchObject({ userId: 'd63788c6-8e3f-4e98-9a10-720af1cbd997', username: 'teacher.wang', name: '王老师' });
+    expect(JSON.stringify(result)).not.toContain('a-safe-teacher-password');
+  });
+
+  it('rejects a duplicate username from the database unique constraint', async () => {
+    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', { code: 'P2002', clientVersion: 'test' });
+    const transaction = vi.fn(async (callback) => callback({
+      user: { create: vi.fn(async () => { throw duplicate; }) }, teacher: { updateMany: vi.fn(), findUnique: vi.fn() },
+    }));
+    const service = new TeachersService({ $transaction: transaction } as never);
+
+    await expect(service.openLoginAccount('a4952324-d3cb-4983-ae8e-e8c35dafcfa7', {
+      username: 'existing', password: 'a-safe-teacher-password',
+    })).rejects.toMatchObject({ status: 409, message: '用户名已存在' });
+  });
+
+  it('rolls back account creation when a teacher is already bound', async () => {
+    const updateMany = vi.fn(async () => ({ count: 0 }));
+    const transaction = vi.fn(async (callback) => callback({
+      user: { create: vi.fn(async () => ({ id: 'new-user' })) }, teacher: { updateMany, findUnique: vi.fn() },
+    }));
+    const service = new TeachersService({ $transaction: transaction } as never);
+
+    await expect(service.openLoginAccount('a4952324-d3cb-4983-ae8e-e8c35dafcfa7', {
+      username: 'another-login', password: 'a-safe-teacher-password',
+    })).rejects.toMatchObject({ status: 409, message: '教师已绑定登录账号或资料不存在' });
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'a4952324-d3cb-4983-ae8e-e8c35dafcfa7', userId: null },
+    }));
+  });
 });

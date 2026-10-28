@@ -29,6 +29,11 @@ class UpdateTeacherCompensationBody {
   @ApiProperty({ type: String, example: '10.0000' }) defaultCommissionRate!: string;
 }
 
+class OpenTeacherLoginAccountBody {
+  @ApiProperty({ type: String, minLength: 1, maxLength: 80 }) username!: string;
+  @ApiProperty({ type: String, minLength: 12, maxLength: 128, format: 'password' }) password!: string;
+}
+
 class TeacherResponse implements TeacherSummary {
   @ApiProperty({ type: String, format: 'uuid' })
   id!: string;
@@ -63,6 +68,10 @@ const UpdateCompensationSchema = z.object({
   defaultBaseSalary: z.string().regex(/^(?:0|[1-9]\d{0,11})\.\d{2}$/).transform((value) => new Prisma.Decimal(value)),
   defaultCommissionRate: z.string().regex(/^(?:0|[1-9]\d{0,2})\.\d{4}$/).transform((value) => new Prisma.Decimal(value)),
 }).strict();
+const OpenLoginAccountSchema = z.object({
+  username: z.string().trim().min(1).max(80),
+  password: z.string().min(12).max(128),
+}).strict();
 
 @ApiTags('Teachers')
 @ApiBearerAuth()
@@ -91,6 +100,16 @@ export class TeachersController {
   @ApiOkResponse({ type: TeacherResponse, isArray: true })
   list(): Promise<TeacherSummary[]> {
     return this.teachers.list();
+  }
+
+  @Post(':id/login-account')
+  @ApiBody({ type: OpenTeacherLoginAccountBody })
+  @ApiCreatedResponse({ type: TeacherResponse })
+  openLoginAccount(@Param('id') id: string, @Body() body: unknown): Promise<TeacherSummary> {
+    if (!z.string().uuid().safeParse(id).success) throw new BadRequestException('请求参数不合法');
+    const parsed = OpenLoginAccountSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    return this.teachers.openLoginAccount(id, parsed.data);
   }
 
   @Patch(':id/compensation')

@@ -64,7 +64,7 @@ function toSummary(student: Prisma.StudentGetPayload<{ select: typeof STUDENT_PU
   const referenceAt = completedAt ?? firstAccountCreatedAt;
   const enrollmentStatus: StudentEnrollmentStatus = student.withdrawnAt
     ? 'WITHDRAWN'
-    : referenceAt && now.getTime() - referenceAt.getTime() <= threshold
+    : !referenceAt || now.getTime() - referenceAt.getTime() <= threshold
       ? 'STUDYING'
       : 'FROZEN';
   return {

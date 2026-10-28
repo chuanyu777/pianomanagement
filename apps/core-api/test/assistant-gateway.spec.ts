@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { HttpException } from '@nestjs/common';
 import { MemorySaver } from '@langchain/langgraph';
 import {
   INTERNAL_REQUEST_NONCE_HEADER,
@@ -88,14 +89,43 @@ describe('AssistantGatewayService', () => {
 
   it('lists and reads only tasks bound to the current actor capability', async () => {
     const listThreads = vi.fn().mockResolvedValue([{ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed' }]);
-    const getThread = vi.fn().mockResolvedValue({ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null });
+    const getThread = vi.fn().mockResolvedValue({ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews: [] });
     const service = createService({ start: vi.fn(), resume: vi.fn(), openEvents: vi.fn(), listThreads, getThread });
-    await expect(service.listThreads({ userId, role: 'OWNER' })).resolves.toHaveLength(1);
-    await expect(service.getThread({ userId, role: 'OWNER', threadId })).resolves.toMatchObject({ threadId });
+    const teacherId = '71726279-43f1-4fe6-9aa1-b12988812b5d';
+    await expect(service.listThreads({ userId, role: 'TEACHER', teacherId })).resolves.toHaveLength(1);
+    await expect(service.getThread({ userId, role: 'TEACHER', teacherId, threadId })).resolves.toMatchObject({ threadId, historicalPreviews: [] });
     const listPayload = JSON.parse(Buffer.from(listThreads.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8')) as { sub: string };
-    const detailPayload = JSON.parse(Buffer.from(getThread.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8')) as { sub: string; threadId: string };
+    const detailPayload = JSON.parse(Buffer.from(getThread.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8')) as { sub: string; role: string; teacherId: string; threadId: string };
     expect(listPayload.sub).toBe(userId);
-    expect(detailPayload).toMatchObject({ sub: userId, threadId });
+    expect(detailPayload).toMatchObject({ sub: userId, role: 'TEACHER', teacherId, threadId });
+  });
+
+  it('sanitizes the latest workspace when it contains a preview before returning task history', async () => {
+    const preview = { type: 'action-preview', previewId: '20000000-0000-4000-8000-000000000003', actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', title: 'PRIVATE OLD STUDENT ¥88.00', riskLevel: 'L2', expiresAt: '2026-10-28T00:00:00.000Z' };
+    const getThread = vi.fn().mockResolvedValue({
+      threadId,
+      title: '历史任务',
+      lastActivityAt: '2026-10-28T00:00:00.000Z',
+      latestStatus: 'completed',
+      messages: [],
+      historicalPreviews: [{ previewId: preview.previewId, actionType: preview.actionType, schemaVersion: preview.schemaVersion, riskLevel: preview.riskLevel }],
+      workspace: {
+        protocolVersion: '1.0', title: 'PRIVATE OLD WORKSPACE TITLE',
+        blocks: [
+          { type: 'summary', title: 'PRIVATE STUDENT', text: '旧摘要金额 ¥88.00' },
+          { type: 'data-table', columns: [{ key: 'student', label: '学生' }], rows: [{ student: 'PRIVATE STUDENT' }] },
+          preview,
+        ],
+        sources: [{ type: 'student', id: 'private-student-id', label: 'PRIVATE STUDENT' }],
+      },
+    });
+    const service = createService({ start: vi.fn(), resume: vi.fn(), openEvents: vi.fn(), getThread });
+
+    const detail = await service.getThread({ userId, role: 'OWNER', threadId });
+    expect(detail.workspace).toEqual({ protocolVersion: '1.0', title: '历史任务确认单', blocks: [{ ...preview, title: '历史确认单' }], sources: [] });
+    expect(JSON.stringify(detail)).not.toContain('PRIVATE');
+    expect(JSON.stringify(detail)).not.toContain('88.00');
+    expect(detail.historicalPreviews).toEqual([{ previewId: preview.previewId, actionType: preview.actionType, schemaVersion: preview.schemaVersion, riskLevel: preview.riskLevel }]);
   });
 
   it('resumes a run with a capability scoped to that run', async () => {
@@ -216,6 +246,50 @@ describe('AgentRuntimeClient contract', () => {
 });
 
 describe('HttpAgentRuntimeClient', () => {
+  it('preserves the ordered minimal preview references returned by Agent task history', async () => {
+    const historicalPreviews = [
+      { previewId: '20000000-0000-4000-8000-000000000001', actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', riskLevel: 'L2' },
+      { previewId: '20000000-0000-4000-8000-000000000002', actionType: 'lesson.complete', schemaVersion: 'lesson.complete.v1', riskLevel: 'L1' },
+    ];
+    const fetchImpl = vi.fn(async () => response({ threadId, title: '任务', lastActivityAt: '2026-10-28T00:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews }));
+    const client = new HttpAgentRuntimeClient({ baseUrl: 'http://agent-runtime.test', serviceSecret, timeoutMs: 100, fetchImpl });
+
+    await expect(client.getThread({ threadId, capability: 'actor-scoped-capability' })).resolves.toMatchObject({ historicalPreviews });
+  });
+
+  it.each([403, 404])('hides task existence for Agent %i responses with one public 404', async (status) => {
+    const fetchImpl = vi.fn(async () => response({ message: 'private task ownership detail' }, { status }));
+    const client = new HttpAgentRuntimeClient({
+      baseUrl: 'http://agent-runtime.test',
+      serviceSecret: 'stage-0-test-secret-012345678901234567890123',
+      timeoutMs: 100,
+      fetchImpl,
+    });
+
+    const error = await client.getThread({ threadId, capability: 'actor-scoped-capability' }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(HttpException);
+    expect((error as HttpException).getStatus()).toBe(404);
+    expect((error as Error).message).toBe('任务不存在或当前账号无权访问，请返回任务列表查看可用任务。');
+    expect((error as Error).message).not.toContain('private task ownership detail');
+    expect(fetchImpl).toHaveBeenCalledWith(`http://agent-runtime.test/internal/assistant/threads/${threadId}`, expect.objectContaining({ method: 'GET' }));
+  });
+
+  it('keeps normal Agent outages as a generic 503 for task reads', async () => {
+    const fetchImpl = vi.fn(async () => response({ message: 'private upstream detail' }, { status: 503, statusText: 'Unavailable' }));
+    const client = new HttpAgentRuntimeClient({
+      baseUrl: 'http://agent-runtime.test',
+      serviceSecret: 'stage-0-test-secret-012345678901234567890123',
+      timeoutMs: 100,
+      fetchImpl,
+    });
+
+    const error = await client.getThread({ threadId, capability: 'actor-scoped-capability' }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(HttpException);
+    expect((error as HttpException).getStatus()).toBe(503);
+    expect((error as Error).message).toBe('AI 助手服务暂时不可用，请稍后重试');
+    expect((error as Error).message).not.toContain('private upstream detail');
+  });
+
   it('posts start requests and maps upstream HTTP errors', async () => {
     const fetchImpl = vi.fn(async () =>
       response({ internal: 'do not expose this' }, { status: 503, statusText: 'Unavailable' }),

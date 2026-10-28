@@ -2,6 +2,11 @@ import { StudentsService } from '../src/modules/students/students.service.js';
 import { describe, expect, it, vi } from 'vitest';
 
 describe('StudentsService', () => {
+  it('keeps a student with no course account in study status until the 31-day clock can start', async () => {
+    const findMany = vi.fn(async () => [{ id: 'student-new', name: '新学生', phone: null, notes: null, withdrawnAt: null, courseAccounts: [], createdAt: new Date('2026-01-01T00:00:00.000Z'), updatedAt: new Date('2026-01-01T00:00:00.000Z') }]);
+    const service = new StudentsService({ student: { findMany } } as never);
+    expect((await service.list())[0]?.enrollmentStatus).toBe('STUDYING');
+  });
   it('creates a student with a trimmed name and nullable notes', async () => {
     const create = vi.fn(async ({ data }) => ({
       id: 'student-1',
@@ -36,7 +41,7 @@ describe('StudentsService', () => {
       name: '林同学',
       phone: null,
       notes: null,
-      enrollmentStatus: 'FROZEN',
+      enrollmentStatus: 'STUDYING',
       createdAt: new Date('2026-10-16T00:00:00.000Z'),
       updatedAt: new Date('2026-10-16T00:00:00.000Z'),
     });

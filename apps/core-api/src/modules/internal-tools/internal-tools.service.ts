@@ -305,7 +305,7 @@ function countFrozenStudents(
     const referenceAt = completedAt ?? student.courseAccounts
       .map((account) => account.createdAt)
       .sort((left, right) => left.getTime() - right.getTime())[0];
-    return !referenceAt || referenceAt.getTime() < threshold;
+    return Boolean(referenceAt && referenceAt.getTime() < threshold);
   }).length;
 }
 

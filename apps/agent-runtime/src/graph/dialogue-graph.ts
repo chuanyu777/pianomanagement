@@ -321,6 +321,12 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         if (executedPreviewId) task.executedPreviewId = executedPreviewId;
         if (multiStep) task.multiStep = multiStep;
         task.status = 'cancelled';
+        const completedSteps = multiStep?.completedPreviewIds.length ?? 0;
+        if (multiStep && completedSteps > 0) {
+          const remainingSteps = multiStep.steps.length - completedSteps;
+          const answer = `已取消后续步骤。两步办理里前 ${completedSteps} 步已经确认生效，剩余 ${remainingSteps} 步没有执行，也没有做任何撤销；如需撤回已生效的部分，请单独发起对应的纠错或冲正。`;
+          return finish(task, turn.runId, answer, document('已取消后续步骤', answer));
+        }
         return finish(task, turn.runId, '已取消当前待办理事项，未执行业务变更。', document('已取消办理', '待办理预览已失效；已经确认的业务不受影响。'));
       }
       if (task.multiStep && intent.operation && intent.operation !== task.multiStep.steps[task.multiStep.currentStep]?.operation) {

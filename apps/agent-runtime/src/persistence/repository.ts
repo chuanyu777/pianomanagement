@@ -69,6 +69,7 @@ export interface AgentRuntimeRepository {
   getThread?(threadId: string, actorKey: string): Promise<AssistantThreadDetail | null>;
   createRun(input: CreateRunInput): Promise<{ run: AgentRunRecord; created: boolean }>;
   findRun(runId: string): Promise<AgentRunRecord | null>;
+  hasActiveRun?(threadId: string): Promise<boolean>;
   claimRunForResume(runId: string): Promise<AgentRunRecord | null>;
   claimNextRun(ownerToken: string, leaseDurationMs: number): Promise<LeasedAgentRunRecord | null>;
   renewRunLease(runId: string, ownerToken: string, leaseDurationMs: number): Promise<boolean>;
@@ -316,6 +317,21 @@ export function createAgentRuntimeRepository(input: {
           [runInput.threadId, runInput.actorKey ?? null],
         );
         if (bound.rowCount !== 1) throw new Error('任务身份或作用域无效');
+        // A retried request carries the same clientRequestId; reuse the original run
+        // instead of executing the same instruction twice.
+        if (runInput.clientRequestId) {
+          const replay = await client.query<RunRow>(
+            `SELECT id, thread_id, status, user_message, client_request_id, capability_token
+               FROM ${schema}.agent_runs
+              WHERE thread_id = $1 AND client_request_id = $2
+              LIMIT 1`,
+            [runInput.threadId, runInput.clientRequestId],
+          );
+          if (replay.rows[0]) {
+            await client.query('COMMIT');
+            return { run: toRun(replay.rows[0]), created: false };
+          }
+        }
         const inserted = await client.query<RunRow>(
           `INSERT INTO ${schema}.agent_runs
              (id, thread_id, client_request_id, status, user_message, started_at, capability_token)
@@ -361,6 +377,14 @@ export function createAgentRuntimeRepository(input: {
 
     findRun(runId) {
       return findRunWithClient(pool, runId);
+    },
+
+    async hasActiveRun(threadId) {
+      const result = await pool.query(
+        `SELECT 1 FROM ${schema}.agent_runs WHERE thread_id = $1 AND status IN ('queued', 'running') LIMIT 1`,
+        [threadId],
+      );
+      return (result.rowCount ?? 0) > 0;
     },
 
     async claimRunForResume(runId) {

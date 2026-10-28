@@ -270,7 +270,14 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
         throw new NotFoundException('任务不存在或当前账号无权访问，请返回任务列表查看可用任务。');
       }
       if (response.status === 403) throw new ForbiddenException('当前账号无权访问该AI任务，请新建会话。');
-      if (response.status === 409) throw new ConflictException('AI任务状态已变化，请重新核对。');
+      if (response.status === 409) {
+        // Prefer the agent's own explanation ("上一条还在处理中") over a generic message.
+        const payload = await response.json().catch(() => null) as { message?: unknown } | null;
+        const detail = typeof payload?.message === 'string' && payload.message.trim().length > 0 && payload.message.length <= 200
+          ? payload.message.trim()
+          : 'AI任务状态已变化，请重新核对。';
+        throw new ConflictException(detail);
+      }
       throw new ServiceUnavailableException(PUBLIC_UNAVAILABLE_MESSAGE);
     } catch (error) {
       if (error instanceof HttpException) {

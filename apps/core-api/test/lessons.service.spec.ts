@@ -212,6 +212,25 @@ describe('LessonsService', () => {
     }));
   });
 
+  it('selects and returns only teacher id/name on the public list without broadening write selects', async () => {
+    const { service, lesson } = makeService({
+      findMany: vi.fn(async () => [makeLesson({ teacher: { id: teacherId, name: '王老师', userId: 'private-user', defaultBaseSalary: '9000.00' } })]),
+    });
+    const result = await service.listForActor(teacher);
+    expect(result[0]).toMatchObject({ teacher: { id: teacherId, name: '王老师' } });
+    expect(result[0]).toHaveProperty('teacher', { id: teacherId, name: '王老师' });
+    expect(lesson.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { teacherId },
+      select: expect.objectContaining({ teacher: { select: { id: true, name: true } } }),
+    }));
+
+    const writes = makeService();
+    await writes.service.createSingle({ accountId, teacherId, startsAt: new Date('2026-11-02T01:00:00Z') }, owner);
+    expect(writes.lesson.create).toHaveBeenCalledWith(expect.objectContaining({
+      select: expect.not.objectContaining({ teacher: expect.anything() }),
+    }));
+  });
+
   it('filters the safe range read by teacher, names and status without selecting money fields', async () => {
     const { service, lesson } = makeService({
       findMany: vi.fn(async () => [{

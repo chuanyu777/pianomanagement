@@ -719,3 +719,135 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, a:focus-visib
   .home-intro h1 { font-size: 25px; }
   .finance-nav { grid-template-columns: repeat(2, minmax(0,1fr)); }
 }
+
+/* Shared working layout and interaction hierarchy. */
+@media (min-width: 901px) {
+  .workspace-grid, .workspace-grid.structured-layout { grid-template-columns: 184px minmax(0, 1fr); }
+  .workspace-grid.assistant-layout { grid-template-columns: 184px minmax(320px, .85fr) minmax(0, 1.15fr); }
+  .business-page, .business-page-schedule { grid-template-columns: clamp(256px, 25vw, 320px) minmax(0, 1fr); padding: 0; }
+  .business-workspace { margin-top: 0; }
+  .student-master-detail { grid-template-columns: 124px minmax(0, 1fr); gap: 14px; }
+}
+
+/* Business operation entry points and readable controls. */
+.finance-action-toolbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+.operation-form { display: grid; gap: 18px; padding-top: 12px; }
+.operation-context { margin: 0; padding: 10px 12px; border-radius: 8px; background: #f3f5fb; color: #49546a; font-size: 13px; }
+.operation-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.operation-field { display: grid; align-content: start; gap: 7px; min-width: 0; }
+.operation-field > label { color: #3e4960; font-size: 13px; font-weight: 600; }
+.operation-field-wide { grid-column: 1 / -1; }
+.operation-field .ant-select, .operation-field .ant-picker { width: 100%; min-width: 0; }
+.operation-footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 16px; border-top: 1px solid #e4e8f0; }
+.operation-footer .ant-btn { min-width: 88px; }
+.cash-flow-totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
+.cash-flow-totals > div { min-width: 0; padding: 14px 16px; border: 1px solid #e0e5ee; border-radius: 8px; background: #f7f8fc; }
+.cash-flow-totals dt { color: #647087; font-size: 12px; }
+.cash-flow-totals dd { margin: 7px 0 0; color: #25314a; font-size: clamp(18px, 1.7vw, 25px); font-weight: 750; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.cash-flow-totals .cash-flow-net { border-color: #cbd6f7; background: #f0f3ff; }
+.cash-flow-net.tone-positive dd { color: #24734b; }
+.cash-flow-net.tone-negative dd { color: #b43f31; }
+.data-card .ant-table-wrapper { max-width: 100%; overflow-x: auto; }
+button.ant-btn-primary:not(:disabled) { color: #fff; }
+button.ant-btn:disabled, button.ant-btn:disabled:hover, button.ant-btn:disabled:focus,
+button:not(.ant-btn):disabled, button:not(.ant-btn):disabled:hover {
+  color: #5a6479 !important; background: #e2e6ef !important; border-color: #ccd3e0 !important; box-shadow: none !important; cursor: not-allowed; opacity: 1;
+}
+@media (max-width: 480px) {
+  .operation-fields { grid-template-columns: minmax(0, 1fr); }
+  .cash-flow-totals { gap: 6px; }
+  .cash-flow-totals > div { padding: 11px 8px; }
+  .cash-flow-totals dd { font-size: 17px; }
+}
+.home-intro { min-height: 82px; padding: 18px 24px; }
+.home-intro h1 { font-size: 25px; }
+.page-assistant-head { min-height: 82px; padding: 17px 20px; }
+.page-assistant-head h2 { font-size: 21px; }
+.workspace-page-head { min-height: 48px; }
+.structured-heading h1, .basic-data-workbench h1 { margin: 5px 0 0; font-size: 25px; }
+.context-heading { min-height: 50px; }
+.context-heading h3 { font-size: 25px; }
+.prompt-card .ant-btn-primary:not(:disabled), .page-chat-composer .ant-btn-primary:not(:disabled) { color: #fff; background: var(--v2-blue); }
+.prompt-card .ant-btn-primary:disabled, .page-chat-composer .ant-btn-primary:disabled,
+.prompt-card .ant-btn-primary:disabled:hover, .page-chat-composer .ant-btn-primary:disabled:hover {
+  color: #5a6479 !important; background: #e2e6ef !important; border: 1px solid #ccd3e0; box-shadow: none; cursor: not-allowed;
+}
+.prompt-hint { color: #6b7384; }
+.overview-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.overview-metric { min-width: 0; min-height: 108px; text-align: left; }
+.overview-metric.is-link { position: relative; padding-right: 22px; transition: border-color .15s, box-shadow .15s; }
+.overview-metric.is-link::after { content: '↗'; position: absolute; right: 10px; top: 11px; color: #6b7384; font-size: 13px; }
+.overview-metric.is-link:hover { border-color: var(--v2-blue); box-shadow: 0 3px 12px rgba(49,92,255,.13); }
+.overview-metric.tone-positive { background: #f0f9f4; border-color: #bfdfcb; }
+.overview-metric.tone-positive span, .overview-metric.tone-positive small { color: #496556; }
+.overview-metric.tone-positive strong { color: #24734b; }
+.overview-metric.tone-negative { background: #fff2f0; border-color: #efc4bd; }
+.overview-metric.tone-negative strong { color: #b43f31; }
+.overview-metric.tone-warning { border-color: #ead4a3; background: #fff8e8; }
+/* The home overview groups each metric with its destination and keeps lists compact. */
+.home-overview .overview-metrics { gap: 10px; }
+.home-overview .overview-metric { min-height: 116px; padding: 14px; border: 1px solid #d9dfeb; border-radius: 9px; background: #fff; box-shadow: 0 2px 8px rgba(30, 40, 65, .04); }
+.home-overview .overview-metric.is-link { padding-right: 38px; }
+.home-overview .overview-metric.is-link::after { display: grid; place-items: center; width: 24px; height: 24px; right: 12px; top: 12px; border-radius: 6px; background: #eef2ff; color: #3159ec; font-size: 15px; }
+.home-overview .overview-metric.is-link:hover { border-color: #3159ec; background: #f7f9ff; }
+.home-overview .overview-metric span { color: #657087; font-size: 12px; }
+.home-overview .overview-metric strong { margin-top: 8px; color: #1c2436; font-size: clamp(18px, 2vw, 24px); overflow-wrap: anywhere; }
+.home-overview .overview-metric.tone-negative strong { color: #b43f31; }
+.home-overview .overview-metric small { color: #52627d; font-size: 11px; }
+.home-overview .overview-metric.is-link small { color: #3159ec; }
+.home-overview .overview-panels { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.home-overview .overview-panel { padding: 16px; border: 1px solid #d9dfeb; border-radius: 9px; background: #fff; box-shadow: 0 2px 8px rgba(30, 40, 65, .04); }
+.home-overview .overview-panel-heading h4 { margin: 0; color: #1c2436; font-size: 15px; }
+.home-overview .overview-panel-heading p { color: #657087; font-size: 11px; }
+.home-overview .overview-panel-heading button { color: #3159ec; font-size: 12px; }
+.home-overview .overview-list-row { grid-template-columns: 72px minmax(0, 1fr) auto; gap: 8px; font-size: 12px; }
+.home-overview .overview-list-row strong { font-size: 11px; }
+.home-overview .overview-list-row span { white-space: normal; overflow-wrap: anywhere; }
+.home-overview .overview-actions button { border-radius: 7px; }
+.home-overview .overview-actions strong, .home-overview .overview-actions span, .home-overview .recent-tasks small { font-size: 11px; }
+.home-overview .recent-tasks > strong { color: #1c2436; font-size: 14px; }
+.finance-primary.tone-negative strong { color: #b43f31; }
+.finance-primary.tone-positive strong { color: #24734b; }
+.finance-primary.tone-neutral strong { color: #3e475b; }
+.overview-list-link { width: 100%; text-decoration: none; }
+.overview-list-link:hover { background: #f0f3ff; }
+.student-toolbar { grid-template-columns: minmax(0, 1fr) auto; margin: 16px 0; }
+.student-toolbar .eyebrow { display: none; }
+.student-directory { gap: 4px; }
+.student-directory button { min-width: 0; padding: 8px 9px; min-height: 49px; }
+.student-directory strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+.student-directory span { margin-top: 2px; font-size: 10px; line-height: 1.3; }
+.student-detail { min-width: 0; }
+.student-detail-head { align-items: start; gap: 10px; }
+.student-detail-head h3 { margin: 0; font-size: 21px; line-height: 1.3; }
+.student-detail-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.student-detail-actions .ant-tag { margin: 0; }
+.student-detail-actions .ant-btn { height: auto; min-height: 30px; padding: 4px 9px; font-size: 11px; color: var(--v2-blue); border-color: #b7c3ff; background: #f4f6ff; }
+.course-switcher { display: flex; flex-wrap: wrap; gap: 6px; }
+.course-switcher button { flex: 1 1 140px; padding: 8px 10px; }
+.course-account-view { gap: 12px; }
+.focused-account-card { padding: 16px; }
+.focused-account-head { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.focused-account-head h4 { font-size: 19px; line-height: 1.35; overflow-wrap: anywhere; }
+.focused-account-head > div:last-child strong { font-size: 26px; }
+.account-actions .ant-btn { height: 34px; padding: 4px 11px; font-size: 12px; }
+.workbench-tabs, .finance-nav { display: flex; flex-wrap: wrap; gap: 4px; margin: 16px 0; padding: 0 0 8px; border-bottom: 1px solid #d3d9e6; }
+.workbench-tabs button, .finance-nav button { padding: 8px 12px; border: 1px solid transparent; border-radius: 6px; color: #606a80; background: transparent; font-size: 13px; box-shadow: none; }
+.workbench-tabs button:hover, .finance-nav button:hover { border-color: #cbd4f0; background: #f4f6ff; }
+.workbench-tabs button.is-active, .finance-nav button.is-active { color: #244bd0; border-color: #bcc9ff; background: #e7edff; box-shadow: none; }
+.finance-nav button > span, .finance-nav button > em { display: none; }
+.finance-nav button strong { font-size: 13px; font-weight: 600; }
+.structured-view .ant-card-body { min-width: 0; }
+@media (max-width: 900px) {
+  .student-master-detail { grid-template-columns: 124px minmax(0, 1fr); }
+  .page-assistant { height: 430px; }
+}
+@media (max-width: 560px) {
+  .student-master-detail { display: block; }
+  .student-directory button { min-width: 105px; max-width: 130px; }
+  .student-detail-head { flex-wrap: wrap; }
+  .student-detail-actions { justify-content: flex-start; }
+  .focused-account-head { grid-template-columns: minmax(0, 1fr) auto; }
+  .balance-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .balance-strip > div { padding: 10px; }
+}

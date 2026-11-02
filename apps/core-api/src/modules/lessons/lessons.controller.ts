@@ -11,6 +11,7 @@ import {
   CreateBatchLessonsBody,
   CompleteLessonBody,
   CreateLessonBody,
+  LessonListResponse,
   LessonResponse,
   RescheduleLessonBody,
 } from './lessons.dto.js';
@@ -88,7 +89,7 @@ export class LessonsController {
   }
 
   @Get()
-  @ApiOkResponse({ type: LessonResponse, isArray: true })
+  @ApiOkResponse({ type: LessonListResponse, isArray: true })
   @ApiQuery({ name: 'from', required: false, type: String, format: 'date-time' })
   @ApiQuery({ name: 'to', required: false, type: String, format: 'date-time' })
   list(@Req() request: AuthenticatedRequest, @Query() query: unknown) {

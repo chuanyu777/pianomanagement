@@ -1,9 +1,10 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Empty, Input, Modal, Table, Tabs, Tag, Typography } from 'antd';
+import { Alert, Button, Empty, Input, Modal, Tag, Typography } from 'antd';
 import type { components } from '@piano/generated-core-client/generated/core-api';
 import { confirmAssistantPreview, createAssistantPreview, getAssistantPreview, notifyAuthExpired, type AssistantPreviewDraft } from './assistant-client.js';
 import { PreviewFacts } from './preview-facts.js';
+import './basic-data-workbench.css';
 
 const { Title } = Typography;
 const TOKEN_KEY = 'pianomanager.accessToken';
@@ -48,11 +49,16 @@ function confirmationKey(previewId: string): string {
   return key;
 }
 
-export function BasicDataWorkbench() {
+export function BasicDataWorkbench({ onAskAssistant }: { onAskAssistant?: ((prompt: string) => void) | undefined } = {}) {
   const client = useQueryClient();
   const teachers = useQuery({ queryKey: ['basic-data-teachers'], queryFn: () => readList('/api/teachers', isTeacher) });
   const courses = useQuery({ queryKey: ['basic-data-courses'], queryFn: () => readList('/api/courses', isCourse) });
-  const [tab, setTab] = useState('teachers');
+  const [tab, setTab] = useState<'teachers' | 'courses'>('teachers');
+  const tabsId = useId();
+  const [teacherSearch, setTeacherSearch] = useState('');
+  const [courseSearch, setCourseSearch] = useState('');
+  const [selectedTeacherId, setSelectedTeacherId] = useState<string | null>(null);
+  const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [preview, setPreview] = useState<BasicPreview | null>(null);
   const [previewState, setPreviewState] = useState<'checking' | 'pending' | 'confirming' | 'unknown' | 'executed'>('checking');
@@ -205,31 +211,91 @@ export function BasicDataWorkbench() {
     } catch (error) { setPreviewState('unknown'); setPreviewMessage(error instanceof Error ? error.message : '无法读取当前状态'); }
   };
 
-  const teacherColumns = [
-    { title: '教师姓名', dataIndex: 'name', key: 'name' },
-    { title: '状态', dataIndex: 'isActive', key: 'status', render: (active: boolean) => <Tag>{active ? '在职' : '停用'}</Tag> },
-    { title: '默认基本工资', dataIndex: 'defaultBaseSalary', key: 'salary', render: (value: string) => `¥${value}` },
-    { title: '默认提成比例', dataIndex: 'defaultCommissionRate', key: 'commission', render: (value: string) => `${value}%` },
-    { title: '登录账号', key: 'account', render: (_: unknown, record: Teacher) => record.username ? <Tag color="green">{record.username}</Tag> : <Button onClick={() => { setFeedback(null); setAccountEditor({ teacher: record, username: '', password: '', passwordConfirmation: '' }); }}>开通登录账号</Button> },
-    { title: '操作', key: 'actions', render: (_: unknown, record: Teacher) => <Button onClick={() => setEditor({ kind: 'teacher-edit', teacher: record, baseSalary: record.defaultBaseSalary, commissionRate: record.defaultCommissionRate })}>修改薪酬</Button> },
-  ];
-  const courseColumns = [
-    { title: '课程名称', dataIndex: 'name', key: 'name' },
-    { title: '状态', dataIndex: 'isActive', key: 'status', render: (active: boolean) => <Tag>{active ? '启用' : '停用'}</Tag> },
-    { title: '默认单价', dataIndex: 'defaultUnitPrice', key: 'price', render: (value: string) => `¥${value}` },
-    { title: '默认课时', dataIndex: 'defaultDurationMinutes', key: 'duration', render: (value: number) => `${value} 分钟` },
-    { title: '操作', key: 'actions', render: (_: unknown, record: Course) => <Button onClick={() => setEditor({ kind: 'course-edit', course: record, name: record.name, defaultUnitPrice: record.defaultUnitPrice, defaultDurationMinutes: String(record.defaultDurationMinutes), isActive: record.isActive })}>编辑课程</Button> },
-  ];
+  const teacherTerm = teacherSearch.trim().toLocaleLowerCase();
+  const courseTerm = courseSearch.trim().toLocaleLowerCase();
+  const filteredTeachers = (teachers.data ?? []).filter((teacher) => teacher.name.toLocaleLowerCase().includes(teacherTerm) || teacher.username?.toLocaleLowerCase().includes(teacherTerm));
+  const filteredCourses = (courses.data ?? []).filter((course) => course.name.toLocaleLowerCase().includes(courseTerm));
+  const selectedTeacher = filteredTeachers.find(({ id }) => id === selectedTeacherId) ?? filteredTeachers[0];
+  const selectedCourse = filteredCourses.find(({ id }) => id === selectedCourseId) ?? filteredCourses[0];
+  const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'teachers' : event.key === 'End' ? 'courses' : tab === 'teachers' ? 'courses' : 'teachers';
+    setTab(next);
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
+  };
   const isTeacherEditor = editor?.kind.startsWith('teacher-') ?? false;
   const isEditing = editor?.kind.endsWith('-edit') ?? false;
 
   return <section aria-labelledby="basic-data-title" className="structured-view basic-data-workbench">
-    <div className="workspace-page-head"><div><span className="eyebrow accent-eyebrow">OPERATING DESK</span><Title id="basic-data-title" level={1}>教师与课程</Title><p className="intro-copy">维护教师资料、默认薪酬和课程信息。变更确认后生效。</p></div></div>
+    <div className="workspace-page-head"><Title id="basic-data-title" level={1}>教师与课程</Title></div>
     {feedback && <Alert closable message={feedback.text} onClose={() => setFeedback(null)} showIcon type={feedback.type} />}
-    <Tabs activeKey={tab} onChange={setTab} items={[
-      { key: 'teachers', label: '教师管理', children: <Card className="data-card" title="教师资料" extra={<Button type="primary" onClick={() => setEditor({ kind: 'teacher-create', name: '', baseSalary: '0.00', commissionRate: '0.0000' })}>新增教师</Button>} loading={teachers.isLoading}>{teachers.error && <Alert message={teachers.error.message} type="error" />}{teachers.data && <Table<Teacher> aria-label="教师列表" columns={teacherColumns} dataSource={teachers.data} rowKey="id" locale={{ emptyText: <Empty description="暂无教师资料" /> }} pagination={{ pageSize: 10 }} />}</Card> },
-      { key: 'courses', label: '课程管理', children: <Card className="data-card" title="课程资料" extra={<Button type="primary" onClick={() => setEditor({ kind: 'course-create', name: '', defaultUnitPrice: '0.00', defaultDurationMinutes: '45' })}>新增课程</Button>} loading={courses.isLoading}>{courses.error && <Alert message={courses.error.message} type="error" />}{courses.data && <Table<Course> aria-label="课程列表" columns={courseColumns} dataSource={courses.data} rowKey="id" locale={{ emptyText: <Empty description="暂无课程资料" /> }} pagination={{ pageSize: 10 }} />}</Card> },
-    ]} />
+    <div className="workbench-tabs" role="tablist" aria-label="基础资料分类" onKeyDown={onTabKeyDown}>
+      {([['teachers', '教师管理'], ['courses', '课程管理']] as const).map(([value, label]) => <button
+        aria-controls={`${tabsId}-${value}-panel`} aria-selected={tab === value} className={tab === value ? 'is-active' : ''}
+        data-tab={value} id={`${tabsId}-${value}-tab`} key={value} onClick={() => setTab(value)} role="tab" tabIndex={tab === value ? 0 : -1} type="button"
+      >{label}</button>)}
+    </div>
+    <div aria-labelledby={`${tabsId}-${tab}-tab`} id={`${tabsId}-${tab}-panel`} role="tabpanel" tabIndex={0}>
+      <div className="basic-data-toolbar">
+        <span role="status">{tab === 'teachers' ? teachers.data ? `${teachers.data.length} 位教师` : '教师资料' : courses.data ? `${courses.data.length} 门课程` : '课程资料'}</span>
+        {tab === 'teachers'
+          ? <Button type="primary" onClick={() => setEditor({ kind: 'teacher-create', name: '', baseSalary: '0.00', commissionRate: '0.0000' })}>新增教师</Button>
+          : <Button type="primary" onClick={() => setEditor({ kind: 'course-create', name: '', defaultUnitPrice: '0.00', defaultDurationMinutes: '45' })}>新增课程</Button>}
+      </div>
+      {tab === 'teachers' ? <>
+        {teachers.isError ? <Alert message="暂时无法读取教师资料" description={teachers.error.message} type="error" showIcon action={<Button onClick={() => void teachers.refetch()}>重试</Button>} />
+          : teachers.isLoading ? <div className="loading-state" role="status">正在读取教师资料…</div>
+          : <div className="basic-data-master-detail">
+            <aside className="basic-data-directory" aria-label="教师目录">
+              <Input aria-label="搜索教师姓名或登录账号" allowClear placeholder="搜索姓名 / 账号" value={teacherSearch} onChange={(event) => setTeacherSearch(event.target.value)} />
+              <div className="basic-data-directory-items">
+                {filteredTeachers.map((teacher) => <button aria-pressed={teacher.id === selectedTeacher?.id} className={teacher.id === selectedTeacher?.id ? 'is-active' : ''} key={teacher.id} onClick={() => setSelectedTeacherId(teacher.id)} type="button">
+                  <strong title={teacher.name}>{teacher.name}</strong><span>{teacher.isActive ? '在职' : '停用'}</span>
+                </button>)}
+              </div>
+            </aside>
+            {selectedTeacher ? <section className="basic-data-detail" aria-label="教师详情">
+              <div className="basic-data-detail-head"><h2>{selectedTeacher.name}</h2><Tag>{selectedTeacher.isActive ? '在职' : '停用'}</Tag></div>
+              <dl className="basic-data-facts">
+                <div><dt>默认基本工资</dt><dd>¥{selectedTeacher.defaultBaseSalary}</dd></div>
+                <div><dt>默认提成比例</dt><dd>{selectedTeacher.defaultCommissionRate}%</dd></div>
+              </dl>
+              <div className="basic-data-actions">
+                <Button onClick={() => setEditor({ kind: 'teacher-edit', teacher: selectedTeacher, baseSalary: selectedTeacher.defaultBaseSalary, commissionRate: selectedTeacher.defaultCommissionRate })}>修改薪酬</Button>
+                {onAskAssistant && <Button onClick={() => onAskAssistant(`请查看教师「${selectedTeacher.name}」本周的排课。`)}>询问助手</Button>}
+              </div>
+              <div className="basic-data-login"><h3>登录账号</h3>{selectedTeacher.username ? <p className="basic-data-username">{selectedTeacher.username}</p>
+                : <><p>尚未开通</p><Button onClick={() => { setFeedback(null); setAccountEditor({ teacher: selectedTeacher, username: '', password: '', passwordConfirmation: '' }); }}>开通登录账号</Button></>}
+              </div>
+            </section> : <div className="basic-data-empty"><Empty description={teachers.data?.length ? '没有匹配的教师' : '暂无教师资料'} /></div>}
+          </div>}
+      </> : <>
+        {courses.isError ? <Alert message="暂时无法读取课程资料" description={courses.error.message} type="error" showIcon action={<Button onClick={() => void courses.refetch()}>重试</Button>} />
+          : courses.isLoading ? <div className="loading-state" role="status">正在读取课程资料…</div>
+          : <div className="basic-data-master-detail">
+            <aside className="basic-data-directory" aria-label="课程目录">
+              <Input aria-label="搜索课程名称" allowClear placeholder="搜索课程名称" value={courseSearch} onChange={(event) => setCourseSearch(event.target.value)} />
+              <div className="basic-data-directory-items">
+                {filteredCourses.map((course) => <button aria-pressed={course.id === selectedCourse?.id} className={course.id === selectedCourse?.id ? 'is-active' : ''} key={course.id} onClick={() => setSelectedCourseId(course.id)} type="button">
+                  <strong title={course.name}>{course.name}</strong><span>{course.isActive ? '启用' : '停用'}</span>
+                </button>)}
+              </div>
+            </aside>
+            {selectedCourse ? <section className="basic-data-detail" aria-label="课程详情">
+              <div className="basic-data-detail-head"><h2>{selectedCourse.name}</h2><Tag>{selectedCourse.isActive ? '启用' : '停用'}</Tag></div>
+              <dl className="basic-data-facts">
+                <div><dt>默认单价</dt><dd>¥{selectedCourse.defaultUnitPrice}</dd></div>
+                <div><dt>默认课时</dt><dd>{selectedCourse.defaultDurationMinutes} 分钟</dd></div>
+              </dl>
+              <div className="basic-data-actions">
+                <Button onClick={() => setEditor({ kind: 'course-edit', course: selectedCourse, name: selectedCourse.name, defaultUnitPrice: selectedCourse.defaultUnitPrice, defaultDurationMinutes: String(selectedCourse.defaultDurationMinutes), isActive: selectedCourse.isActive })}>编辑课程</Button>
+                {onAskAssistant && <Button onClick={() => onAskAssistant(`请查看课程「${selectedCourse.name}」本周的排课。`)}>询问助手</Button>}
+              </div>
+            </section> : <div className="basic-data-empty"><Empty description={courses.data?.length ? '没有匹配的课程' : '暂无课程资料'} /></div>}
+          </div>}
+      </>}
+    </div>
 
     <Modal open={Boolean(editor)} title={`${isEditing ? '编辑' : '新增'}${isTeacherEditor ? '教师资料' : '课程资料'}`} footer={null} onCancel={() => setEditor(null)}>
       {editor && <form className="structured-form" onSubmit={submitEditor}>

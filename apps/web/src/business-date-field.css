@@ -1,0 +1,50 @@
+.business-date-field.ant-picker {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  border-radius: 8px;
+}
+
+.business-date-field .ant-picker-input > input {
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.business-date-field-popup .ant-picker-presets li {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.business-date-field-popup .ant-picker-time-panel-column {
+  overscroll-behavior: contain;
+}
+
+.business-date-field-popup .ant-picker-time-panel-cell:has([data-business-minute-hidden]) {
+  display: none;
+}
+
+@media (max-width: 540px) {
+  .business-date-field-popup .ant-picker-panel-layout {
+    flex-direction: column;
+  }
+
+  .business-date-field-popup .ant-picker-presets > ul {
+    display: flex;
+    gap: 8px;
+  }
+
+  .business-date-field-popup .ant-picker-presets {
+    min-width: 0;
+    max-width: none;
+  }
+
+  .business-date-field-popup .ant-picker-datetime-panel {
+    flex-direction: column;
+  }
+
+  .business-date-field-popup .ant-picker-time-panel-column {
+    height: 144px;
+  }
+}

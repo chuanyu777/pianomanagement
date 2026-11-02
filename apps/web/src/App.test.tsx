@@ -199,12 +199,12 @@ describe('AI workspace', () => {
         ? { id: 'u1', username: 'owner', role: 'OWNER' }
         : String(input) === '/api/assistant/status'
         ? { available: false, core: { available: true }, agentRuntime: { available: false }, checkedAt: '2026-10-16T01:02:03.000Z', message: 'AI 助手暂不可用' }
-        : [{ id: 'l1', accountId: 'a1', teacherId: 't1', startsAt: `${today}T10:00:00+08:00`, endsAt: `${today}T11:00:00+08:00`, status: 'SCHEDULED', student: { id: 's1', name: '真实学生' }, course: { id: 'c1', name: '钢琴课' }, unitPriceSnapshot: null }];
+        : [{ id: 'l1', accountId: 'a1', teacherId: 't1', teacher: { id: 't1', name: '王老师' }, startsAt: `${today}T10:00:00+08:00`, endsAt: `${today}T11:00:00+08:00`, status: 'SCHEDULED', student: { id: 's1', name: '真实学生' }, course: { id: 'c1', name: '钢琴课' }, unitPriceSnapshot: null }];
       return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
     }));
     renderApp('/structured/schedule');
-    expect(await screen.findByText('钢琴课')).toBeInTheDocument();
-    expect(screen.getByText('真实学生')).toBeInTheDocument();
+    const lesson = await screen.findByRole('button', { name: /10:00.*11:00.*王老师.*真实学生.*钢琴课.*待上课/ });
+    expect(lesson).toBeInTheDocument();
   });
 
   it('returns to login when a stored token is rejected by Core API', async () => {
@@ -367,7 +367,7 @@ describe('AI workspace', () => {
       const path = String(input);
       if (path === '/api/auth/me') return Promise.resolve(new Response(JSON.stringify({ id: 'u1', username: 'owner', role: 'OWNER' }), { status: 200 }));
       if (path === '/api/assistant/status') return Promise.resolve(new Response(JSON.stringify({ available: false, core: { available: true }, agentRuntime: { available: false }, checkedAt: '2026-10-16T01:02:03.000Z', message: 'AI 助手暂不可用' }), { status: 200 }));
-      if (path.startsWith('/api/lessons?')) return Promise.resolve(new Response(JSON.stringify([{ id: 'l1', accountId: 'a1', teacherId: 't1', startsAt: `${today}T10:00:00+08:00`, endsAt: `${today}T11:00:00+08:00`, status: 'SCHEDULED', student: { id: 's1', name: '真实学生' }, course: { id: 'c1', name: '钢琴课' }, unitPriceSnapshot: null }]), { status: 200 }));
+      if (path.startsWith('/api/lessons?')) return Promise.resolve(new Response(JSON.stringify([{ id: 'l1', accountId: 'a1', teacherId: 't1', teacher: { id: 't1', name: '王老师' }, startsAt: `${today}T10:00:00+08:00`, endsAt: `${today}T11:00:00+08:00`, status: 'SCHEDULED', student: { id: 's1', name: '真实学生' }, course: { id: 'c1', name: '钢琴课' }, unitPriceSnapshot: null }]), { status: 200 }));
       if (path === '/api/students') return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
       if (path === '/api/teachers') return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
       if (path.startsWith('/api/students/') && path.endsWith('/course-accounts')) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));

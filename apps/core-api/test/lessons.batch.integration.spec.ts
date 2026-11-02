@@ -75,7 +75,34 @@ if (hasDatabase) {
 
       const week = { from: new Date('2026-11-01T16:00:00Z'), to: new Date('2026-11-08T16:00:00Z') };
       const teacherActor = { id: teacherUser.id, username: teacherUser.username, role: UserRole.TEACHER, teacherId: teacher.id };
-      expect((await service.listForActor(teacherActor, week)).map((lesson) => lesson.id)).toEqual([created[0]!.id]);
+      const otherTeacherUser = await prisma.user.create({
+        data: { username: `lesson-batch-other-teacher-${randomUUID()}`, passwordHash: 'test-hash', role: UserRole.TEACHER },
+      });
+      userIds.push(otherTeacherUser.id);
+      const otherTeacher = await prisma.teacher.create({
+        data: { userId: otherTeacherUser.id, name: '同时间授课的另一位教师', defaultBaseSalary: '9000.00', defaultCommissionRate: '12.5000' },
+      });
+      teacherIds.push(otherTeacher.id);
+      const otherLesson = await prisma.lesson.create({
+        data: { accountId: account.id, teacherId: otherTeacher.id, startsAt: firstStartsAt, endsAt: new Date('2026-11-02T01:45:00Z') },
+      });
+      lessonIds.push(otherLesson.id);
+
+      const ownLessons = await service.listForActor(teacherActor, week);
+      expect(ownLessons.map((lesson) => lesson.id)).toEqual([created[0]!.id]);
+      expect(ownLessons[0]?.teacher).toEqual({ id: teacher.id, name: '批量排课测试教师' });
+      const otherTeacherActor = { id: otherTeacherUser.id, username: otherTeacherUser.username, role: UserRole.TEACHER, teacherId: otherTeacher.id };
+      const otherLessons = await service.listForActor(otherTeacherActor, week);
+      expect(otherLessons.map((lesson) => lesson.id)).toEqual([otherLesson.id]);
+      // Equality is intentional: userId, salary and commission must not leak
+      // from the real Teacher relation onto the public calendar response.
+      expect(otherLessons[0]?.teacher).toEqual({ id: otherTeacher.id, name: '同时间授课的另一位教师' });
+      const ownerLessons = await service.listForActor(actor, week);
+      expect(ownerLessons).toHaveLength(2);
+      expect(ownerLessons.map((lesson) => ({ id: lesson.id, teacher: lesson.teacher }))).toEqual(expect.arrayContaining([
+        { id: created[0]!.id, teacher: { id: teacher.id, name: '批量排课测试教师' } },
+        { id: otherLesson.id, teacher: { id: otherTeacher.id, name: '同时间授课的另一位教师' } },
+      ]));
       expect(await service.listForActor({ ...teacherActor, teacherId: randomUUID() }, week)).toEqual([]);
 
       const beforeConflict = await prisma.lesson.count({ where: { teacherId: teacher.id } });

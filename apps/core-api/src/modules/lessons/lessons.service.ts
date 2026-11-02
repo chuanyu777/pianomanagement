@@ -104,6 +104,13 @@ const LESSON_SELECT = {
 } satisfies Prisma.LessonSelect;
 
 type LessonRecord = Prisma.LessonGetPayload<{ select: typeof LESSON_SELECT }>;
+// Public calendar reads add only the teaching identity. Write paths deliberately
+// retain LESSON_SELECT and their existing response/fixture contract.
+const LESSON_LIST_SELECT = {
+  ...LESSON_SELECT,
+  teacher: { select: { id: true, name: true } },
+} satisfies Prisma.LessonSelect;
+type LessonListRecord = Prisma.LessonGetPayload<{ select: typeof LESSON_LIST_SELECT }>;
 export type LessonSummary = {
   id: string;
   accountId: string;
@@ -117,6 +124,8 @@ export type LessonSummary = {
   student: { id: string; name: string };
   course: { id: string; name: string };
 };
+
+export type LessonListSummary = LessonSummary & { teacher: { id: string; name: string } };
 
 export type LessonReadFilters = {
   startsAt: Date;
@@ -442,7 +451,7 @@ export class LessonsService {
     return toSummary(lesson);
   }
 
-  async listForActor(actor: AuthenticatedActor, range?: { from: Date; to: Date }): Promise<LessonSummary[]> {
+  async listForActor(actor: AuthenticatedActor, range?: { from: Date; to: Date }): Promise<LessonListSummary[]> {
     const where = {
       ...(actor.role === 'OWNER' ? {} : { teacherId: actor.teacherId ?? '' }),
       ...(range ? { startsAt: { gte: range.from, lt: range.to } } : {}),
@@ -450,9 +459,12 @@ export class LessonsService {
     const lessons = await this.repository.lesson.findMany({
       where,
       orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
-      select: LESSON_SELECT,
+      select: LESSON_LIST_SELECT,
     });
-    return lessons.map(toSummary);
+    return lessons.map((lesson: LessonListRecord) => ({
+      ...toSummary(lesson),
+      teacher: { id: lesson.teacher.id, name: lesson.teacher.name },
+    }));
   }
 
   async listForActorInRange(

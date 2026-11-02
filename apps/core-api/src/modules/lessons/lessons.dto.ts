@@ -47,6 +47,14 @@ export class CompleteLessonBody {
   note?: string;
 }
 
+export class LessonNamedReferenceResponse {
+  @ApiProperty({ type: String, format: 'uuid' })
+  id!: string;
+
+  @ApiProperty({ type: String })
+  name!: string;
+}
+
 export class LessonResponse {
   @ApiProperty({ type: String, format: 'uuid' })
   id!: string;
@@ -75,9 +83,14 @@ export class LessonResponse {
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   completedAt!: Date | null;
 
-  @ApiProperty({ type: Object })
+  @ApiProperty({ type: LessonNamedReferenceResponse })
   student!: { id: string; name: string };
 
-  @ApiProperty({ type: Object })
+  @ApiProperty({ type: LessonNamedReferenceResponse })
   course!: { id: string; name: string };
+}
+
+export class LessonListResponse extends LessonResponse {
+  @ApiProperty({ type: LessonNamedReferenceResponse, description: '仅包含该排课授课教师的标识和姓名' })
+  teacher!: { id: string; name: string };
 }

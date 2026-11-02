@@ -52,6 +52,7 @@ describe('finance cash flow UI', () => {
     expect(within(table).queryByText('小雨 · 钢琴课')).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('报表月份'), { target: { value: '2026-11' } });
+    fireEvent.keyDown(screen.getByLabelText('报表月份'), { key: 'Enter', code: 'Enter' });
     await waitFor(() => expect(fetchMock.mock.calls.some(([path]) => String(path) === '/api/reports/cash-flow?period=2026-11')).toBe(true));
   });
 
@@ -71,12 +72,15 @@ describe('finance cash flow UI', () => {
     const user = userEvent.setup();
     renderFinance();
 
-    expect(await screen.findByRole('button', { name: '登记收支' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: '收支类型' })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: '收支类型' })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: '登记手工收支' }));
+    const registration = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(registration).getByText('登记手工收支')).toBeVisible());
+    expect(within(registration).getByRole('combobox', { name: '收支类型' })).toBeInTheDocument();
     expect(screen.getByLabelText('金额')).toBeInTheDocument();
     await user.clear(screen.getByLabelText('金额'));
     await user.type(screen.getByLabelText('金额'), '5.00');
-    await user.click(screen.getByRole('button', { name: '登记收支' }));
+    await user.click(within(registration).getByRole('button', { name: '生成确认单' }));
     await screen.findByRole('button', { name: '确认执行' });
     const previewCall = fetchMock.mock.calls.find(([path]) => String(path) === '/api/assistant/previews/structured-action');
     expect(JSON.parse(String(previewCall?.[1]?.body))).toMatchObject({ actionType: 'manual-transaction.create', command: { amount: '5.00', kind: 'INCOME', incomeCategory: 'BOOK_SALE' } });

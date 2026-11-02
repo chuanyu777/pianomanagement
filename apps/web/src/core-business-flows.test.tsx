@@ -104,7 +104,7 @@ describe('core structured business flows', () => {
     expect(commands[0]?.headers.get('Authorization')).toBe('Bearer jwt-test');
     expect(fetchMock.mock.calls.some(([path, init]) => String(path) === '/api/course-accounts/payment' && init?.method === 'POST')).toBe(false);
 
-    await user.click(screen.getByRole('button', { name: /取\s*消/ }));
+    await user.click(await screen.findByRole('button', { name: /^关\s*闭$/ }));
     await user.click(screen.getByRole('button', { name: '登记赠送' }));
     await user.clear(screen.getByLabelText('赠送金额'));
     await user.type(screen.getByLabelText('赠送金额'), '30.00');
@@ -128,7 +128,7 @@ describe('core structured business flows', () => {
       const path = String(input);
       if (path.startsWith('/api/lessons?')) {
         requests.push(path);
-        return new Response(JSON.stringify([{ id: 'lesson-1', accountId, teacherId: 'teacher-1', startsAt: '2026-10-25T16:15:00.000Z', endsAt: '2026-10-25T17:15:00.000Z', status: 'SCHEDULED', student: { id: studentId, name: '小林' }, course: { id: 'course-1', name: '钢琴课' }, unitPriceSnapshot: null }]), { status: 200 });
+        return new Response(JSON.stringify([{ id: 'lesson-1', accountId, teacherId: 'teacher-1', teacher: { id: 'teacher-1', name: '王老师' }, startsAt: '2026-10-25T16:15:00.000Z', endsAt: '2026-10-25T17:15:00.000Z', status: 'SCHEDULED', student: { id: studentId, name: '小林' }, course: { id: 'course-1', name: '钢琴课' }, unitPriceSnapshot: null }]), { status: 200 });
       }
       if (path === '/api/students') return new Response(JSON.stringify([{ id: studentId, name: '小林', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }]), { status: 200 });
       if (path === '/api/teachers') return new Response('[]', { status: 200 });

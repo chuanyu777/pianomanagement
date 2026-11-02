@@ -1,0 +1,91 @@
+.business-page.resizable-workspace {
+  display: grid;
+  grid-template-columns: var(--workspace-assistant-width) 12px minmax(0, 1fr);
+  gap: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.business-page.resizable-workspace > .page-assistant,
+.business-page.resizable-workspace > .business-workspace {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.business-page.resizable-workspace > .business-workspace {
+  overflow: auto;
+  overscroll-behavior-x: contain;
+}
+
+.business-page.resizable-workspace > .business-workspace > div {
+  min-width: 400px;
+}
+
+.business-page.resizable-workspace .resizable-workspace-divider {
+  position: relative;
+  align-self: stretch;
+  min-height: 48px;
+  background: var(--v2-bg, #f3f5f9);
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.business-page.resizable-workspace .resizable-workspace-divider::after {
+  position: absolute;
+  content: '';
+  width: 3px;
+  height: 42px;
+  top: calc(50% - 21px);
+  left: calc(50% - 1.5px);
+  border-radius: 3px;
+  background: #b8c0d1;
+}
+
+.business-page.resizable-workspace .resizable-workspace-divider:hover::after,
+.business-page.resizable-workspace .resizable-workspace-divider:focus-visible::after,
+.business-page.resizable-workspace.is-resizing .resizable-workspace-divider::after {
+  background: var(--v2-blue, #315cff);
+}
+
+.business-page.resizable-workspace .resizable-workspace-divider:focus-visible {
+  outline: 2px solid var(--v2-blue, #315cff);
+  outline-offset: -2px;
+  z-index: 1;
+}
+
+.business-page.resizable-workspace.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.business-page.resizable-workspace .page-quick-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+
+.business-page.resizable-workspace .page-quick-prompts button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+@media (max-width: 900px) {
+  .business-page.resizable-workspace {
+    display: block;
+    height: auto;
+  }
+
+  .business-page.resizable-workspace .resizable-workspace-divider {
+    display: none;
+  }
+
+  .business-page.resizable-workspace > .business-workspace > div {
+    min-width: 0;
+  }
+}

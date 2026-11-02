@@ -9,6 +9,8 @@ import { AUTH_EXPIRED_EVENT, confirmAssistantPreview, createAssistantIds, getAss
 import { clearSession, getAccessToken, getRefreshToken, refreshSession, revokeSession, ServiceUnavailableError, SessionExpiredError, storeSession } from './auth-session.js';
 import { PreviewFacts } from './preview-facts.js';
 import { StructuredWorkbench } from './structured-workbench.js';
+import { amountTone } from './amount-tone.js';
+import { ResizableWorkspace } from './resizable-workspace.js';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -229,6 +231,11 @@ function isTaskDetail(value: unknown): value is AssistantTaskDetail { if (!isTas
 function overviewMoney(value: string | undefined): string {
   return value ? `¥${value}` : '—';
 }
+function overviewWeekStart(day: string): string {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+}
 function overviewRecordKind(value: string): string { return ({ PAYMENT: '交费', GIFT: '赠送', LESSON_CONSUMPTION: '课消', LESSON_CONSUMPTION_REVERSAL: '课消冲正', PAYMENT_REVERSAL: '交费冲正', GIFT_REVERSAL: '赠送冲正', REFUND_PAID: '退款', REFUND_GIFT_CLEARING: '赠送清零' } as Record<string, string>)[value] ?? value; }
 function useHomeOverview(user: AuthUser | null) {
   return useQuery({ queryKey: ['home-overview', user?.id ?? null, user?.role ?? null, user?.teacherId ?? null], queryFn: () => apiRequest('/api/dashboard/overview', isDashboardOverview), refetchInterval: 30_000 });
@@ -374,10 +381,11 @@ function StructuredBusinessPage({ section }: { section: 'students' | 'schedule' 
   const { assistantState, user } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null }>();
   const [resultTarget, setResultTarget] = useState<HTMLDivElement | null>(null);
   const [showResult, setShowResult] = useState(false);
-  return <section className={`business-page business-page-${section}`}>
-    <AssistantCompanion assistantState={assistantState} section={section} user={user} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} />
-    <div aria-label="业务工作区" className="business-workspace panel-surface"><div hidden={showResult}><StructuredWorkbench section={section} role={user?.role ?? ''} /></div><div hidden={!showResult} ref={setResultTarget} /><div hidden={!showResult} className="business-result-actions"><Button onClick={() => setShowResult(false)}>返回业务功能</Button></div></div>
-  </section>;
+  const [assistantDraft, setAssistantDraft] = useState<{ text: string; revision: number } | null>(null);
+  return <ResizableWorkspace className={`business-page-${section}`}>
+    <AssistantCompanion assistantState={assistantState} section={section} user={user} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} draft={assistantDraft} />
+    <div aria-label="业务工作区" className="business-workspace panel-surface"><div hidden={showResult}><StructuredWorkbench section={section} role={user?.role ?? ''} onAskAssistant={(text) => setAssistantDraft((current) => ({ text, revision: (current?.revision ?? 0) + 1 }))} /></div><div hidden={!showResult} ref={setResultTarget} /><div hidden={!showResult} className="business-result-actions"><Button onClick={() => setShowResult(false)}>返回业务功能</Button></div></div>
+  </ResizableWorkspace>;
 }
 
 const pageAssistantCopy = {
@@ -387,7 +395,7 @@ const pageAssistantCopy = {
   settings: { title: '教师与课程', welcome: '在这里维护教师资料、默认薪酬和课程信息，也可以告诉我你想要办理的事项。', suggestions: ['查看教师', '查看课程', '新增课程'] },
 } as const;
 
-function AssistantCompanion({ assistantState, section, user, resultTarget, onShowResult }: { assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; resultTarget: HTMLDivElement | null; onShowResult: () => void }) {
+function AssistantCompanion({ assistantState, section, user, resultTarget, onShowResult, draft }: { assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; resultTarget: HTMLDivElement | null; onShowResult: () => void; draft: { text: string; revision: number } | null }) {
   const copy = pageAssistantCopy[section];
   const queryClient = useQueryClient();
   const initialRef = useRef<PersistedAssistantSession | null>(null);
@@ -401,6 +409,14 @@ function AssistantCompanion({ assistantState, section, user, resultTarget, onSho
   const [workspaceThreadId, setWorkspaceThreadId] = useState(() => initialRef.current?.workspaceThreadId ?? threadId);
   const [previewRecheckVersion, setPreviewRecheckVersion] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!draft) return;
+    setPrompt(draft.text);
+    const input = window.document.querySelector<HTMLTextAreaElement>('.page-chat-composer textarea');
+    input?.focus();
+    input?.scrollIntoView?.({ block: 'nearest' });
+  }, [draft]);
 
   useEffect(() => {
     writeAssistantSession(user, { threadId, messages, ...(workspace ? { workspace, workspaceThreadId } : {}) });
@@ -446,11 +462,11 @@ function AssistantCompanion({ assistantState, section, user, resultTarget, onSho
   };
   const visibleMessages = messages.slice(-8);
   return <section aria-label={`${copy.title}经营助手`} className="page-assistant panel-surface">
-    <div className="page-assistant-head"><div><span className="eyebrow">AI OPERATING ASSISTANT</span><Title level={2}>{copy.title}</Title><p>对话、补充信息、确认和结果都在这里连续呈现</p></div><span className={`assistant-availability ${assistantState.data?.available ? 'is-online' : ''}`}>{assistantState.data?.available ? '在线' : '暂不可用'}</span></div>
+    <div className="page-assistant-head"><div><span className="eyebrow">AI OPERATING ASSISTANT</span><Title level={2}>{copy.title}</Title></div><span className={`assistant-availability ${assistantState.data?.available ? 'is-online' : ''}`}>{assistantState.data?.available ? '在线' : '暂不可用'}</span></div>
     <div className="page-chat-stream"><div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{copy.welcome}</p></div>{visibleMessages.map((message) => <div className={`chat-message ${message.role}`} key={message.id}><span className="chat-avatar">{message.role === 'user' ? (user?.username.slice(0, 1).toUpperCase() || '你') : 'AI'}</span><p>{formatAssistantReply(message.text)}</p></div>)}{reply && <div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{formatAssistantReply(reply)}</p></div>}</div>
     {workspace && <button className="workspace-result-link" onClick={onShowResult} type="button">查看本次对话结果 →</button>}
     {workspace && resultTarget && createPortal(<section aria-label="AI 工作区结果" className="business-ai-workspace"><div className="context-heading"><div><span className="eyebrow">CURRENT TASK</span><Title level={3}>本次对话结果</Title></div></div><WorkspaceContent document={workspace} interactionDisabled={status === 'running' || workspaceThreadId !== threadId} isCurrentWorkspace={workspaceThreadId === threadId} onCandidateSelect={selectCandidate} onPreviewConfirmed={() => { void queryClient.invalidateQueries(); }} onRecoveryAction={recoverWorkspace} previewRecheckVersion={previewRecheckVersion} /></section>, resultTarget)}
-    <div className="page-chat-composer"><div className="page-quick-prompts">{copy.suggestions.map((item) => <button disabled={status === 'running'} key={item} onClick={() => setPrompt(item)} type="button">{item}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void send(prompt); }}><TextArea aria-label={`${copy.title}经营问题`} autoSize={{ minRows: 2, maxRows: 4 }} disabled={status === 'running'} onChange={(event) => setPrompt(event.target.value)} placeholder="直接描述你想查询或办理的事情…" value={prompt} /><Button disabled={!prompt.trim() || status === 'running'} htmlType="submit" type="primary">{status === 'running' ? '处理中…' : '发送 ↑'}</Button></form></div>
+    <div className="page-chat-composer"><div className="page-quick-prompts">{copy.suggestions.map((item) => <button disabled={status === 'running'} key={item} onClick={() => setPrompt(item)} type="button">{item}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void send(prompt); }}><TextArea aria-label={`${copy.title}经营问题`} autoSize={{ minRows: 2, maxRows: 4 }} disabled={status === 'running'} onChange={(event) => setPrompt(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(prompt); } }} placeholder="直接描述你想查询或办理的事情…" value={prompt} /><Button disabled={!prompt.trim() || status === 'running'} htmlType="submit" type="primary">{status === 'running' ? '处理中…' : '发送 ↑'}</Button></form></div>
   </section>;
 }
 
@@ -824,8 +840,7 @@ function WorkspaceHome() {
   };
   return (
     <section aria-labelledby="welcome-heading" className="home-view">
-      <div className="home-intro"><div><span className="eyebrow accent-eyebrow">AI-FIRST OPERATING DESK</span><Title id="welcome-heading" level={1}>把经营问题交给工作台。</Title>
-        <p className="intro-copy">今天先处理什么？用自然语言描述目标，查询结果和待确认操作都会在同一处连续呈现。</p></div>
+      <div className="home-intro"><div><span className="eyebrow accent-eyebrow">AI-FIRST OPERATING DESK</span><Title id="welcome-heading" level={1}>把经营问题交给工作台。</Title></div>
         <div className="date-chip"><span className="date-label">业务日</span><strong>尚未设置</strong></div></div>
       {isUnavailable && <Alert className="availability-alert" description={user?.role === 'TEACHER' ? '助手暂时无法回答问题，你仍可以使用排课页面。' : '助手暂时无法回答问题，你仍可以使用学生、排课和收支页面。'} title="助手暂时不可用" showIcon type="warning" />}
       <Card className="prompt-card" variant="borderless">
@@ -839,7 +854,7 @@ function WorkspaceHome() {
         </section>
         <div className="suggestion-row" aria-label="示例入口"><span className="suggestion-label">可以从这里开始</span>{(user?.role === 'TEACHER' ? ['查看今日排课', '查看明天排课', '查看我的课程业绩'] : suggestions).map((suggestion) => <button className="suggestion-button" disabled={isBusy} key={suggestion} onClick={() => setPrompt(suggestion)} type="button">{suggestion}</button>)}</div>
         <form onSubmit={submit}>
-          <TextArea aria-label="经营问题" autoSize={{ minRows: 2, maxRows: 4 }} disabled={isBusy} onChange={(event) => setPrompt(event.target.value)} placeholder="直接描述你想查询或办理的事情…" value={prompt} />
+          <TextArea aria-label="经营问题" autoSize={{ minRows: 2, maxRows: 4 }} disabled={isBusy} onChange={(event) => setPrompt(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submitMessage(prompt); } }} placeholder="直接描述你想查询或办理的事情…" value={prompt} />
           <div className="prompt-footer"><Text className="prompt-hint">{isUnavailable ? 'AI 服务当前不可用，提交后会显示连接结果。' : '消息将发送给 AI 助手；写入操作仍须由你确认。'}</Text><div className="prompt-actions">{isBusy && <Button onClick={() => void submitMessage('取消当前办理', true)} size="small">取消当前办理</Button>}<Button disabled={prompt.trim().length === 0 || isBusy} loading={runStatus === 'connecting'} htmlType="submit" type="primary">{isBusy ? '处理中…' : '发送消息'} <span aria-hidden="true">↗</span></Button></div></div>
         </form>
         {runStatus !== 'idle' && <section aria-label="AI 运行结果" className={`assistant-run assistant-run-${runStatus}`}>
@@ -861,29 +876,29 @@ function HomeOverview({ user, overview }: { user: AuthUser | null; overview: Ret
   const isOwner = user?.role === 'OWNER';
   const lessons = overview.data?.today.lessons ?? [];
   const pendingCount = overview.data?.today.pendingCount ?? 0;
-  const frozenStudents = overview.data?.students?.frozenCount;
   const blockers = overview.data?.preclose?.blockers ?? [];
   const todayLabel = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'long', day: 'numeric', weekday: 'short' }).format(new Date());
   return <section aria-labelledby="overview-heading" className="home-overview">
-    <div className="overview-heading"><div><span className="eyebrow">OPERATING SNAPSHOT</span><Title id="overview-heading" level={3}>经营概览</Title><p>查看当前业务情况，及时处理待办事项。</p></div><span className="overview-date">{todayLabel}</span></div>
+    <div className="overview-heading"><div><span className="eyebrow">OPERATING SNAPSHOT</span><Title id="overview-heading" level={3}>经营概览</Title></div><span className="overview-date">{todayLabel}</span></div>
     <div className="overview-metrics">
-      <OverviewMetric label="待确认课消" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : String(pendingCount)} hint={overview.isError ? '请稍后重试' : pendingCount ? '存在已结束但未确认课程' : '今天没有待处理课消'} tone={pendingCount ? 'warning' : 'neutral'} />
-      <OverviewMetric label="冻结学生" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : isOwner ? String(frozenStudents ?? 0) : '仅店主可见'} hint={isOwner ? '来自学生学籍状态' : '当前账号没有学生资料权限'} tone={frozenStudents ? 'warning' : 'neutral'} />
-      <OverviewMetric label="本月经营利润" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : isOwner ? overviewMoney(overview.data?.finance?.operatingProfit) : '仅店主可见'} hint={isOwner ? '按业务月份统计' : '当前账号没有报表权限'} tone="positive" />
-      <OverviewMetric label="关账状态" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : isOwner ? (overview.data?.preclose?.closed ? '已关账' : '尚未关账') : '仅店主可见'} hint={overview.isError ? '请稍后重试' : isOwner ? (blockers.length ? `${blockers.length} 项阻断检查` : '当前没有阻断项') : '当前账号没有关账权限'} tone={blockers.length ? 'warning' : 'neutral'} />
+      <OverviewMetric label="待确认课消" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : String(pendingCount)} hint={overview.isError ? '请稍后重试' : '今日已结束 · 查看课表 →'} tone={pendingCount ? 'warning' : 'neutral'} onClick={() => navigate('/schedule')} />
+      <OverviewMetric label="今日排课" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : `${overview.data?.today.total ?? 0} 节`} hint="查看全部课表 →" tone="neutral" onClick={() => navigate('/schedule')} />
+      <OverviewMetric label="本月经营利润" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : isOwner ? overviewMoney(overview.data?.finance?.operatingProfit) : '仅店主可见'} hint={isOwner ? '查看经营报表 →' : '当前账号没有报表权限'} tone={isOwner && !overview.isLoading && !overview.isError ? amountTone(overview.data?.finance?.operatingProfit) : 'neutral'} onClick={isOwner ? () => navigate('/finance') : undefined} />
+      <OverviewMetric label="关账状态" value={overview.isLoading ? '…' : overview.isError ? '暂不可用' : isOwner ? (overview.data?.preclose?.closed ? '已关账' : '尚未关账') : '仅店主可见'} hint={overview.isError ? '请稍后重试' : isOwner ? '查看关账检查 →' : '当前账号没有关账权限'} tone={blockers.length ? 'warning' : 'neutral'} onClick={isOwner ? () => navigate('/finance?tab=periods') : undefined} />
     </div>
     <div className="overview-panels">
-      <section className="overview-panel" aria-labelledby="today-lessons-heading"><div className="overview-panel-heading"><div><span className="eyebrow">TODAY</span><h4 id="today-lessons-heading">今日排课</h4><p>{lessons.length ? `共 ${lessons.length} 节，状态来自实时排课` : '今天暂无排课记录'}</p></div><button onClick={() => navigate('/schedule')} type="button">进入排课 →</button></div>
-        {overview.isError ? <Alert message="暂时无法读取经营概览" type="warning" showIcon /> : lessons.length ? <div className="overview-list">{lessons.slice(0, 4).map((lesson) => <div className="overview-list-row" key={lesson.id}><strong>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(lesson.startsAt))}</strong><span>{lesson.student.name} · {lesson.course.name}</span><Tag>{lesson.status === 'COMPLETED' ? '已完成' : lesson.status === 'CANCELLED' ? '已取消' : '待处理'}</Tag></div>)}</div> : <div className="overview-empty">创建排课后，今日课程会显示在这里。</div>}
+      <section className="overview-panel" aria-labelledby="today-lessons-heading"><div className="overview-panel-heading"><div><h4 id="today-lessons-heading">今日排课</h4><p>{lessons.length ? `共 ${overview.data?.today.total ?? lessons.length} 节 · 最多显示 3 节` : '今天暂无排课记录'}</p></div><button onClick={() => navigate('/schedule')} type="button">进入排课 →</button></div>
+        {overview.isError ? <Alert message="暂时无法读取经营概览" type="warning" showIcon /> : lessons.length ? <div className="overview-list">{lessons.slice(0, 3).map((lesson) => <Link aria-label={`查看${lesson.student.name}的排课`} className="overview-list-row overview-list-link" key={lesson.id} to={`/schedule?week=${overview.data?.businessDate ? overviewWeekStart(overview.data.businessDate) : ''}&lesson=${encodeURIComponent(lesson.id)}`}><strong>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(lesson.startsAt))}</strong><span>{lesson.student.name} · {lesson.course.name}</span><Tag>{lesson.status === 'COMPLETED' ? '已完成' : lesson.status === 'CANCELLED' ? '已取消' : '待处理'}</Tag></Link>)}</div> : <div className="overview-empty">暂无排课。</div>}
       </section>
-      <section className="overview-panel" aria-labelledby="overview-actions-heading"><div className="overview-panel-heading"><div><span className="eyebrow">QUICK ENTRY</span><h4 id="overview-actions-heading">常用入口</h4><p>直接查看和办理日常业务。</p></div></div><div className="overview-actions">{isOwner && <><button onClick={() => navigate('/students')} type="button"><strong>学生与账户</strong><span>查找学生、课程账户和余额 →</span></button><button onClick={() => navigate('/finance')} type="button"><strong>收支与报表</strong><span>月度结果、工资和关账 →</span></button></>}</div><div className="recent-tasks"><span className="eyebrow">RECENT TASKS</span>{tasks.data?.slice(0, 3).map((task) => <button key={task.threadId} onClick={() => navigate(`/tasks/${task.threadId}`)} type="button"><span>{task.title}</span><em>{task.latestStatus === 'completed' ? '已回复' : task.latestStatus === 'failed' ? '需重试' : '进行中'}</em></button>)}{tasks.isError ? <small>任务列表暂不可用</small> : !tasks.isLoading && !tasks.data?.length && <small>暂无已保存任务</small>}</div>{blockers.length > 0 && <Alert className="overview-alert" message="本月关账存在阻断项" description={blockers.slice(0, 2).map((item) => item.message).join('；')} showIcon type="warning" />}</section>
+      {isOwner && overview.data && <><section className="overview-panel"><div className="overview-panel-heading"><div><h4>待处理事项</h4><p>截至 {formatDateTime(overview.data.asOf)}</p></div></div><div className="overview-actions"><button onClick={() => navigate('/students')} type="button"><strong>欠费学生</strong><span>{overview.data.students?.arrearsCount ?? '—'} 人 →</span></button><button onClick={() => navigate('/finance?tab=payroll')} type="button"><strong>待支付工资</strong><span>{overview.data.preclose?.unpaidPayrollCount ?? '—'} 笔 →</span></button><button onClick={() => navigate('/finance?tab=periods')} type="button"><strong>关账阻断项</strong><span>{blockers.length} 项 →</span></button></div></section><section className="overview-panel"><div className="overview-panel-heading"><div><h4>最近账户流水</h4><p>按时间倒序 · 最多显示 3 笔</p></div><button onClick={() => navigate('/students')} type="button">查看账户 →</button></div>{overview.data.recentRecords?.length ? <div className="overview-list">{overview.data.recentRecords.slice(0, 3).map((record) => <Link aria-label={`查看${record.studentName}的账户`} className="overview-list-row overview-list-link" key={record.id} to={`/students?q=${encodeURIComponent(record.studentName)}`}><strong>{formatDateTime(record.occurredAt)}</strong><span>{record.studentName} · {record.courseName}</span><span>{overviewRecordKind(record.kind)} · 实付 {record.paidDelta} / 赠送 {record.giftDelta}</span></Link>)}</div> : <div className="overview-empty">暂无账户流水</div>}</section></>}
+      <section className="overview-panel" aria-labelledby="overview-actions-heading"><div className="overview-panel-heading"><div><h4 id="overview-actions-heading">常用入口</h4></div></div><div className="overview-actions">{isOwner && <><button onClick={() => navigate('/students')} type="button"><strong>学生与账户</strong><span>查找学生、课程账户和余额 →</span></button><button onClick={() => navigate('/finance')} type="button"><strong>收支与报表</strong><span>月度结果、工资和关账 →</span></button></>}<button onClick={() => navigate('/schedule')} type="button"><strong>排课与课消</strong><span>查看课程 →</span></button></div><div className="recent-tasks"><strong>最近任务</strong>{tasks.data?.slice(0, 3).map((task) => <button key={task.threadId} onClick={() => navigate(`/tasks/${task.threadId}`)} type="button"><span>{task.title}</span><em>{task.latestStatus === 'completed' ? '已回复' : task.latestStatus === 'failed' ? '需重试' : '进行中'}</em></button>)}{tasks.isError ? <small>任务列表暂不可用</small> : !tasks.isLoading && !tasks.data?.length && <small>暂无已保存任务</small>}</div></section>
     </div>
-    {isOwner && overview.data && <div className="overview-panels"><section className="overview-panel"><div className="overview-panel-heading"><div><span className="eyebrow">ATTENTION</span><h4>待处理事项</h4><p>截至 {formatDateTime(overview.data.asOf)}</p></div></div><div className="overview-actions"><button onClick={() => navigate('/students')} type="button"><strong>欠费学生</strong><span>{overview.data.students?.arrearsCount ?? '—'} 人 →</span></button><button onClick={() => navigate('/finance?tab=payroll')} type="button"><strong>待支付工资</strong><span>{overview.data.preclose?.unpaidPayrollCount ?? '—'} 笔 →</span></button></div></section><section className="overview-panel"><div className="overview-panel-heading"><div><span className="eyebrow">RECENT ACTIVITY</span><h4>最近账户流水</h4><p>按业务发生时间倒序</p></div><button onClick={() => navigate('/students')} type="button">查看账户 →</button></div>{overview.data.recentRecords?.length ? <div className="overview-list">{overview.data.recentRecords.map((record) => <div className="overview-list-row" key={record.id}><strong>{formatDateTime(record.occurredAt)}</strong><span>{record.studentName} · {record.courseName}</span><span>{overviewRecordKind(record.kind)} · 实付 {record.paidDelta} / 赠送 {record.giftDelta}</span></div>)}</div> : <div className="overview-empty">暂无账户流水</div>}</section></div>}
   </section>;
 }
 
-function OverviewMetric({ label, value, hint, tone }: { label: string; value: string; hint: string; tone: 'neutral' | 'positive' | 'warning' }) {
-  return <div className={`overview-metric tone-${tone}`}><span>{label}</span><strong>{value}</strong><small>{hint}</small></div>;
+function OverviewMetric({ label, value, hint, tone, onClick }: { label: string; value: string; hint: string; tone: 'neutral' | 'positive' | 'negative' | 'warning'; onClick?: (() => void) | undefined }) {
+  const content = <><span>{label}</span><strong>{value}</strong><small>{hint}</small></>;
+  return onClick ? <button className={`overview-metric tone-${tone} is-link`} onClick={onClick} type="button">{content}</button> : <div className={`overview-metric tone-${tone}`}>{content}</div>;
 }
 
 function WorkflowStep({ detail, number, title }: { detail: string; number: string; title: string }) {

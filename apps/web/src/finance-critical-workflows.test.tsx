@@ -50,7 +50,8 @@ describe('critical finance workflows', () => {
     await screen.findByRole('table', { name: '现金流水列表' });
     await user.click(screen.getByRole('tab', { name: '工资' }));
     await user.click(await screen.findByRole('button', { name: '登记支付' }));
-    await user.click(await screen.findByRole('button', { name: '确认支付登记' }));
+    const payment = screen.getByRole('dialog', { name: /登记工资支付/ });
+    await user.click(within(payment).getByRole('button', { name: '生成确认单' }));
     await user.click(await screen.findByRole('button', { name: '确认执行' }));
     expect(await screen.findByText('执行回执')).toBeInTheDocument();
     const payrollTable = await screen.findByRole('table', { name: '工资列表' });
@@ -135,12 +136,13 @@ describe('critical finance workflows', () => {
     renderWorkbench('finance', '/finance?tab=manual&period=2026-10');
 
     await screen.findByRole('table', { name: '现金流水列表' });
+    await user.click(screen.getByRole('button', { name: '登记手工收支' }));
     await user.click(screen.getByRole('combobox', { name: '收支类型' }));
     await user.click(await screen.findByText('支出', { selector: '.ant-select-item-option-content' }));
     await user.clear(screen.getByLabelText('金额'));
     await user.type(screen.getByLabelText('金额'), '25.00');
     await user.type(screen.getByLabelText('备注'), '房租');
-    await user.click(screen.getByRole('button', { name: '登记收支' }));
+    await user.click(screen.getByRole('button', { name: '生成确认单' }));
     await user.click(await screen.findByRole('button', { name: '确认执行' }));
 
     expect(await screen.findByText('执行回执')).toBeInTheDocument();
@@ -185,7 +187,7 @@ describe('critical finance workflows', () => {
     expect(await screen.findByText('执行回执')).toBeInTheDocument();
     expect(screen.getAllByText('¥100.00').length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText('refund-1')).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('退学')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: /小周.*退学/ })).toBeInTheDocument());
     expect(fetchMock.mock.calls.some(([path, request]) => String(path).endsWith(`/previews/${previewId}/confirm`) && request?.method === 'POST')).toBe(true);
   });
 });

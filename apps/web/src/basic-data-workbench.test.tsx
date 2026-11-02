@@ -8,9 +8,23 @@ const previewId = 'c87af11b-a40f-42cc-92b1-d176c9ad2ea1';
 const teacherId = '61ae3054-8c04-4f64-9ef1-2f912cd337c4';
 const courseId = 'aa3511c0-e9be-4ca5-bef3-ff9e8e725ce5';
 
-function renderWorkbench() {
+function renderWorkbench(props: { onAskAssistant?: ((prompt: string) => void) | undefined } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={queryClient}><BasicDataWorkbench /></QueryClientProvider>);
+  return render(<QueryClientProvider client={queryClient}><BasicDataWorkbench {...props} /></QueryClientProvider>);
+}
+
+function mockDirectoryRecords() {
+  const teachers = [
+    { id: teacherId, userId: null, username: null, name: '林老师', isActive: true, defaultBaseSalary: '3200.00', defaultCommissionRate: '8.0000' },
+    { id: 'teacher-second', userId: 'user-second', username: 'chen.teacher', name: '陈老师', isActive: false, defaultBaseSalary: '2600.00', defaultCommissionRate: '6.0000' },
+  ];
+  const courses = [
+    { id: courseId, name: '钢琴主课', defaultUnitPrice: '280.00', defaultDurationMinutes: 45, isActive: true },
+    { id: 'course-second', name: '乐理课', defaultUnitPrice: '160.00', defaultDurationMinutes: 60, isActive: false },
+  ];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(String(input) === '/api/teachers' ? teachers : courses), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
 }
 
 function pendingPreview() {
@@ -18,6 +32,93 @@ function pendingPreview() {
 }
 
 describe('BasicDataWorkbench', () => {
+  it('searches a compact teacher directory by name or login and shows only the selected details', async () => {
+    mockDirectoryRecords();
+    const user = userEvent.setup();
+    renderWorkbench();
+
+    const directory = await screen.findByRole('complementary', { name: '教师目录' });
+    await user.click(await within(directory).findByRole('button', { name: /陈老师/ }));
+    expect(screen.getByRole('heading', { name: '陈老师' })).toBeInTheDocument();
+    expect(screen.getByText('¥2600.00')).toBeInTheDocument();
+    expect(screen.queryByText('¥3200.00')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '开通登录账号' })).not.toBeInTheDocument();
+
+    const search = screen.getByRole('textbox', { name: '搜索教师姓名或登录账号' });
+    await user.type(search, ' CHEN.TEACHER ');
+    expect(within(directory).getByRole('button', { name: /陈老师/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(directory).queryByRole('button', { name: /林老师/ })).not.toBeInTheDocument();
+    await user.clear(search);
+    await user.type(search, '林');
+    expect(screen.getByRole('heading', { name: '林老师' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '开通登录账号' })).toBeInTheDocument();
+    await user.clear(search);
+    await user.type(search, '不存在');
+    expect(screen.getByText('没有匹配的教师')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '修改薪酬' })).not.toBeInTheDocument();
+  });
+
+  it('searches courses and retains each directory selection when switching tabs', async () => {
+    mockDirectoryRecords();
+    const user = userEvent.setup();
+    renderWorkbench();
+    await user.click(await screen.findByRole('button', { name: /陈老师/ }));
+    await user.click(screen.getByRole('tab', { name: '课程管理' }));
+    await user.type(screen.getByRole('textbox', { name: '搜索课程名称' }), '乐理');
+    const detail = screen.getByRole('region', { name: '课程详情' });
+    expect(within(detail).getByRole('heading', { name: '乐理课' })).toBeInTheDocument();
+    expect(within(detail).getByText('¥160.00')).toBeInTheDocument();
+    expect(within(detail).getByText('60 分钟')).toBeInTheDocument();
+    expect(within(detail).getByText('停用')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: '教师管理' }));
+    expect(screen.getByRole('heading', { name: '陈老师' })).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: '课程管理' }));
+    expect(screen.getByRole('textbox', { name: '搜索课程名称' })).toHaveValue('乐理');
+    expect(screen.getByRole('heading', { name: '乐理课' })).toBeInTheDocument();
+  });
+
+  it('supports keyboard tab navigation with associated panels', async () => {
+    mockDirectoryRecords();
+    const user = userEvent.setup();
+    renderWorkbench();
+    const teachersTab = screen.getByRole('tab', { name: '教师管理' });
+    teachersTab.focus();
+    await user.keyboard('{ArrowRight}');
+    const coursesTab = screen.getByRole('tab', { name: '课程管理' });
+    expect(coursesTab).toHaveFocus();
+    expect(coursesTab).toHaveAttribute('aria-selected', 'true');
+    expect(teachersTab).toHaveAttribute('tabindex', '-1');
+    expect(screen.getByRole('tabpanel', { name: '课程管理' })).toHaveAttribute('id', coursesTab.getAttribute('aria-controls'));
+    await user.keyboard('{Home}');
+    expect(teachersTab).toHaveFocus();
+    expect(teachersTab).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{End}{ArrowLeft}');
+    expect(teachersTab).toHaveFocus();
+  });
+
+  it('offers contextual assistant drafts for the selected record without requesting previews or executing writes', async () => {
+    const fetchMock = mockDirectoryRecords();
+    const onAskAssistant = vi.fn();
+    const user = userEvent.setup();
+    renderWorkbench({ onAskAssistant });
+    await user.click(await screen.findByRole('button', { name: /陈老师/ }));
+    await user.click(screen.getByRole('button', { name: '询问助手' }));
+    expect(onAskAssistant).toHaveBeenLastCalledWith('请查看教师「陈老师」本周的排课。');
+    await user.click(screen.getByRole('tab', { name: '课程管理' }));
+    await user.click(screen.getByRole('button', { name: /乐理课/ }));
+    await user.click(screen.getByRole('button', { name: '询问助手' }));
+    expect(onAskAssistant).toHaveBeenLastCalledWith('请查看课程「乐理课」本周的排课。');
+    expect(onAskAssistant).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([path, init]) => ['/api/teachers', '/api/courses'].includes(String(path)) && (init?.method ?? 'GET') === 'GET')).toBe(true);
+  });
+
+  it('hides the assistant action when no draft callback is provided', async () => {
+    mockDirectoryRecords();
+    renderWorkbench({ onAskAssistant: undefined });
+    expect(await screen.findByRole('heading', { name: '林老师' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '询问助手' })).not.toBeInTheDocument();
+  });
+
   it('loads actual teacher and course records from Core', async () => {
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -32,9 +133,9 @@ describe('BasicDataWorkbench', () => {
 
     renderWorkbench();
 
-    expect(await screen.findByText('真实教师')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '真实教师' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('tab', { name: '课程管理' }));
-    expect(await screen.findByText('真实课程')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '真实课程' })).toBeInTheDocument();
   });
 
   it('creates teacher records through structured-action preview and browser confirmation', async () => {

@@ -8,6 +8,19 @@ import './basic-data-workbench.css';
 
 const { Title } = Typography;
 const TOKEN_KEY = 'pianomanager.accessToken';
+
+/** 金额补两位小数、提成比例补四位小数；用户只填整数时自动补齐，否则 Core 校验会直接拒绝。 */
+function toMoneyValue(value: string): string {
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+  return trimmed && Number.isFinite(parsed) ? parsed.toFixed(2) : trimmed;
+}
+
+function toRateValue(value: string): string {
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+  return trimmed && Number.isFinite(parsed) ? parsed.toFixed(4) : trimmed;
+}
 type Teacher = components['schemas']['TeacherResponse'];
 type TeacherLoginAccountRequest = components['schemas']['OpenTeacherLoginAccountBody'];
 type Course = components['schemas']['CourseResponse'];
@@ -93,19 +106,19 @@ export function BasicDataWorkbench({ onAskAssistant }: { onAskAssistant?: ((prom
     if (!editor) return;
     if (editor.kind === 'teacher-create') {
       if (!/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(editor.baseSalary) || !/^(?:0|[1-9]\d{0,2})\.\d{4}$/.test(editor.commissionRate)) { setFeedback({ type: 'error', text: '基本工资需为两位小数，提成比例需为四位小数。' }); return; }
-      void openPreview('teacher.create', { name: editor.name.trim(), baseSalary: editor.baseSalary, commissionRate: editor.commissionRate }, '教师资料已创建');
+      void openPreview('teacher.create', { name: editor.name.trim(), baseSalary: toMoneyValue(editor.baseSalary), commissionRate: toRateValue(editor.commissionRate) }, '教师资料已创建');
     } else if (editor.kind === 'teacher-edit') {
       if (!/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(editor.baseSalary) || !/^(?:0|[1-9]\d{0,2})\.\d{4}$/.test(editor.commissionRate)) { setFeedback({ type: 'error', text: '基本工资需为两位小数，提成比例需为四位小数。' }); return; }
-      void openPreview('teacher.compensation.update', { teacherId: editor.teacher.id, baseSalary: editor.baseSalary, commissionRate: editor.commissionRate }, '教师默认薪酬已更新');
+      void openPreview('teacher.compensation.update', { teacherId: editor.teacher.id, baseSalary: toMoneyValue(editor.baseSalary), commissionRate: toRateValue(editor.commissionRate) }, '教师默认薪酬已更新');
     } else if (editor.kind === 'course-create') {
       if (!/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(editor.defaultUnitPrice) || !Number.isInteger(Number(editor.defaultDurationMinutes)) || Number(editor.defaultDurationMinutes) < 1 || Number(editor.defaultDurationMinutes) > 480) { setFeedback({ type: 'error', text: '课程单价需为两位小数，课时需为 1 至 480 分钟。' }); return; }
-      void openPreview('course.create', { name: editor.name.trim(), defaultUnitPrice: editor.defaultUnitPrice, defaultDurationMinutes: Number(editor.defaultDurationMinutes) }, '课程已创建');
+      void openPreview('course.create', { name: editor.name.trim(), defaultUnitPrice: toMoneyValue(editor.defaultUnitPrice), defaultDurationMinutes: Number(editor.defaultDurationMinutes) }, '课程已创建');
     } else {
       if (!/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(editor.defaultUnitPrice) || !Number.isInteger(Number(editor.defaultDurationMinutes)) || Number(editor.defaultDurationMinutes) < 1 || Number(editor.defaultDurationMinutes) > 480) { setFeedback({ type: 'error', text: '课程单价需为两位小数，课时需为 1 至 480 分钟。' }); return; }
       void openPreview('course.update', {
         courseId: editor.course.id,
         ...(editor.name !== editor.course.name ? { name: editor.name.trim() } : {}),
-        ...(editor.defaultUnitPrice !== editor.course.defaultUnitPrice ? { defaultUnitPrice: editor.defaultUnitPrice } : {}),
+        ...(editor.defaultUnitPrice !== editor.course.defaultUnitPrice ? { defaultUnitPrice: toMoneyValue(editor.defaultUnitPrice) } : {}),
         ...(Number(editor.defaultDurationMinutes) !== editor.course.defaultDurationMinutes ? { defaultDurationMinutes: Number(editor.defaultDurationMinutes) } : {}),
         ...(editor.isActive !== editor.course.isActive ? { isActive: editor.isActive } : {}),
       }, '课程资料已更新');

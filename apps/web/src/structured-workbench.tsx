@@ -64,6 +64,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * 金额输入统一规范成两位小数字符串：用户填 230、230.5 都应被接受，
+ * 否则 Core 的金额校验会直接拒绝。非数字原样返回，交给 Core 报错。
+ */
+function toMoneyString(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return trimmed;
+  return parsed.toFixed(2);
+}
+
 function getToken(): string | null {
   return window.localStorage.getItem(TOKEN_KEY);
 }
@@ -264,7 +276,7 @@ function StudentsWorkbench() {
     event.preventDefault();
     if (!selectedStudent || !courseId) return;
     try {
-      const preview = await createAssistantPreview({ token: getToken(), path: 'structured-action', body: { actionType: 'course-account.open', command: { studentId: selectedStudent.id, courseId, ...(openingPrice.trim() ? { currentUnitPrice: openingPrice.trim() } : {}) }, ...browserIds() } });
+      const preview = await createAssistantPreview({ token: getToken(), path: 'structured-action', body: { actionType: 'course-account.open', command: { studentId: selectedStudent.id, courseId, ...(openingPrice.trim() ? { currentUnitPrice: toMoneyString(openingPrice) } : {}) }, ...browserIds() } });
       setPendingPreview({ ...preview, success: '课程账户已开通', invalidate: ['student-detail-accounts', 'structured-accounts', 'structured-students'] });
       setOpenAccount(false); setCourseId(''); setOpeningPrice(''); setFeedback(null);
     } catch (error) { setFeedback({ type: 'error', text: error instanceof Error ? error.message : '无法开通课程账户' }); }
@@ -276,7 +288,7 @@ function StudentsWorkbench() {
       setPendingPreview({ ...preview, success: '学生资料已更新', invalidate: ['structured-students'] }); setEditing(null);
     } catch (error) { setFeedback({ type: 'error', text: error instanceof Error ? error.message : '更新学生失败' }); }
   };
-  const requestAccountPreview = async () => { if (!selectedStudent) return false; setFeedback(null); try { const ids = browserIds(); let path = 'structured-action'; let body: Record<string, unknown>; let success = '操作已完成'; if (accountAction === 'payment' && selectedAccount) { path = 'course-accounts/payment'; body = { accountId: selectedAccount.id, amount, channel, occurredAt: toOffsetDate(occurredAt), ...(transactionNote.trim() ? { note: transactionNote.trim() } : {}), ...ids }; success = '交费已登记'; } else if (accountAction === 'gift' && selectedAccount) { path = 'course-accounts/gift'; body = { accountId: selectedAccount.id, amount, occurredAt: toOffsetDate(occurredAt), ...ids }; success = '赠送已登记'; } else if (accountAction === 'price' && selectedAccount) { body = { actionType: 'course-account.price', command: { accountId: selectedAccount.id, currentUnitPrice: amount }, ...ids }; success = '课程单价已更新'; } else if (accountAction === 'refund') { path = 'students/final-refund'; body = { studentId: selectedStudent.id, feeAmount: amount, channel, occurredAt: toOffsetDate(occurredAt), ...(transactionNote.trim() ? { note: transactionNote.trim() } : {}), ...ids }; success = '最终退款已完成'; } else return false; const preview = await createAssistantPreview({ token: getToken(), path, body }); setPendingPreview({ ...preview, success, invalidate: ['structured-students', 'student-detail-accounts', 'student-account-balance'] }); return true; } catch (error) { setFeedback({ type: 'error', text: error instanceof Error ? error.message : '无法创建操作预览' }); return false; } };
+  const requestAccountPreview = async () => { if (!selectedStudent) return false; setFeedback(null); try { const ids = browserIds(); let path = 'structured-action'; let body: Record<string, unknown>; let success = '操作已完成'; if (accountAction === 'payment' && selectedAccount) { path = 'course-accounts/payment'; body = { accountId: selectedAccount.id, amount: toMoneyString(amount), channel, occurredAt: toOffsetDate(occurredAt), ...(transactionNote.trim() ? { note: transactionNote.trim() } : {}), ...ids }; success = '交费已登记'; } else if (accountAction === 'gift' && selectedAccount) { path = 'course-accounts/gift'; body = { accountId: selectedAccount.id, amount: toMoneyString(amount), occurredAt: toOffsetDate(occurredAt), ...ids }; success = '赠送已登记'; } else if (accountAction === 'price' && selectedAccount) { body = { actionType: 'course-account.price', command: { accountId: selectedAccount.id, currentUnitPrice: toMoneyString(amount) }, ...ids }; success = '课程单价已更新'; } else if (accountAction === 'refund') { path = 'students/final-refund'; body = { studentId: selectedStudent.id, feeAmount: toMoneyString(amount), channel, occurredAt: toOffsetDate(occurredAt), ...(transactionNote.trim() ? { note: transactionNote.trim() } : {}), ...ids }; success = '最终退款已完成'; } else return false; const preview = await createAssistantPreview({ token: getToken(), path, body }); setPendingPreview({ ...preview, success, invalidate: ['structured-students', 'student-detail-accounts', 'student-account-balance'] }); return true; } catch (error) { setFeedback({ type: 'error', text: error instanceof Error ? error.message : '无法创建操作预览' }); return false; } };
   const requestReversal = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedAccount || !reversalEntry) return;
@@ -419,7 +431,7 @@ function ManualPanel({ period, transactions, loading, cashFlow, cashFlowLoading,
     <CashFlowPanel report={cashFlow} loading={cashFlowLoading} error={cashFlowError} />
     <Card className="data-card" title={`${period} 手工收支`} loading={loading}>{transactions && <Table<ManualTransaction> aria-label="手工收支列表" columns={[{ title: '发生时间', dataIndex: 'occurredAt', render: formatDate }, { title: '类型', dataIndex: 'kind', render: (value) => value === 'INCOME' ? '收入' : '支出' }, { title: '分类', render: (_value, record) => displayOption(record.kind === 'INCOME' ? incomeCategories : expenseCategories, record.incomeCategory ?? record.expenseCategory) }, { title: '金额', dataIndex: 'amount', render: money }, { title: '渠道', dataIndex: 'channel', render: (value: string) => displayOption(channels, value) }, { title: '备注', dataIndex: 'note', render: (value) => value || '—' }]} dataSource={transactions} rowKey="id" locale={{ emptyText: '本月暂无手工收支' }} pagination={{ pageSize: 10 }} />}</Card>
     <OperationModal open={open} title="登记手工收支" onCancel={() => setOpen(false)} error={error} disabled={!amount.trim() || !occurredAt || (channel === 'OTHER' && !note.trim())} onSubmit={async () => {
-      const body = { kind, amount, channel, occurredAt: toOffsetDate(occurredAt), ...(kind === 'INCOME' ? { incomeCategory: category } : { expenseCategory: category }), ...(note.trim() ? { note: note.trim() } : {}) };
+      const body = { kind, amount: toMoneyString(amount), channel, occurredAt: toOffsetDate(occurredAt), ...(kind === 'INCOME' ? { incomeCategory: category } : { expenseCategory: category }), ...(note.trim() ? { note: note.trim() } : {}) };
       const created = await onPreview('structured-action', { actionType: 'manual-transaction.create', command: body }, '手工收支已登记', ['structured-manual', 'structured-report', 'structured-cash-flow']);
       if (created) { setAmount(''); setNote(''); }
       return created;

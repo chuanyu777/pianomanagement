@@ -179,11 +179,24 @@ export function buildServer(input: {
     if (!input.repository.getThread) return reply.code(501).send({ message: '任务详情暂不可用' });
     const params = parseBody(z.object({ threadId: z.string().uuid() }), request.params, reply);
     if (!params) return;
+    const query = parseBody(z.object({ before: z.string().uuid().optional(), previewAfter: z.string().regex(/^[1-9]\d{0,18}:(?:0|[1-9]\d{0,18})$/).refine((value) => value.split(':').every((part) => BigInt(part) <= 9_223_372_036_854_775_807n)).optional() }).strict(), request.query, reply);
+    if (!query) return;
     let actorKey: string;
     try { actorKey = trustedCapabilityBinding(headerValue(request, ASSISTANT_CAPABILITY_HEADER)!, { threadId: params.threadId }).actorKey; }
     catch { return reply.code(403).send({ message: '无权访问该任务' }); }
-    const thread = await input.repository.getThread(params.threadId, actorKey);
+    const thread = query.previewAfter ? await input.repository.getThread(params.threadId, actorKey, query.before, query.previewAfter) : query.before ? await input.repository.getThread(params.threadId, actorKey, query.before) : await input.repository.getThread(params.threadId, actorKey);
     return thread ? reply.send(thread) : reply.code(404).send({ message: '任务不存在' });
+  });
+
+  app.delete('/internal/assistant/threads/:threadId', async (request, reply) => {
+    if (!input.repository.archiveThread) return reply.code(501).send({ message: '任务隐藏暂不可用' });
+    const params = parseBody(z.object({ threadId: z.string().uuid() }), request.params, reply);
+    if (!params) return;
+    let actorKey: string;
+    try { actorKey = trustedCapabilityBinding(headerValue(request, ASSISTANT_CAPABILITY_HEADER)!, { threadId: params.threadId }).actorKey; }
+    catch { return reply.code(403).send({ message: '无权访问该任务' }); }
+    return await input.repository.archiveThread(params.threadId, actorKey)
+      ? reply.send({ hidden: true }) : reply.code(404).send({ message: '任务不存在' });
   });
 
   app.post('/internal/assistant/runs/start', async (request, reply) => {

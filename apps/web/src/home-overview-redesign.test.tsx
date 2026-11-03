@@ -11,6 +11,7 @@ const lessons = Array.from({ length: 5 }, (_, index) => ({
 }));
 const records = Array.from({ length: 5 }, (_, index) => ({
   id: `record-${index + 1}`, kind: 'PAYMENT', occurredAt: '2026-10-28T01:00:00.000Z',
+  studentId: `student-${index + 1}`, accountId: `account-${index + 1}`,
   studentName: `流水学生${index + 1}`, courseName: '钢琴课', paidDelta: '123.45', giftDelta: '0.00',
 }));
 const ownerOverview = {
@@ -71,6 +72,18 @@ describe('首页经营概览改造', () => {
     expect(activity.getAllByRole('link', { name: /的账户/ })).toHaveLength(3);
     expect(activity.getByText('流水学生3 · 钢琴课')).toBeInTheDocument();
     expect(activity.queryByText('流水学生4 · 钢琴课')).not.toBeInTheDocument();
+  });
+
+  it('按学生、账户与流水身份链接到原始记录，不依赖姓名搜索', async () => {
+    await setup();
+    const link = screen.getByRole('link', { name: '查看流水学生1的账户' });
+    expect(link).toHaveAttribute('href', '/students?student=student-1&account=account-1&tab=ledger&entry=record-1');
+  });
+
+  it('欠费入口直接打开欠费学生筛选', async () => {
+    const { user } = await setup();
+    await user.click(screen.getByRole('button', { name: /欠费学生/ }));
+    expect(screen.getByTestId('location')).toHaveTextContent('/students?arrears=true');
   });
 
   it.each([

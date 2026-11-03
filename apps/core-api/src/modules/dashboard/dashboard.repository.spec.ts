@@ -10,10 +10,10 @@ describe('DashboardRepository', () => {
         { studentId: 's1', openingPaidBalance: new Prisma.Decimal('-5.00'), ledgerEntries: [] },
         { studentId: 's2', openingPaidBalance: new Prisma.Decimal('5.00'), ledgerEntries: [] },
       ]) },
-      ledgerEntry: { findMany: vi.fn().mockResolvedValue([{ id: 'entry', kind: 'PAYMENT', occurredAt: new Date('2026-10-26T00:00:00Z'), paidDelta: new Prisma.Decimal('12.30'), giftDelta: new Prisma.Decimal('0'), account: { student: { name: '小雨' }, course: { name: '钢琴' } } }]) },
+      ledgerEntry: { findMany: vi.fn().mockResolvedValue([{ id: 'entry', kind: 'PAYMENT', occurredAt: new Date('2026-10-26T00:00:00Z'), paidDelta: new Prisma.Decimal('12.30'), giftDelta: new Prisma.Decimal('0'), account: { id: 'a1', studentId: 's1', student: { name: '小雨' }, course: { name: '钢琴' } } }]) },
     };
     const result = await new DashboardRepository(prisma as never).ownerFacts();
-    expect(result).toEqual({ arrearsCount: 1, recentRecords: [{ id: 'entry', kind: 'PAYMENT', occurredAt: '2026-10-26T00:00:00.000Z', studentName: '小雨', courseName: '钢琴', paidDelta: '12.30', giftDelta: '0.00' }] });
+    expect(result).toEqual({ arrearsCount: 1, recentRecords: [{ id: 'entry', studentId: 's1', accountId: 'a1', kind: 'PAYMENT', occurredAt: '2026-10-26T00:00:00.000Z', studentName: '小雨', courseName: '钢琴', paidDelta: '12.30', giftDelta: '0.00' }] });
     expect(prisma.studentCourseAccount.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { student: { withdrawnAt: null } } }));
     expect(prisma.ledgerEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 5 }));
   });

@@ -15,6 +15,7 @@ import {
   type AgentRuntimeClient,
 } from '../src/modules/assistant-gateway/agent-runtime.client.js';
 import { AssistantGatewayService } from '../src/modules/assistant-gateway/assistant-gateway.service.js';
+import { AssistantGatewayController } from '../src/modules/assistant-gateway/assistant-gateway.controller.js';
 import { buildServer } from '../../agent-runtime/src/server.js';
 import { createTestRepository } from '../../agent-runtime/test/test-repository.js';
 
@@ -28,8 +29,8 @@ function createTokens(): CapabilityTokenService {
   return new CapabilityTokenService({ privateKey, publicKey });
 }
 
-function createService(client: Pick<AgentRuntimeClient, 'start' | 'resume' | 'openEvents'> & Partial<Pick<AgentRuntimeClient, 'listThreads' | 'getThread'>>): AssistantGatewayService {
-  return new AssistantGatewayService({ ...client, listThreads: client.listThreads ?? vi.fn(), getThread: client.getThread ?? vi.fn() }, createTokens());
+function createService(client: Pick<AgentRuntimeClient, 'start' | 'resume' | 'openEvents'> & Partial<Pick<AgentRuntimeClient, 'listThreads' | 'getThread' | 'archiveThread'>>): AssistantGatewayService {
+  return new AssistantGatewayService({ ...client, listThreads: client.listThreads ?? vi.fn(), getThread: client.getThread ?? vi.fn(), archiveThread: client.archiveThread ?? vi.fn() }, createTokens());
 }
 
 function response(body: unknown, init?: ResponseInit): Response {
@@ -42,6 +43,14 @@ function response(body: unknown, init?: ResponseInit): Response {
 describe('AssistantGatewayService', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('hides a task using a capability bound to the current actor and task', async () => {
+    const archiveThread = vi.fn().mockResolvedValue({ hidden: true });
+    const service = createService({ start: vi.fn(), resume: vi.fn(), openEvents: vi.fn(), archiveThread });
+    await expect(service.archiveThread({ userId, role: 'OWNER', threadId })).resolves.toEqual({ hidden: true });
+    const payload = JSON.parse(Buffer.from(archiveThread.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8'));
+    expect(payload).toMatchObject({ sub: userId, role: 'OWNER', threadId });
   });
 
   it('starts a run with a short-lived read/preview-only capability', async () => {
@@ -98,6 +107,16 @@ describe('AssistantGatewayService', () => {
     const detailPayload = JSON.parse(Buffer.from(getThread.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8')) as { sub: string; role: string; teacherId: string; threadId: string };
     expect(listPayload.sub).toBe(userId);
     expect(detailPayload).toMatchObject({ sub: userId, role: 'TEACHER', teacherId, threadId });
+  });
+
+  it('validates and passes the preview cursor from the controller through the actor-bound service', async () => {
+    const getThread = vi.fn().mockResolvedValue({ threadId, title: '任务', lastActivityAt: '2026-10-28T00:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews: [], nextPreviewAfter: null });
+    const service = createService({ start: vi.fn(), resume: vi.fn(), openEvents: vi.fn(), getThread });
+    const controller = new AssistantGatewayController(service);
+    const request = { actor: { id: userId, role: 'OWNER' } } as Parameters<typeof controller.getTask>[1];
+    await expect(controller.getTask(threadId, request, undefined, '12:3')).resolves.toMatchObject({ nextPreviewAfter: null });
+    expect(getThread).toHaveBeenCalledWith(expect.objectContaining({ threadId, previewAfter: '12:3' }));
+    expect(() => controller.getTask(threadId, request, undefined, '9223372036854775808:1')).toThrow();
   });
 
   it('sanitizes the latest workspace when it contains a preview before returning task history', async () => {
@@ -246,6 +265,15 @@ describe('AgentRuntimeClient contract', () => {
 });
 
 describe('HttpAgentRuntimeClient', () => {
+  it('signs a bodyless hide request without a JSON content type', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => response({ hidden: true }));
+    const client = new HttpAgentRuntimeClient({ baseUrl: 'http://agent-runtime.test', serviceSecret, timeoutMs: 100, fetchImpl });
+    await expect(client.archiveThread({ threadId, capability: 'actor-scoped-capability' })).resolves.toEqual({ hidden: true });
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    const headers = new Headers(init!.headers);
+    expect(headers.has('content-type')).toBe(false);
+    expect(verifySignedInternalRequest({ secret: serviceSecret, timestamp: headers.get(INTERNAL_REQUEST_TIMESTAMP_HEADER)!, nonce: headers.get(INTERNAL_REQUEST_NONCE_HEADER)!, signature: headers.get(INTERNAL_REQUEST_SIGNATURE_HEADER)!, method: 'DELETE', path: new URL(url).pathname, securityHeaders: { 'x-assistant-capability': headers.get('x-assistant-capability')! } })).toBe(true);
+  });
   it('preserves the ordered minimal preview references returned by Agent task history', async () => {
     const historicalPreviews = [
       { previewId: '20000000-0000-4000-8000-000000000001', actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', riskLevel: 'L2' },
@@ -255,6 +283,17 @@ describe('HttpAgentRuntimeClient', () => {
     const client = new HttpAgentRuntimeClient({ baseUrl: 'http://agent-runtime.test', serviceSecret, timeoutMs: 100, fetchImpl });
 
     await expect(client.getThread({ threadId, capability: 'actor-scoped-capability' })).resolves.toMatchObject({ historicalPreviews });
+  });
+
+  it('forwards and signs the preview page cursor and preserves the next cursor', async () => {
+    const fetchImpl = vi.fn(async () => response({ threadId, title: '任务', lastActivityAt: '2026-10-28T00:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews: [], nextPreviewAfter: '120:2' }));
+    const client = new HttpAgentRuntimeClient({ baseUrl: 'http://agent-runtime.test', serviceSecret, timeoutMs: 100, fetchImpl });
+    const result = await client.getThread({ threadId, capability: 'actor-scoped-capability', previewAfter: '100:1' });
+    expect(result.nextPreviewAfter).toBe('120:2');
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toContain('previewAfter=100%3A1');
+    const headers = new Headers(init!.headers);
+    expect(verifySignedInternalRequest({ secret: serviceSecret, timestamp: headers.get(INTERNAL_REQUEST_TIMESTAMP_HEADER)!, nonce: headers.get(INTERNAL_REQUEST_NONCE_HEADER)!, signature: headers.get(INTERNAL_REQUEST_SIGNATURE_HEADER)!, method: 'GET', path: new URL(url).pathname + new URL(url).search, securityHeaders: { 'x-assistant-capability': headers.get('x-assistant-capability')! } })).toBe(true);
   });
 
   it.each([403, 404])('hides task existence for Agent %i responses with one public 404', async (status) => {
@@ -360,6 +399,27 @@ describe('HttpAgentRuntimeClient', () => {
 });
 
 describe('Core Gateway ↔ Agent Runtime contract', () => {
+  it('passes a signed confirmation page request through the runtime route', async () => {
+    const getThread = vi.fn().mockResolvedValue({ threadId, title: '任务', lastActivityAt: '2026-10-28T00:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews: [], nextPreviewAfter: null });
+    const runtime = buildServer({
+      config: { AGENT_PORT: 3100, AI_ENABLED: false, AI_PROVIDER: '', AI_MODEL: '', AI_API_KEY: '', AGENT_DATABASE_URL: 'postgresql://unused', CORE_INTERNAL_API_URL: 'http://core.test', INTERNAL_SERVICE_SECRET: serviceSecret, AI_REQUEST_TIMEOUT_MS: 1_000, AI_RUN_TIMEOUT_MS: 5_000, AI_MAX_STEPS: 8, AI_MAX_TOOL_CALLS: 6, AI_MAX_OUTPUT_TOKENS: 1_200, AI_TRACING_ENABLED: false },
+      checkpointer: new MemorySaver(), repository: { ...createTestRepository(), getThread }, requireActorBinding: true,
+    });
+    const fetchImpl = async (url: string, init?: RequestInit) => {
+      const target = new URL(url);
+      const injected = await runtime.inject({ method: 'GET', url: target.pathname + target.search, headers: Object.fromEntries(new Headers(init?.headers).entries()) });
+      return new Response(injected.body, { status: injected.statusCode, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const client = new HttpAgentRuntimeClient({ baseUrl: 'http://agent-runtime.test', serviceSecret, timeoutMs: 1_000, fetchImpl });
+      const service = new AssistantGatewayService(client, createTokens());
+      const controller = new AssistantGatewayController(service);
+      const request = { actor: { id: userId, role: 'OWNER' } } as Parameters<typeof controller.getTask>[1];
+      await expect(controller.getTask(threadId, request, undefined, '12:3')).resolves.toMatchObject({ nextPreviewAfter: null });
+      expect(getThread).toHaveBeenCalledWith(threadId, expect.stringMatching(/^[0-9a-f]{64}$/), undefined, '12:3');
+    } finally { await runtime.close(); }
+  });
+
   it('accepts the Gateway client start/resume/events requests at the Runtime interface', async () => {
     vi.stubGlobal(
       'fetch',

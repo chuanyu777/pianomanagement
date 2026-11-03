@@ -1,7 +1,7 @@
 .schedule-timeline { min-width: 0; color: #25324a; }
 .schedule-timeline-scroll { max-height: min(70vh, 720px); overflow: auto; overscroll-behavior: contain; border: 1px solid #dce1e9; border-radius: 12px; background: #fff; scrollbar-gutter: stable; }
 .schedule-timeline-scroll:focus-visible { outline: 2px solid #3155db; outline-offset: 3px; }
-.schedule-timeline-grid { display: grid; width: 100%; min-width: max-content; padding-bottom: 12px; }
+.schedule-timeline-grid { position: relative; display: grid; width: 100%; min-width: max-content; padding-bottom: 12px; }
 .schedule-timeline-axis { position: sticky; left: 0; z-index: 4; background: #fff; }
 .schedule-timeline-axis-head, .schedule-timeline-day > header { position: sticky; top: 0; z-index: 5; box-sizing: border-box; height: 60px; border-bottom: 1px solid #dce1e9; background: #f7f8fb; }
 .schedule-timeline-axis-head { display: grid; place-items: center; font-size: 11px; color: #637088; }
@@ -14,6 +14,9 @@
 .schedule-timeline-day > header small { color: #637088; font-weight: 400; }
 .schedule-timeline-day.is-today > header { background: #edf1ff; color: #2749c6; }
 .schedule-timeline-lane { position: relative; background: repeating-linear-gradient(to bottom, #e4e8ef 0 1px, transparent 1px var(--schedule-half-hour-height), #f0f2f6 var(--schedule-half-hour-height) calc(var(--schedule-half-hour-height) + 1px), transparent calc(var(--schedule-half-hour-height) + 1px) var(--schedule-hour-height)); }
+.schedule-timeline-now { position: absolute; left: 0; right: 0; z-index: 2; border-top: 2px solid #c63845; pointer-events: none; }
+.schedule-timeline-now::before { position: absolute; top: -4px; left: 0; width: 6px; height: 6px; border-radius: 50%; background: #c63845; content: ''; }
+.schedule-timeline-now time { position: absolute; right: 4px; top: 0; transform: translateY(-50%); padding: 0 3px; border-radius: 3px; background: #fff; color: #b12634; font-size: 10px; line-height: 16px; font-variant-numeric: tabular-nums; }
 .schedule-timeline-empty { position: absolute; inset: 20px 8px auto; text-align: center; font-size: 11px; color: #778397; }
 .schedule-timeline .schedule-timeline-lesson { position: absolute; display: flex; flex-direction: column; box-sizing: border-box; gap: 1px; padding: 2px 5px; overflow: hidden; border: 1px solid #cbd7fa; border-left: 3px solid #4661cc; border-radius: 4px; background: #edf2ff; color: #213a7a; text-align: left; font: inherit; font-size: 11px; line-height: 14px; cursor: pointer; }
 .schedule-timeline .schedule-timeline-lesson > * { display: block; flex-shrink: 0; overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }

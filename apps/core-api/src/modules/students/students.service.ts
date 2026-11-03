@@ -50,8 +50,7 @@ function isMissingRecordError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025';
 }
 
-function toSummary(student: Prisma.StudentGetPayload<{ select: typeof STUDENT_PUBLIC_SELECT }>): StudentSummary {
-  const now = businessNow();
+function toSummary(student: Prisma.StudentGetPayload<{ select: typeof STUDENT_PUBLIC_SELECT }>, now = businessNow()): StudentSummary {
   const threshold = 31 * 24 * 60 * 60 * 1000;
   const completedAt = student.courseAccounts
     .flatMap((account) => account.lessons)
@@ -172,7 +171,53 @@ export class StudentsService {
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
       select: STUDENT_PUBLIC_SELECT,
     });
-    return students.map(toSummary);
+    return students.map((student) => toSummary(student));
+  }
+
+  async listPage(input: { q?: string | undefined; page: number; pageSize: number; enrollmentStatus?: StudentEnrollmentStatus | undefined; arrears?: boolean | undefined; locateStudentId?: string | undefined }) {
+    const now = businessNow();
+    const cutoff = new Date(now.getTime() - 31 * 24 * 60 * 60 * 1000);
+    const completed = { status: 'COMPLETED' as const, completedAt: { not: null } };
+    const frozen: Prisma.StudentWhereInput = {
+      withdrawnAt: null,
+      courseAccounts: { none: { lessons: { some: { status: 'COMPLETED', completedAt: { gte: cutoff } } } } },
+      OR: [
+        { courseAccounts: { some: { lessons: { some: completed } } } },
+        { courseAccounts: { some: { createdAt: { lt: cutoff } } } },
+      ],
+    };
+    return this.prisma.$transaction(async (tx) => {
+      const conditions: Prisma.StudentWhereInput[] = [];
+      if (input.q?.trim()) conditions.push({ OR: [{ name: { contains: input.q.trim(), mode: 'insensitive' } }, { phone: { contains: input.q.trim() } }] });
+      if (input.enrollmentStatus === 'WITHDRAWN') conditions.push({ withdrawnAt: { not: null } });
+      if (input.enrollmentStatus === 'FROZEN') conditions.push(frozen);
+      if (input.enrollmentStatus === 'STUDYING') conditions.push({ withdrawnAt: null, NOT: frozen });
+      if (input.arrears !== undefined) {
+        const accounts = await tx.studentCourseAccount.findMany({
+          where: { student: { withdrawnAt: null } },
+          select: { studentId: true, openingPaidBalance: true, ledgerEntries: { select: { paidDelta: true } } },
+        });
+        const ids = [...new Set(accounts.filter((account) => account.ledgerEntries.reduce((sum, entry) => sum.add(entry.paidDelta), new Prisma.Decimal(account.openingPaidBalance)).isNegative()).map((account) => account.studentId))];
+        conditions.push({ id: input.arrears ? { in: ids } : { notIn: ids } });
+      }
+      const where: Prisma.StudentWhereInput = { AND: conditions };
+      const total = await tx.student.count({ where });
+      let page = input.page;
+      if (input.locateStudentId) {
+        const target = await tx.student.findFirst({ where: { AND: [where, { id: input.locateStudentId }] }, select: { id: true, name: true } });
+        if (!target) return { items: [], total, page: null, pageSize: input.pageSize };
+        const preceding = await tx.student.count({ where: { AND: [where, { OR: [{ name: { lt: target.name } }, { name: target.name, id: { lt: target.id } }] }] } });
+        page = Math.floor(preceding / input.pageSize) + 1;
+      }
+      const students = await tx.student.findMany({ where, orderBy: [{ name: 'asc' }, { id: 'asc' }], skip: (page - 1) * input.pageSize, take: input.pageSize, select: STUDENT_PUBLIC_SELECT });
+      return { items: students.map((student) => toSummary(student, now)), total, page, pageSize: input.pageSize };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+  }
+
+  async get(id: string): Promise<StudentSummary> {
+    const student = await this.prisma.student.findUnique({ where: { id }, select: STUDENT_PUBLIC_SELECT });
+    if (!student) throw new NotFoundException('学生不存在');
+    return toSummary(student);
   }
 
   async update(id: string, input: UpdateStudentInput): Promise<StudentSummary> {

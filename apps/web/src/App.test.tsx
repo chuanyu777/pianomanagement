@@ -126,6 +126,7 @@ describe('AI workspace', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'u1', username: 'owner', role: 'OWNER' }));
+      if (path.startsWith('/api/students/page?')) return Response.json({ items: [student], total: 1, page: 1, pageSize: 8 });
       if (path === '/api/students') return new Response(JSON.stringify([student]));
       if (path === '/api/courses') return new Response(JSON.stringify([{ id: 'c1', name: '主课', defaultUnitPrice: '200.00', defaultDurationMinutes: 45, isActive: true }]));
       if (path.includes('/course-accounts')) return new Response('[]');
@@ -143,7 +144,7 @@ describe('AI workspace', () => {
     await user.click(screen.getByRole('button', { name: '生成确认单' }));
     await user.click(await screen.findByRole('button', { name: '确认执行' }));
     expect(await screen.findByText('执行回执')).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => path === '/api/students').length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => String(path).startsWith('/api/students/page?')).length).toBeGreaterThanOrEqual(2));
     const call = fetchMock.mock.calls.find(([path]) => path === '/api/assistant/previews/structured-action');
     expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({ actionType: 'course-account.open', command: { studentId: 's1', courseId: 'c1' } });
   }, 15000);
@@ -174,7 +175,7 @@ describe('AI workspace', () => {
       const path = String(input);
       if (path === '/api/auth/login') return Promise.resolve(new Response(JSON.stringify({ accessToken: 'jwt-test', tokenType: 'Bearer', expiresInSeconds: 3600, user: { id: 'u1', username: 'owner', role: 'OWNER' } }), { status: 200 }));
       if (path === '/api/assistant/status') return Promise.resolve(new Response(JSON.stringify({ available: true, core: { available: true }, agentRuntime: { available: true }, checkedAt: '2026-10-16T01:02:03.000Z', message: 'AI 助手已连接' }), { status: 200 }));
-      return Promise.resolve(new Response(JSON.stringify([{ id: 's1', name: '真实学生', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-16T01:02:03.000Z', updatedAt: '2026-10-16T01:02:03.000Z' }]), { status: 200 }));
+      return Promise.resolve(Response.json({ items: [{ id: 's1', name: '真实学生', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-16T01:02:03.000Z', updatedAt: '2026-10-16T01:02:03.000Z' }], total: 1, page: 1, pageSize: 8 }));
     });
     vi.stubGlobal('fetch', fetchMock);
     renderApp('/structured/students');
@@ -186,7 +187,7 @@ describe('AI workspace', () => {
     expect(window.localStorage.getItem('pianomanager.accessToken')).toBe('jwt-test');
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/auth/login');
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ username: 'owner', password: 'correct-password' });
-    const studentsCall = fetchMock.mock.calls.find(([path]) => path === '/api/students');
+    const studentsCall = fetchMock.mock.calls.find(([path]) => String(path).startsWith('/api/students/page?'));
     expect(new Headers(studentsCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
     expect(screen.getByText('学生档案与课程账户')).toBeInTheDocument();
   });

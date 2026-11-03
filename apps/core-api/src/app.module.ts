@@ -19,6 +19,7 @@ import { StudentCourseAccountsModule } from './modules/student-course-accounts/s
 import { StudentsModule } from './modules/students/students.module.js';
 import { TeachersModule } from './modules/teachers/teachers.module.js';
 import { DashboardModule } from './modules/dashboard/dashboard.module.js';
+import { SourceLinksModule } from './modules/source-links/source-links.module.js';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module.js';
     CoursesModule,
     CourseLedgerModule,
     DashboardModule,
+    SourceLinksModule,
     LessonsModule,
     ManualTransactionsModule,
     PeriodsModule,

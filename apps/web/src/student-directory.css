@@ -1,0 +1,17 @@
+.student-directory-paged { min-width: 0; align-self: start; }
+.student-directory-count { margin-bottom: 8px; color: #657087; font-size: 11px; }
+.student-directory-paged .student-directory { display: grid; gap: 4px; margin: 0; overflow: visible; }
+.student-directory-paged .student-directory button { min-width: 0; max-width: none; min-height: 45px; padding: 7px 9px; border-radius: 6px; }
+.student-directory-pagination { display: flex; justify-content: space-between; align-items: center; gap: 4px; margin-top: 10px; color: #526079; font-size: 12px; }
+.student-directory-pagination button { width: 32px; height: 32px; border: 1px solid #d3d9e6; border-radius: 6px; background: #fff; color: #3159ec; font-size: 20px; cursor: pointer; }
+.student-directory-pagination button:disabled { background: #e2e6ef; color: #657087; cursor: not-allowed; }
+.student-workspace .student-toolbar { grid-template-columns: minmax(0,1fr) auto auto; }
+.student-toolbar .student-status-filter { min-width: 108px; }
+.student-toolbar button[aria-pressed="true"] { color: #244bd0; border-color: #bcc9ff; background: #e7edff; }
+@media(max-width:600px) {
+  .student-directory-paged { margin-bottom: 16px; }
+  .student-directory-paged .student-directory { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .student-directory-pagination { justify-content: center; gap: 20px; }
+  .student-workspace .student-toolbar { grid-template-columns: minmax(0,1fr) auto; }
+  .student-toolbar > .ant-input-affix-wrapper { grid-column: 1/-1; }
+}

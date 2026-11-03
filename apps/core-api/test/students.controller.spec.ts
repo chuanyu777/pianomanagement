@@ -8,6 +8,21 @@ import { StudentsController } from '../src/modules/students/students.controller.
 import { describe, expect, it, vi } from 'vitest';
 
 describe('StudentsController', () => {
+  it('looks up a single student by identity', async () => {
+    const get = vi.fn().mockResolvedValue({ id: 'student-id' });
+    const controller = new StudentsController({ get } as never);
+    await expect(controller.get('student-id')).resolves.toEqual({ id: 'student-id' });
+    expect(get).toHaveBeenCalledWith('student-id');
+  });
+  it('validates and forwards the paged directory filters', async () => {
+    const listPage = vi.fn().mockResolvedValue({ items: [], total: 0, page: 2, pageSize: 8 });
+    const controller = new StudentsController({ listPage } as never);
+    await expect(controller.listPage({ q: ' 琴 ', page: '2', pageSize: '8', enrollmentStatus: 'FROZEN', arrears: 'true', locateStudentId: '9c260926-9dd0-4b52-8ce3-9120209d789a' })).resolves.toEqual({ items: [], total: 0, page: 2, pageSize: 8 });
+    expect(listPage).toHaveBeenCalledWith({ q: '琴', page: 2, pageSize: 8, enrollmentStatus: 'FROZEN', arrears: true, locateStudentId: '9c260926-9dd0-4b52-8ce3-9120209d789a' });
+    for (const query of [{ page: '0' }, { pageSize: '101' }, { arrears: 'yes' }, { enrollmentStatus: 'OTHER' }, { page: '1.5' }, { locateStudentId: 'invalid' }]) {
+      expect(() => controller.listPage(query)).toThrow(BadRequestException);
+    }
+  });
   it('protects the controller with both public guards and OWNER role', () => {
     expect(Reflect.getMetadata('__guards__', StudentsController)).toEqual([JwtAuthGuard, RolesGuard]);
     expect(Reflect.getMetadata(REQUIRED_ROLES, StudentsController)).toEqual([UserRole.OWNER]);

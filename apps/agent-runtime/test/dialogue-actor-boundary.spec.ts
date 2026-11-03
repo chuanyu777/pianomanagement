@@ -105,6 +105,23 @@ describe('dialogue actor and capability boundaries', () => {
     vi.unstubAllGlobals();
   });
 
+  it('hides a task only for the actor and thread bound to the signed capability', async () => {
+    const archiveThread = vi.fn().mockResolvedValue(true);
+    const app = buildTestServer({ ...createTestRepository(), archiveThread }, true);
+    const path = `/internal/assistant/threads/${threadId}`;
+    const claims = { sub: 'owner-user', role: 'OWNER', threadId, runId };
+    try {
+      const response = await app.inject({ method: 'DELETE', url: path, headers: signedHeaders('DELETE', path, undefined, capability(claims)) });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ hidden: true });
+      expect(archiveThread).toHaveBeenCalledWith(threadId, expect.stringMatching(/^[0-9a-f]{64}$/));
+      const wrongScope = { ...claims, threadId: otherThreadId };
+      const denied = await app.inject({ method: 'DELETE', url: path, headers: signedHeaders('DELETE', path, undefined, capability(wrongScope)) });
+      expect(denied.statusCode).toBe(403);
+      expect(archiveThread).toHaveBeenCalledTimes(1);
+    } finally { await app.close(); }
+  });
+
   it('lists and reads persisted tasks through the actor binding derived from the signed capability', async () => {
     const base = createTestRepository();
     const listThreads = vi.fn().mockResolvedValue([{ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed' }]);
@@ -121,6 +138,18 @@ describe('dialogue actor and capability boundaries', () => {
       const detail = await app.inject({ method: 'GET', url: detailPath, headers: signedHeaders('GET', detailPath, undefined, capability(claims)) });
       expect(detail.statusCode).toBe(200);
       expect(getThread).toHaveBeenCalledWith(threadId, listThreads.mock.calls[0]![0]);
+      const olderPath = `${detailPath}?before=${otherThreadId}`;
+      const older = await app.inject({ method: 'GET', url: olderPath, headers: signedHeaders('GET', olderPath, undefined, capability(claims)) });
+      expect(older.statusCode).toBe(200);
+      expect(getThread).toHaveBeenLastCalledWith(threadId, listThreads.mock.calls[0]![0], otherThreadId);
+      const previewPath = `${detailPath}?previewAfter=120%3A2`;
+      const previewPage = await app.inject({ method: 'GET', url: previewPath, headers: signedHeaders('GET', previewPath, undefined, capability(claims)) });
+      expect(previewPage.statusCode).toBe(200);
+      expect(getThread).toHaveBeenLastCalledWith(threadId, listThreads.mock.calls[0]![0], undefined, '120:2');
+      const badPath = `${detailPath}?previewAfter=9223372036854775808%3A1`;
+      expect((await app.inject({ method: 'GET', url: badPath, headers: signedHeaders('GET', badPath, undefined, capability(claims)) })).statusCode).toBe(400);
+      const wrongScope = { ...claims, threadId: otherThreadId };
+      expect((await app.inject({ method: 'GET', url: previewPath, headers: signedHeaders('GET', previewPath, undefined, capability(wrongScope)) })).statusCode).toBe(403);
     } finally { await app.close(); }
   });
 

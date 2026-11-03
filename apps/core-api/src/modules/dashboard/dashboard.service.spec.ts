@@ -35,7 +35,7 @@ describe('DashboardService', () => {
     const repository = { ownerFacts: vi.fn() };
     const service = new DashboardService(lessons as never, students as never, reports as never, periods as never, repository as never);
     const result = await service.overview({ id: 'teacher-user', username: 'teacher', role: 'TEACHER', teacherId: 'teacher-1' });
-    expect(result).toMatchObject({ students: null, finance: null, preclose: null });
+    expect(result).toMatchObject({ students: null, finance: null, preclose: null, recentRecords: null });
     expect(students.list).not.toHaveBeenCalled(); expect(reports.monthly).not.toHaveBeenCalled(); expect(periods.preclose).not.toHaveBeenCalled();
     expect(repository.ownerFacts).not.toHaveBeenCalled();
   });

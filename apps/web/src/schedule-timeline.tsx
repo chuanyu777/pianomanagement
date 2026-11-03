@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Popover } from 'antd';
 import type { components } from '@piano/generated-core-client/generated/core-api';
 import { layoutScheduleDay, SCHEDULE_END_MINUTE, SCHEDULE_START_MINUTE } from './schedule-layout.js';
@@ -20,6 +20,8 @@ export type ScheduleTimelineProps = {
   days: readonly string[];
   /** Pass setSelectedLessonId to open the workbench's existing lesson actions. */
   onSelect: (lessonId: string) => void;
+  /** An explicit lesson selection takes priority over initial positioning. */
+  selectedLessonId?: string;
 };
 
 const PIXELS_PER_MINUTE = 0.8;
@@ -32,6 +34,12 @@ const weekday = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', we
 function businessDate(value: Date) {
   const parts = date.formatToParts(value);
   return ['year', 'month', 'day'].map((name) => parts.find((part) => part.type === name)?.value).join('-');
+}
+
+function businessMinute(value: Date) {
+  const parts = clock.formatToParts(value);
+  return Number(parts.find((part) => part.type === 'hour')?.value) * 60
+    + Number(parts.find((part) => part.type === 'minute')?.value);
 }
 
 function fullTime(value: string) {
@@ -82,13 +90,50 @@ function LessonButton({ lesson, onSelect, style, outside = false }: {
   </Popover>;
 }
 
-export function ScheduleTimeline({ lessons, days, onSelect }: ScheduleTimelineProps) {
-  const today = businessDate(new Date());
+export function ScheduleTimeline({ lessons, days, onSelect, selectedLessonId }: ScheduleTimelineProps) {
+  const [now, setNow] = useState(() => new Date());
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const positionedWeek = useRef<string | null>(null);
+  const weekKey = days.join(',');
+  const today = businessDate(now);
+  const minute = businessMinute(now);
+  const showNow = minute >= SCHEDULE_START_MINUTE && minute <= SCHEDULE_END_MINUTE;
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const scheduleTick = () => {
+      timer = setTimeout(() => {
+        setNow(new Date());
+        scheduleTick();
+      }, 60_000 - Date.now() % 60_000);
+    };
+    scheduleTick();
+    return () => clearTimeout(timer);
+  }, []);
+
+  useLayoutEffect(() => {
+    // Consume the initial positioning even for deep links. Closing a detail,
+    // refreshing lessons or ticking the clock must never reclaim user scroll.
+    if (positionedWeek.current === weekKey) return;
+    positionedWeek.current = weekKey;
+    if (selectedLessonId) return;
+    const scroll = scrollRef.current;
+    const instant = new Date();
+    const day = scroll?.querySelector<HTMLElement>(`[data-day="${businessDate(instant)}"]`);
+    if (!scroll || !day) return;
+    const headerHeight = day.querySelector('header')?.offsetHeight ?? 0;
+    const axisWidth = scroll.querySelector<HTMLElement>('.schedule-timeline-axis')?.offsetWidth ?? 0;
+    const clampedMinute = Math.max(SCHEDULE_START_MINUTE, Math.min(SCHEDULE_END_MINUTE, businessMinute(instant)));
+    const top = (clampedMinute - SCHEDULE_START_MINUTE) * PIXELS_PER_MINUTE - (scroll.clientHeight - headerHeight) / 2;
+    scroll.scrollLeft = Math.max(0, Math.min(scroll.scrollWidth - scroll.clientWidth, day.offsetLeft - axisWidth));
+    scroll.scrollTop = Math.max(0, Math.min(scroll.scrollHeight - scroll.clientHeight, top));
+  }, [weekKey, selectedLessonId]);
+
   const layouts = days.map((day) => ({ day, entries: layoutScheduleDay(lessons, day) }));
   const outsideDays = layouts.filter(({ entries }) => entries.some((entry) => entry.outside));
   const columns = layouts.map(({ entries }) => `minmax(${Math.max(112, ...entries.filter((entry) => !entry.outside).map((entry) => entry.columns * 112))}px, 1fr)`);
   return <div className="schedule-timeline" style={{ '--schedule-half-hour-height': `${30 * PIXELS_PER_MINUTE}px`, '--schedule-hour-height': `${60 * PIXELS_PER_MINUTE}px` } as CSSProperties}>
-    <div aria-label="七天排课时间轴，上海时间7点至22点，可横向和纵向滚动" className="schedule-timeline-scroll" role="region" tabIndex={0}>
+    <div aria-label="七天排课时间轴，上海时间7点至22点，可横向和纵向滚动" className="schedule-timeline-scroll" ref={scrollRef} role="region" tabIndex={0}>
       <div className="schedule-timeline-grid" style={{ gridTemplateColumns: `48px ${columns.join(' ')}` }}>
         <div aria-hidden="true" className="schedule-timeline-axis">
           <div className="schedule-timeline-axis-head">时间</div>
@@ -96,9 +141,12 @@ export function ScheduleTimeline({ lessons, days, onSelect }: ScheduleTimelinePr
             {HOURS.map((hour) => <span key={hour} style={{ top: (hour * 60 - SCHEDULE_START_MINUTE) * PIXELS_PER_MINUTE }}>{hour.toString().padStart(2, '0')}:00</span>)}
           </div>
         </div>
-        {layouts.map(({ day, entries }) => <section aria-label={`${day}课程`} className={`schedule-timeline-day ${day === today ? 'is-today' : ''}`} key={day}>
+        {layouts.map(({ day, entries }) => <section aria-label={`${day}课程`} className={`schedule-timeline-day ${day === today ? 'is-today' : ''}`} data-day={day} key={day}>
           <header><span>{weekday.format(new Date(`${day}T00:00:00+08:00`))} <strong>{day.slice(5)}</strong></span><small>{entries.length} 节</small></header>
           <div className="schedule-timeline-lane" style={{ height: GRID_HEIGHT }}>
+            {day === today && showNow && <div aria-label={`当前时间 ${clock.format(now)}`} className="schedule-timeline-now" style={{ top: (minute - SCHEDULE_START_MINUTE) * PIXELS_PER_MINUTE }}>
+              <time dateTime={now.toISOString()}>{clock.format(now)}</time>
+            </div>}
             {!entries.some((entry) => !entry.outside) && <span className="schedule-timeline-empty">{entries.length ? '课程在时间轴外' : '无排课'}</span>}
             {entries.filter((entry) => !entry.outside).map(({ lesson, startMinute, endMinute, column, columns: count }) => <LessonButton key={lesson.id} lesson={lesson} onSelect={onSelect} style={{
               top: (startMinute - SCHEDULE_START_MINUTE) * PIXELS_PER_MINUTE,

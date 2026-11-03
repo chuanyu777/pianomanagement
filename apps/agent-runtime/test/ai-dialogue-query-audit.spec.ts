@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LESSON_ID, createAuditHarness, newIntent } from './audit-harness.js';
+import { ACCOUNT_ID, ACCOUNT_ID_3, LESSON_ID, createAuditHarness, newIntent } from './audit-harness.js';
 
 // 编排契约测试：固定意图由 Fake BaseChatModel 提供；本文件不声称覆盖自然语言理解。
 
@@ -81,6 +81,12 @@ describe('AI dialogue query audit: Q01-Q11', () => {
     expect(result.answer).not.toMatch(/余额|交费|赠送|流水/u);
   });
 
+  it('keeps student directory links bound to each Core student id', async () => {
+    const h = createAuditHarness([newIntent('directory.read')]);
+    const result = await h.run('directory-sources', '查看学生资料');
+    expect(result.workspace.sources).toContainEqual(expect.objectContaining({ type:'student', id:'6ed41b4d-cad9-42b3-a3ca-6571ce2e033b' }));
+  });
+
   it('Q05 returns separate per-course paid/gift balances and locked unit prices', async () => {
     const h = createAuditHarness([newIntent('accounts.read', { studentName: '林悦' })]);
     const result = await h.run('q05', '林悦每门课还有多少钱？');
@@ -92,6 +98,50 @@ describe('AI dialogue query audit: Q01-Q11', () => {
     expect(result.answer).toContain('实收 120.00');
     expect(result.answer).toContain('单价 80.00');
     expect(result.answer).not.toMatch(/剩余课次|课包/u);
+    expect(result.workspace.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type:'courseAccount', id:ACCOUNT_ID }),
+      expect.objectContaining({ type:'courseAccount', id:ACCOUNT_ID_3 }),
+    ]));
+  });
+
+  it('does not read balances for ambiguous student matches before an account is selected', async () => {
+    const h = createAuditHarness([newIntent('accounts.read', { studentName: '小明' }), newIntent('accounts.read', { selectionId: ACCOUNT_ID_3 }, 'continue')], {
+      getStudentCandidates: async () => ({ candidates: [
+        { studentId: '11111111-1111-4111-8111-111111111111', name: '小明' },
+        { studentId: '22222222-2222-4222-8222-222222222222', name: '小明' },
+      ] }),
+    });
+    const result = await h.run('ambiguous-balances', '小明每门课还有多少钱？');
+    expect(result.workspace.resultKind).toBe('selection');
+    expect(h.readCalls.readAccount).not.toHaveBeenCalled();
+    await h.run('ambiguous-balances', '选择第二个账户');
+    expect(h.readCalls.readAccount).toHaveBeenCalledTimes(1);
+    expect(h.readCalls.readAccount).toHaveBeenCalledWith(expect.any(String), { accountId: ACCOUNT_ID_3 });
+  });
+
+  it('explains report differences with actual Core components and without claiming an unproven cause', async () => {
+    const h = createAuditHarness([newIntent('report.monthly', { period: '2026-10', basis: '对比' })]);
+    const result = await h.run('report-components', '为什么现金和利润不一样？');
+    expect(result.answer).toContain('课消2500.00');
+    expect(result.answer).toContain('工资2200.00');
+    expect(result.answer).toContain('赠送课消180.00');
+    expect(result.answer).not.toContain('主要因为');
+    expect(result.workspace.sources).toContainEqual(expect.objectContaining({ type:'report', id:'2026-10' }));
+  });
+
+  it('labels refund and correction ledger entries using the actual Core contract', async () => {
+    const h = createAuditHarness([newIntent('ledger.read', { studentName: '林悦', courseName: '主课' })], {
+      readAccountLedger: async () => ({ accountId: '22222222-2222-4222-8222-222222222222', entries: [
+        { entryId:'a1111111-1111-4111-8111-111111111111', occurredAt:'2026-10-01T02:00:00.000Z', kind:'REFUND_PAID', amount:'50.00', paidDelta:'-50.00', giftDelta:'0.00', note:null, operator:'店主' },
+        { entryId:'a2222222-2222-4222-8222-222222222222', occurredAt:'2026-10-02T02:00:00.000Z', kind:'REFUND_GIFT_CLEARING', amount:'20.00', paidDelta:'0.00', giftDelta:'-20.00', note:null, operator:'店主' },
+        { entryId:'a3333333-3333-4333-8333-333333333333', occurredAt:'2026-10-03T02:00:00.000Z', kind:'LESSON_CONSUMPTION_CORRECTION', amount:'10.00', paidDelta:'10.00', giftDelta:'0.00', note:null, operator:'店主' },
+      ] }),
+    });
+    const result = await h.run('ledger-labels', '查看林悦主课流水');
+    expect(result.answer).toContain('退款 50.00');
+    expect(result.answer).toContain('赠送清零 20.00');
+    expect(result.answer).toContain('课消纠正 10.00');
+    expect(result.workspace.sources).toContainEqual(expect.objectContaining({ type:'ledgerEntry', id:'a1111111-1111-4111-8111-111111111111' }));
   });
 
   it.each([

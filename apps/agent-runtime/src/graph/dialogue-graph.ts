@@ -6,7 +6,7 @@ import { DialogueIntentSchema, type DialogueIntent, type UnderstandIntent } from
 import type { IntentParser } from './intent-parser.js';
 import { refusalGuidance } from './refusal-messages.js';
 import { resolveLessonDateRange } from './dialogue-calendar.js';
-import { deterministicMultiStep, DialogueMultiStepPlanSchema, type DialogueMultiStepPlan, type UnderstandMultiStep } from './dialogue-multi-step.js';
+import { deterministicMultiStep, DialogueMultiStepPlanSchema, hasExplicitPayrollCorrectionDates, hasRequiredStepOrder, type DialogueMultiStepPlan, type UnderstandMultiStep } from './dialogue-multi-step.js';
 
 const CandidateSchema = z.object({ id: z.string(), label: z.string(), description: z.string().optional(), field: z.enum(['accountId', 'teacherId', 'lessonId', 'studentId', 'courseId', 'payrollId', 'entryId']), values: z.record(z.string(), z.string()) });
 const TaskSchema = z.object({
@@ -23,7 +23,7 @@ const TaskSchema = z.object({
   lastUserMessage: z.string().optional(),
   answer: z.string().optional(),
   workspace: WorkspaceDocumentSchema.optional(),
-  multiStep: z.object({ steps: DialogueMultiStepPlanSchema.shape.steps, currentStep: z.number().int().min(0).max(2), completedPreviewIds: z.array(z.string()) }).strict().optional(),
+  multiStep: z.object({ steps: DialogueMultiStepPlanSchema.shape.steps, currentStep: z.number().int().min(0).max(3), completedPreviewIds: z.array(z.string()), payrollCorrectionSource: z.string().optional() }).strict().optional(),
 });
 export type DialogueTask = z.infer<typeof TaskSchema>;
 export type DialogueTurn = { runId: string; threadId: string; message: string; previous: unknown };
@@ -112,6 +112,9 @@ function normalizeMultiStepPlan(plan: DialogueMultiStepPlan, calendarDate: strin
 function document(title: string, text: string, blocks: WorkspaceDocument['blocks'] = [], resultKind: WorkspaceResultKind = 'query'): WorkspaceDocument {
   return WorkspaceDocumentSchema.parse({ protocolVersion, resultKind, title, blocks: [{ type: 'summary', title, text }, ...blocks], sources: [] });
 }
+function withSources(workspace: WorkspaceDocument, sources: WorkspaceDocument['sources']): WorkspaceDocument {
+  return WorkspaceDocumentSchema.parse({ ...workspace, sources });
+}
 function finish(task: DialogueTask, runId: string, answer: string, workspace: WorkspaceDocument): DialogueResult {
   const result = { ...workspace, taskVersion: task.version };
   return { task: { ...task, lastRunId: runId, answer, workspace: result }, answer, workspace: result };
@@ -119,6 +122,10 @@ function finish(task: DialogueTask, runId: string, answer: string, workspace: Wo
 function ask(task: DialogueTask, runId: string, question: string): DialogueResult {
   task.status = 'collecting';
   return finish(task, runId, question, document('请补充信息', question, [], 'clarification'));
+}
+function withCompletedSteps(task: DialogueTask, message: string): string {
+  const completed = task.multiStep?.completedPreviewIds.length ?? 0;
+  return completed ? `第${completed}步已确认，未撤销；第${completed + 1}步${task.previewId ? '状态需重新查询' : '尚未生成可确认预览'}。${message}` : message;
 }
 function isExecutedReceiptQuestion(message: string): boolean {
   return /(?:这|那)?笔(?:记录|业务|操作)?.*(?:还能|可以|怎么|是否)?.*(?:打开|查看|查询|回执|结果)|(?:查看|查询|打开).*(?:原记录|回执|执行结果)/u.test(message.trim());
@@ -180,9 +187,14 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
     if (previous.lastRunId === turn.runId && previous.workspace && previous.answer !== undefined) return { result: { task: previous, workspace: previous.workspace, answer: previous.answer } };
     const task: DialogueTask = { ...previous, fields: { ...previous.fields }, selected: { ...previous.selected }, candidates: [...previous.candidates], references: [...previous.references], version: previous.version + 1 };
     if (!recoveryCommands.has(turn.message.trim())) task.lastUserMessage = turn.message;
-    if (previous.multiStep && previous.status === 'ready' && !previous.previewId && ['继续', '开始第一步', '开始办理'].includes(turn.message.trim())) {
+    if (previous.multiStep && !['completed', 'cancelled'].includes(previous.status) && turn.message.trim() !== '取消当前办理'
+      && !hasExplicitPayrollCorrectionDates(previous.multiStep, previous.multiStep.payrollCorrectionSource ?? previous.lastUserMessage ?? '')) {
+      const answer = `${previous.previewId ? '当前已有确认单，状态需要先向Core核查；' : ''}这项历史工资纠错无法核实年份，请先取消当前办理，再分别写明工资所属年月和实际支付日期的年月日，重新发起。已执行的步骤不会自动撤销。`;
+      return { result: finish(task, turn.runId, answer, document('请核实工资纠错年份', answer, [], 'clarification')) };
+    }
+    if (previous.multiStep && previous.status === 'ready' && !previous.previewId && ['继续', '开始第一步', '开始办理', ...recoveryCommands].includes(turn.message.trim())) {
       const step = previous.multiStep.steps[previous.multiStep.currentStep]!;
-      return { prepared: { previous, task, alreadyExecuted: false, forcedIntent: { mode:'continue',operation:step.operation,fields:step.fields,question:null } } };
+      return { prepared: { previous, task, alreadyExecuted: false, forcedIntent: { mode:'continue',operation:step.operation,fields:{},question:null } } };
     }
     if (previous.multiStep && previous.status === 'awaiting_confirmation' && previous.previewId) {
       const preview = await input.tools.readPreview(input.capability, previous.previewId);
@@ -204,7 +216,8 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           task.multiStep = multiStep;
           task.executedPreviewId = previous.previewId;
           task.status = 'completed';
-          return { result: finish(task, turn.runId, '两步办理均已分别在Core确认执行。', document('两步办理已完成', '两步业务均已由浏览器分别确认。')) };
+          const answer = `${multiStep.steps.length}步办理均已分别在Core确认执行。`;
+          return { result: finish(task, turn.runId, answer, document('多步办理已完成', answer)) };
         }
         const step = multiStep.steps[multiStep.currentStep]!;
         const nextFields={...step.fields};
@@ -212,16 +225,18 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           const channel=['现金','微信','支付宝','银行卡','其他'].find(value=>turn.message.includes(value));
           if(channel)nextFields.channel=channel;
         }
-        const sameAccount = previous.fields.studentName === step.fields.studentName && previous.fields.courseName === step.fields.courseName;
         task.multiStep = multiStep;
         task.operation = step.operation;
+        task.status = 'ready';
         task.fields = Object.fromEntries(Object.entries(nextFields).filter((entry): entry is [string, string] => entry[1] !== null));
-        task.selected = sameAccount ? { accountId: previous.selected.accountId ?? '' } : {};
-        if (!task.selected.accountId) delete task.selected.accountId;
+        task.selected = {};
         task.candidates = [];
         delete task.previewId;
         const withoutOldPreview = { ...previous };
         delete withoutOldPreview.previewId;
+        if (turn.message.trim() === '取消当前办理') {
+          return { prepared: { previous:withoutOldPreview, task, alreadyExecuted:false, forcedIntent:{ mode:'cancel',operation:null,fields:{},question:null } } };
+        }
         return { prepared: { previous: withoutOldPreview, task, alreadyExecuted: false, forcedIntent: { mode:'continue', operation:step.operation, fields:nextFields, question:null } } };
       }
     }
@@ -257,17 +272,30 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
     const calendarDate = businessDate(input.now?.() ?? new Date());
     const boundedPlan = !prepared.previous.multiStep ? deterministicMultiStep(userMessage, calendarDate) : null;
     if (boundedPlan) {
+      if (!hasExplicitPayrollCorrectionDates(boundedPlan, userMessage)) return { result: ask(prepared.task, turn.runId, '请重新说明工资所属月份和更正后的实际支付日期，分别写明年份、月份和日期；当前未生成预览。') };
       prepared.multiStepPlan = normalizeMultiStepPlan(boundedPlan, calendarDate);
       const step = prepared.multiStepPlan.steps[0]!;
       return { intent:{ mode:'new',operation:step.operation,fields:step.fields,question:null } };
     }
     if (!prepared.previous.multiStep && input.understandMultiStep) {
-      const candidate = await input.understandMultiStep({ userMessage, task: { operation:prepared.task.operation,fields:prepared.task.fields } }, signal);
+      let candidate: DialogueMultiStepPlan | null;
+      try {
+        candidate = await input.understandMultiStep({ userMessage, task: { operation:prepared.task.operation,fields:prepared.task.fields } }, signal);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'AI_MULTI_STEP_INVALID') return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；当前未生成预览。') };
+        throw error;
+      }
       if (candidate) {
         const plan = normalizeMultiStepPlan(DialogueMultiStepPlanSchema.parse(candidate), calendarDate);
+        if (!hasExplicitPayrollCorrectionDates(plan, userMessage)) return { result: ask(prepared.task, turn.runId, '请重新说明工资所属月份和更正后的实际支付日期，分别写明年份、月份和日期；当前未生成预览。') };
+        if (!hasRequiredStepOrder(plan, userMessage)) return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；当前未生成预览。') };
         prepared.multiStepPlan = plan;
         const step = plan.steps[0]!;
         return { intent: { mode:'new', operation:step.operation, fields:step.fields, question:null } };
+      }
+      const command = userMessage.split(/[,，；;]\s*备注[：:]?/u, 1)[0]!;
+      if (/(?:再|然后|接着)[^，。；;]{0,25}(?:排|交|缴|收|赠|送|登记|调整|支付|生成|办理|开户)/u.test(command)) {
+        return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；当前未生成预览。') };
       }
     }
     const context = { businessDate: calendarDate, task: { status:prepared.task.status,operation: prepared.task.operation, fields: prepared.task.fields, candidates: prepared.task.candidates, references: prepared.task.references, hasPreview: !!prepared.previous.previewId && !prepared.alreadyExecuted, alreadyExecuted: prepared.alreadyExecuted }, userMessage };
@@ -324,13 +352,13 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const completedSteps = multiStep?.completedPreviewIds.length ?? 0;
         if (multiStep && completedSteps > 0) {
           const remainingSteps = multiStep.steps.length - completedSteps;
-          const answer = `已取消后续步骤。两步办理里前 ${completedSteps} 步已经确认生效，剩余 ${remainingSteps} 步没有执行，也没有做任何撤销；如需撤回已生效的部分，请单独发起对应的纠错或冲正。`;
+          const answer = `已取消后续步骤。${multiStep.steps.length}步办理里前 ${completedSteps} 步已经确认生效，剩余 ${remainingSteps} 步没有执行，也没有做任何撤销；如需撤回已生效的部分，请单独发起对应的纠错或冲正。`;
           return finish(task, turn.runId, answer, document('已取消后续步骤', answer));
         }
         return finish(task, turn.runId, '已取消当前待办理事项，未执行业务变更。', document('已取消办理', '待办理预览已失效；已经确认的业务不受影响。'));
       }
       if (task.multiStep && intent.operation && intent.operation !== task.multiStep.steps[task.multiStep.currentStep]?.operation) {
-        return ask(task, turn.runId, `当前是第${task.multiStep.currentStep + 1}步；如需结束两步办理，请取消当前办理。`);
+        return ask(task, turn.runId, `当前是第${task.multiStep.currentStep + 1}步；如需结束多步办理，请取消当前办理。`);
       }
       if (intent.mode === 'clarify' && !intent.operation) {
         const protectedAction = accessProbeForAmbiguousRequest(turn.message);
@@ -442,9 +470,9 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           ? `${result.period}实际收款${report.cashIncome}元，现金支出${report.cashExpense}元，现金净额${report.cashNet}元。`
           : f.basis === '经营'
             ? `${result.period}经营收入${report.operatingIncome}元（课消${report.lessonIncome}元、退款手续费${report.refundFeeIncome}元、其他经营收入${report.manualIncome}元），经营成本${report.operatingExpense}元（工资${report.payrollCost}元、赠送课消${report.giftCost}元、其他经营支出${report.manualExpense}元），经营利润${report.operatingProfit}元。`
-            : `${result.period}现金口径：实际收款${report.cashIncome}元、现金支出${report.cashExpense}元、现金净额${report.cashNet}元；经营口径：经营收入${report.operatingIncome}元、经营成本${report.operatingExpense}元、经营利润${report.operatingProfit}元。现金净额与经营利润相差${report.cashOperatingGap}元，主要因为收款按到账确认，而课消、赠送成本和工资按经营发生确认。`;
+            : `${result.period}现金口径：实际收款${report.cashIncome}元、现金支出${report.cashExpense}元、现金净额${report.cashNet}元；经营口径：经营收入${report.operatingIncome}元、经营成本${report.operatingExpense}元、经营利润${report.operatingProfit}元。经营收入包括课消${report.lessonIncome}元、退款手续费${report.refundFeeIncome}元、其他经营收入${report.manualIncome}元；经营成本包括工资${report.payrollCost}元、赠送课消${report.giftCost}元、其他经营支出${report.manualExpense}元。现金净额与经营利润相差${report.cashOperatingGap}元；收款按到账确认，课消、赠送成本和工资按经营发生确认。`;
         task.status = 'completed';
-        return finish(task, turn.runId, answer, document(`月报 · ${result.period}`, answer, [{ type: 'metric-grid', metrics: [
+        return finish(task, turn.runId, answer, withSources(document(`月报 · ${result.period}`, answer, [{ type: 'metric-grid', metrics: [
           { label: '现金收入', value: report.cashIncome, tone: 'positive' },
           { label: '现金支出', value: report.cashExpense, tone: 'warning' },
           { label: '现金净额', value: report.cashNet, tone: 'neutral' },
@@ -453,7 +481,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           { label: '课消收入', value: report.lessonIncome, tone: 'positive' },
           { label: '工资成本', value: report.payrollCost, tone: 'warning' },
           { label: '经营利润', value: report.operatingProfit, tone: 'neutral' },
-        ] }]));
+        ] }]), [{ type:'report', id:result.period, label:`${result.period}月报` }]));
       }
       if (task.operation === 'payroll.read') {
         const result = await input.tools.readMonthlyPayroll(input.capability, { period: f.period! });
@@ -479,11 +507,11 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const courseText = courses.map(item => `${item.name} ${item.defaultDurationMinutes}分钟，默认${item.defaultUnitPrice}元`).join('；') || '无课程';
         const answer = `学生：${studentText}${duplicateStudents.length ? `；同名：${duplicateStudents.join('、')}` : ''}。老师：${teacherText}。课程：${courseText}。`;
         task.status = 'completed';
-        return finish(task, turn.runId, answer, document('基础资料', answer, [
+        return finish(task, turn.runId, answer, withSources(document('基础资料', answer, [
           { type:'data-table', columns:[{ key:'name',label:'学生' },{ key:'status',label:'学籍状态' }], rows:students.map(item => ({ name:item.name,status:item.enrollmentStatus })) },
           { type:'data-table', columns:[{ key:'name',label:'老师' },{ key:'status',label:'状态' }], rows:teachers.map(item => ({ name:item.name,status:item.isActive ? '启用' : '停用' })) },
           { type:'data-table', columns:[{ key:'name',label:'课程' },{ key:'status',label:'状态' }], rows:courses.map(item => ({ name:item.name,status:item.isActive ? '启用' : '停用' })) },
-        ]));
+        ]), students.map(student => ({ type:'student', id:student.studentId, label:student.name }))));
       }
       if (task.operation === 'arrears.read') {
         if (!input.tools.readArrearsAndFrozen) return ask(task, turn.runId, '欠费与冻结名单读取尚未接入当前Agent；未读取业务记录。');
@@ -535,13 +563,19 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         return finish(task, turn.runId, answer, workspace);
       }
       const accountOperations = ['accounts.read', 'ledger.read', 'payment.preview', 'gift.preview', 'ledger-entry.reversal', 'lesson.schedule', 'course-account.price'];
-      if (task.operation === 'accounts.read' && !f.courseName) {
+      if (task.operation === 'accounts.read' && !f.courseName && !task.selected.accountId) {
         const found = await input.tools.getCourseAccountCandidates(input.capability, { studentName:f.studentName!,match:'search' });
         if (found.candidates.length === 0) return ask(task, turn.runId, '没有找到该学生的课程账户，请核对学生姓名。');
+        const students = await input.tools.getStudentCandidates(input.capability, { studentName:f.studentName!,match:'search' });
+        if (students.candidates.length !== 1 || found.candidates.some(candidate => candidate.studentName !== students.candidates[0]?.name)) {
+          if (found.candidates.length === 1) return ask(task, turn.runId, '学生姓名有多个匹配，请补充课程名称并选择课程账户后查看余额。');
+          const selection = choose(task, turn.runId, found.candidates.map(item => ({ id:item.accountId,label:`${item.studentName} · ${item.courseName}`,description:`账户 ${item.accountId.slice(-8)}`,field:'accountId',values:{studentName:item.studentName,courseName:item.courseName} })), '学生课程账户');
+          if (selection) return selection;
+        }
         const accounts = await Promise.all(found.candidates.map(candidate => input.tools.readAccount(input.capability, { accountId:candidate.accountId })));
         const answer = accounts.map(account => `${account.courseName}：实收 ${account.paidBalance}，赠送 ${account.giftBalance}，总 ${account.totalBalance}，单价 ${account.currentUnitPrice}`).join('；');
         task.status = 'completed';
-        return finish(task, turn.runId, `${f.studentName}各课程账户：${answer}。`, document(`课程账户 · ${f.studentName}`, '以下金额按课程分别读取。', [{ type:'data-table', columns:[{key:'course',label:'课程'},{key:'paid',label:'实收余额'},{key:'gift',label:'赠送余额'},{key:'total',label:'总余额'},{key:'price',label:'单节价格'}], rows:accounts.map(account => ({course:account.courseName,paid:account.paidBalance,gift:account.giftBalance,total:account.totalBalance,price:account.currentUnitPrice})) }]));
+        return finish(task, turn.runId, `${f.studentName}各课程账户：${answer}。`, withSources(document(`课程账户 · ${f.studentName}`, '以下金额按课程分别读取。', [{ type:'data-table', columns:[{key:'course',label:'课程'},{key:'paid',label:'实收余额'},{key:'gift',label:'赠送余额'},{key:'total',label:'总余额'},{key:'price',label:'单节价格'}], rows:accounts.map(account => ({course:account.courseName,paid:account.paidBalance,gift:account.giftBalance,total:account.totalBalance,price:account.currentUnitPrice})) }]), accounts.map(account => ({ type:'courseAccount', id:account.accountId, label:`${account.studentName} · ${account.courseName}` }))));
       }
       if (accountOperations.includes(task.operation) && !task.selected.accountId) {
         const found = await input.tools.getCourseAccountCandidates(input.capability, { studentName: f.studentName!, courseName: f.courseName!, match: 'search' });
@@ -550,7 +584,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       if (task.operation === 'accounts.read') {
         const account = await input.tools.readAccount(input.capability, { accountId: task.selected.accountId! });
         task.status = 'completed';
-        return finish(task, turn.runId, `${account.studentName}的${account.courseName}：实收 ${account.paidBalance}，赠送 ${account.giftBalance}，总 ${account.totalBalance}，单价 ${account.currentUnitPrice}。`, document(`课程账户 · ${account.studentName}`, '以下金额来自课程账户。', [{ type: 'data-table', columns: [{ key: 'course', label: '课程' },{ key: 'paid', label: '实收余额' },{ key: 'gift', label: '赠送余额' },{ key: 'total', label: '总余额' },{ key: 'price', label: '单节价格' }], rows: [{ course: account.courseName, paid: account.paidBalance, gift: account.giftBalance, total: account.totalBalance, price: account.currentUnitPrice }] }]));
+        return finish(task, turn.runId, `${account.studentName}的${account.courseName}：实收 ${account.paidBalance}，赠送 ${account.giftBalance}，总 ${account.totalBalance}，单价 ${account.currentUnitPrice}。`, withSources(document(`课程账户 · ${account.studentName}`, '以下金额来自课程账户。', [{ type: 'data-table', columns: [{ key: 'course', label: '课程' },{ key: 'paid', label: '实收余额' },{ key: 'gift', label: '赠送余额' },{ key: 'total', label: '总余额' },{ key: 'price', label: '单节价格' }], rows: [{ course: account.courseName, paid: account.paidBalance, gift: account.giftBalance, total: account.totalBalance, price: account.currentUnitPrice }] }]), [{ type:'courseAccount', id:account.accountId, label:`${account.studentName} · ${account.courseName}` }]));
       }
       if (task.operation === 'ledger.read') {
         const result = await input.tools.readAccountLedger(input.capability, { accountId: task.selected.accountId! });
@@ -559,7 +593,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           return (!f.dateFrom || occurredBusinessDate >= f.dateFrom) && (!f.dateTo || occurredBusinessDate <= f.dateTo);
         });
         const account = await input.tools.readAccount(input.capability, { accountId:task.selected.accountId! });
-        const kindLabels: Record<string,string> = { PAYMENT:'交费',GIFT:'赠送',LESSON_CONSUMPTION:'课消',PAYMENT_REVERSAL:'交费冲正',GIFT_REVERSAL:'赠送冲正',LESSON_CONSUMPTION_REVERSAL:'课消冲正',REFUND:'退款',GIFT_CLEARING:'赠送清零' };
+        const kindLabels: Record<string,string> = { PAYMENT:'交费',GIFT:'赠送',LESSON_CONSUMPTION:'课消',PAYMENT_REVERSAL:'交费冲正',GIFT_REVERSAL:'赠送冲正',LESSON_CONSUMPTION_REVERSAL:'课消冲正',LESSON_CONSUMPTION_CORRECTION:'课消纠正',REFUND_PAID:'退款',REFUND_GIFT_CLEARING:'赠送清零' };
         const entryText = entries.map(entry => {
           const label = kindLabels[entry.kind] ?? entry.kind;
           const amount = entry.amount;
@@ -571,7 +605,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const rangeText = f.dateFrom ? `${f.dateFrom.slice(0,7)} ` : '';
         const answer = `${rangeText}${f.studentName}的${f.courseName}流水：${entryText || '无记录'}；当前实收 ${account.paidBalance}，赠送 ${account.giftBalance}。`;
         task.status = 'completed';
-        return finish(task, turn.runId, answer, document(`课程流水 · ${f.studentName}`, answer, [{ type:'ledger-detail', accountId:result.accountId, entries:entries.map(entry => ({ id:entry.entryId,occurredAt:entry.occurredAt,description:`${entry.kind}${entry.operator ? ` · ${entry.operator}` : ''}${entry.note ? ` · ${entry.note}` : ''}`,paidDelta:entry.paidDelta,giftDelta:entry.giftDelta })) }]));
+        return finish(task, turn.runId, answer, withSources(document(`课程流水 · ${f.studentName}`, answer, [{ type:'ledger-detail', accountId:result.accountId, entries:entries.map(entry => ({ id:entry.entryId,occurredAt:entry.occurredAt,description:`${kindLabels[entry.kind] ?? entry.kind}${entry.operator ? ` · ${entry.operator}` : ''}${entry.note ? ` · ${entry.note}` : ''}`,paidDelta:entry.paidDelta,giftDelta:entry.giftDelta })) }]), entries.map(entry => ({ type:'ledgerEntry', id:entry.entryId, label:`${businessDate(new Date(entry.occurredAt))} · ${kindLabels[entry.kind] ?? entry.kind}` }))));
       }
       if (task.operation === 'ledger-entry.reversal' && !task.selected.entryId) {
         const ledger = await input.tools.readAccountLedger(input.capability, { accountId:task.selected.accountId! });
@@ -680,7 +714,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         }
         if ((task.operation === 'payroll.adjust' || task.operation === 'payroll.pay' || task.operation === 'payroll.cancel-payment') && !task.selected.payrollId) {
           const found = await input.tools.getPayrollCandidates(input.capability, { teacherName: f.teacherName!, period: f.period! });
-          const eligible = task.operation === 'payroll.cancel-payment' ? found.candidates.filter(item => item.status === 'PAID') : found.candidates;
+          const eligible = found.candidates.filter(item => item.teacherId === task.selected.teacherId && (task.operation !== 'payroll.cancel-payment' || item.status === 'PAID'));
           const result = choose(task, turn.runId, eligible.map(item => ({ id: item.payrollId, label: `${item.teacherName} · ${item.period}`, description:item.status, field: 'payrollId', values: {} })), task.operation === 'payroll.cancel-payment' ? '已支付工资记录' : '工资记录'); if (result) return result;
         }
       }
@@ -719,16 +753,16 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           : f.studentName ?? f.teacherName ?? f.courseName ?? '';
       return finish(task, turn.runId, `已生成${previewSubject ? `${previewSubject}的` : ''}操作预览，尚未执行。`, structuredDocument(preview));
     } catch (error) {
-      const message = error instanceof CoreDialogueError ? error.message : error instanceof z.ZodError ? '业务参数不完整或不合法，请核对后再试' : 'AI处理暂时失败，请稍后重试。未确认的业务不会自动执行。';
+      const message = withCompletedSteps(task, error instanceof CoreDialogueError ? error.message : error instanceof z.ZodError ? '业务参数不完整或不合法，请核对后再试' : 'AI处理暂时失败，请稍后重试。未确认的业务不会自动执行。');
       const recovery: WorkspaceDocument['blocks'][number] = { type: 'error-recovery', code: error instanceof CoreDialogueError ? `CORE_${error.status}` : error instanceof z.ZodError ? 'CORE_400' : 'AI_PROCESS_FAILED', message, actions: ['refresh', 'open-structured-page'] };
       const workspace = task.previewId && task.workspace ? { ...task.workspace, resultKind: 'error' as const, blocks: [...task.workspace.blocks, recovery] } : document('暂时无法完成', message, [recovery], 'error');
       return finish(task, turn.runId, message, workspace);
     }
   };
   const failure = (turn: DialogueTurn, task: DialogueTask, error: unknown) => {
-    const message = error instanceof CoreDialogueError
+    const message = withCompletedSteps(task, error instanceof CoreDialogueError
       ? (refusalGuidance(error.code, error.status) ?? error.message)
-      : 'AI处理暂时失败，请稍后重试。未确认的业务不会自动执行。';
+      : 'AI处理暂时失败，请稍后重试。未确认的业务不会自动执行。');
     const recovery: WorkspaceDocument['blocks'][number] = { type:'error-recovery', code: error instanceof CoreDialogueError ? `CORE_${error.status}` : 'AI_PROCESS_FAILED', message, actions:['refresh','open-structured-page'] };
     const workspace = task.previewId && task.workspace ? { ...task.workspace, resultKind: 'error' as const, blocks:[...task.workspace.blocks, recovery] } : document('暂时无法完成', message, [recovery], 'error');
     return { result: finish(task, turn.runId, message, workspace) };
@@ -764,19 +798,20 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const task = prepared.task;
         task.operation = first.operation;
         task.fields = Object.fromEntries(Object.entries(first.fields).filter((entry): entry is [string,string] => entry[1] !== null));
-        task.multiStep = { steps:plan.steps,currentStep:0,completedPreviewIds:[] };
+        task.multiStep = { steps:plan.steps,currentStep:0,completedPreviewIds:[], ...(first.operation === 'payroll.cancel-payment' && second.operation === 'payroll.pay' ? { payrollCorrectionSource:turn.message } : {}) };
         task.status = 'ready';
-        const name = (operation: string) => operation === 'payment.preview' ? '交费'
+        const name = (operation: string) => operation === 'course-account.open' ? '开课程账户' : operation === 'payment.preview' ? '交费'
           : operation === 'gift.preview' ? '赠送'
             : operation === 'lesson.schedule' ? '排课'
               : operation === 'ledger-entry.reversal' ? '冲正原流水'
-                : operation === 'payroll.cancel-payment' ? '撤销原工资支付' : '重新登记工资支付';
-        const describe = (step: typeof first) => `${name(step.operation)}${step.fields.courseName ? `（${step.fields.courseName}` : '（'}${step.fields.amount ? `${moneyText(step.fields.amount)}元` : ''}${step.fields.startsAt ? `，${step.fields.startsAt}` : ''}${step.fields.channel ? `，${step.fields.channel}` : ''}）`;
+                : operation === 'payroll.cancel-payment' ? '撤销原工资支付' : operation === 'payroll.generate' ? '生成工资' : operation === 'payroll.adjust' ? '调整工资' : '登记工资支付';
+        const describe = (step: typeof first) => `${name(step.operation)}${step.fields.courseName ? `（${step.fields.courseName}` : '（'}${step.fields.amount ? `${moneyText(step.fields.amount)}元` : ''}${step.fields.startsAt ? `，${step.fields.startsAt}` : ''}${step.fields.channel ? `，${step.fields.channel}` : ''}）${[step.fields.studentName && `学生：${step.fields.studentName}`,step.fields.teacherName && `老师：${step.fields.teacherName}`,step.fields.currentUnitPrice && `单价${moneyText(step.fields.currentUnitPrice)}元`,step.fields.weeks && `周数：${step.fields.weeks}`,step.fields.reason && `原因：${step.fields.reason}`,step.fields.period && `月份：${step.fields.period}`,step.fields.paidAt && `支付日期：${step.fields.paidAt}`,step.fields.baseSalary && `底薪${moneyText(step.fields.baseSalary)}元`,step.fields.commissionRate && `提成比例${step.fields.commissionRate}`,step.fields.bonusAmount && `奖金${moneyText(step.fields.bonusAmount)}元`,step.fields.bonusNote && `奖金说明：${step.fields.bonusNote}`,step.fields.deductionAmount && `代扣${moneyText(step.fields.deductionAmount)}元`,step.fields.deductionNote && `代扣说明：${step.fields.deductionNote}`].filter(Boolean).join('、')}`;
         const untouched = first.fields.courseName === second.fields.courseName && first.operation === 'payment.preview' && second.operation === 'gift.preview' ? '其他课程（如陪练）不会改动。' : '';
         const statedTotal = /(?:收|合计)(\d+(?:\.\d{1,2})?)元/u.exec(turn.message)?.[1];
         const totalText = statedTotal && first.operation === 'payment.preview' && second.operation === 'payment.preview' ? `原请求总额${moneyText(statedTotal)}元；` : '';
-        const answer = `已拆为按顺序分别确认的两步：${totalText}第一步${describe(first)}；第二步${describe(second)}。${untouched}回复“开始第一步”后才生成第一步预览，当前尚未执行。`;
-        return { result: finish(task, turn.runId, answer, document('两步办理计划', answer, [], 'clarification')) };
+        const stepsText = plan.steps.map((step,index) => `第${['一','二','三'][index]}步${describe(step)}`).join('；');
+        const answer = `已拆为按顺序分别确认的${plan.steps.length}步：${totalText}${stepsText}。${untouched}回复“开始第一步”后才生成第一步预览，当前尚未执行。`;
+        return { result: finish(task, turn.runId, answer, document('多步办理计划', answer, [], 'clarification')) };
       }
       return { result: await process(turn, prepared, intent) };
     } catch (error) {

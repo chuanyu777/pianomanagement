@@ -47,6 +47,7 @@ type RecoveryActionHandler = (action: RecoveryAction) => void;
 const ACTOR_SESSION_KEY = 'pianomanager.assistant.actor';
 const ASSISTANT_SESSION_PREFIX = 'pianomanager.assistant.session.v1:';
 const PREVIEW_IDEMPOTENCY_KEY_PREFIX = 'pianomanager.preview.idempotency.v1:';
+const HIDDEN_TASK_CHANNEL = 'pianomanager.assistant.hidden.v1';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,6 +81,20 @@ function getToken(): string | null {
 function assistantSessionKey(actor: Pick<AuthUser, 'id' | 'role' | 'teacherId'>): string {
   const scope = [actor.id, actor.role, actor.teacherId ?? ''].join(':');
   return `${ASSISTANT_SESSION_PREFIX}${encodeURIComponent(scope)}`;
+}
+
+type HiddenTaskNotice = { type: 'task-hidden'; actor: { id: string; role: string; teacherId: string | null }; threadId: string };
+type HiddenTaskUpdate = { threadId: string; hiddenThreads: Set<string> } | null;
+function hiddenTaskNotice(actor: AuthUser, threadId: string): HiddenTaskNotice {
+  return { type: 'task-hidden', actor: { id: actor.id, role: actor.role, teacherId: actor.teacherId ?? null }, threadId };
+}
+function publishHiddenTask(actor: AuthUser, threadId: string): void {
+  try {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel(HIDDEN_TASK_CHANNEL);
+    channel.postMessage(hiddenTaskNotice(actor, threadId));
+    channel.close();
+  } catch { /* Cross-tab synchronization is best effort. */ }
 }
 
 function readStoredActor(): AuthUser | null {
@@ -210,7 +225,7 @@ function useAssistantState() {
 type OverviewLesson = components['schemas']['DashboardLesson'];
 type DashboardOverview = components['schemas']['DashboardOverview'];
 type AssistantTaskSummary = { threadId: string; title: string; lastActivityAt: string; latestStatus: string | null };
-type AssistantTaskDetail = AssistantTaskSummary & { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>; workspace: WorkspaceDocument | null; historicalPreviews: HistoricalPreviewReference[] };
+type AssistantTaskDetail = AssistantTaskSummary & { messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>; nextBefore?: string | null; nextPreviewAfter?: string | null; previewHistoryTruncated?: boolean; workspace: WorkspaceDocument | null; historicalPreviews: HistoricalPreviewReference[] };
 const TASK_HISTORY_ACCESS_MESSAGE = '该任务不存在或当前账号无权访问，请返回任务列表查看。';
 
 function isOverviewLesson(value: unknown): value is OverviewLesson {
@@ -223,11 +238,11 @@ function isDashboardOverview(value: unknown): value is DashboardOverview {
   const students = value.students === null || (isRecord(value.students) && typeof value.students.total === 'number' && typeof value.students.frozenCount === 'number' && typeof value.students.arrearsCount === 'number');
   const finance = value.finance === null || (isRecord(value.finance) && hasString(value.finance, 'period') && hasString(value.finance, 'operatingProfit') && hasString(value.finance, 'cashNet'));
   const preclose = value.preclose === null || (isRecord(value.preclose) && hasString(value.preclose, 'period') && typeof value.preclose.closed === 'boolean' && typeof value.preclose.unpaidPayrollCount === 'number' && Array.isArray(value.preclose.blockers) && value.preclose.blockers.every((item) => isRecord(item) && hasString(item, 'code') && hasString(item, 'message') && typeof item.count === 'number'));
-  const recent = value.recentRecords === null || (Array.isArray(value.recentRecords) && value.recentRecords.every((item) => isRecord(item) && ['id', 'kind', 'occurredAt', 'studentName', 'courseName', 'paidDelta', 'giftDelta'].every((key) => hasString(item, key))));
+  const recent = value.recentRecords === null || (Array.isArray(value.recentRecords) && value.recentRecords.every((item) => isRecord(item) && ['id', 'studentId', 'accountId', 'kind', 'occurredAt', 'studentName', 'courseName', 'paidDelta', 'giftDelta'].every((key) => hasString(item, key))));
   return students && finance && preclose && recent;
 }
 function isTaskSummary(value: unknown): value is AssistantTaskSummary { return isRecord(value) && hasString(value, 'threadId') && hasString(value, 'title') && hasString(value, 'lastActivityAt') && (value.latestStatus === null || typeof value.latestStatus === 'string'); }
-function isTaskDetail(value: unknown): value is AssistantTaskDetail { if (!isTaskSummary(value) || !isRecord(value)) return false; const record = value as unknown as Record<string, unknown>; const messages = record['messages']; const historicalPreviews = record['historicalPreviews']; return Array.isArray(messages) && messages.every((message: unknown) => isRecord(message) && hasString(message, 'id') && (message.role === 'user' || message.role === 'assistant') && hasString(message, 'content') && hasString(message, 'createdAt')) && (record['workspace'] === null || WorkspaceDocumentSchema.safeParse(record['workspace']).success) && Array.isArray(historicalPreviews) && historicalPreviews.every((preview: unknown) => HistoricalPreviewReferenceSchema.safeParse(preview).success); }
+function isTaskDetail(value: unknown): value is AssistantTaskDetail { if (!isTaskSummary(value) || !isRecord(value)) return false; const record = value as unknown as Record<string, unknown>; const messages = record['messages']; const historicalPreviews = record['historicalPreviews']; const previewCursor = record['nextPreviewAfter']; return Array.isArray(messages) && messages.every((message: unknown) => isRecord(message) && hasString(message, 'id') && (message.role === 'user' || message.role === 'assistant') && hasString(message, 'content') && hasString(message, 'createdAt')) && (record['nextBefore'] === undefined || record['nextBefore'] === null || (typeof record['nextBefore'] === 'string' && UUID_PATTERN.test(record['nextBefore']))) && (previewCursor === undefined || previewCursor === null || (typeof previewCursor === 'string' && /^[1-9]\d{0,18}:(?:0|[1-9]\d{0,18})$/.test(previewCursor))) && (record['workspace'] === null || WorkspaceDocumentSchema.safeParse(record['workspace']).success) && Array.isArray(historicalPreviews) && historicalPreviews.every((preview: unknown) => HistoricalPreviewReferenceSchema.safeParse(preview).success); }
 function overviewMoney(value: string | undefined): string {
   return value ? `¥${value}` : '—';
 }
@@ -348,9 +363,16 @@ function TaskHistoryPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useOutletContext<{ user: AuthUser | null }>();
+  const [hiding, setHiding] = useState(false);
+  const [hideError, setHideError] = useState<string | null>(null);
+  const [pageCursors, setPageCursors] = useState<string[]>([]);
+  const [previewCursors, setPreviewCursors] = useState<string[]>([]);
+  const before = pageCursors.at(-1);
+  const previewAfter = previewCursors.at(-1);
+  useEffect(() => { setPageCursors([]); setPreviewCursors([]); }, [threadId]);
   const task = useQuery({
-    queryKey: ['assistant-task', user?.id, user?.role, user?.teacherId ?? null, threadId],
-    queryFn: () => apiRequest(`/api/assistant/tasks/${encodeURIComponent(threadId)}`, isTaskDetail, undefined, { 403: TASK_HISTORY_ACCESS_MESSAGE, 404: TASK_HISTORY_ACCESS_MESSAGE }),
+    queryKey: ['assistant-task', user?.id, user?.role, user?.teacherId ?? null, threadId, before ?? null, previewAfter ?? null],
+    queryFn: () => { const params = new URLSearchParams(); if (before) params.set('before', before); if (previewAfter) params.set('previewAfter', previewAfter); const query = params.toString(); return apiRequest(`/api/assistant/tasks/${encodeURIComponent(threadId)}${query ? `?${query}` : ''}`, isTaskDetail, undefined, { 403: TASK_HISTORY_ACCESS_MESSAGE, 404: TASK_HISTORY_ACCESS_MESSAGE }); },
     enabled: Boolean(user) && UUID_PATTERN.test(threadId),
   });
   const invalidateHomeAfterConfirmation = useCallback(() => {
@@ -363,27 +385,49 @@ function TaskHistoryPage() {
     : workspace;
   const currentWorkspacePreviewIds = new Set(workspace?.blocks.flatMap((block) => block.type === 'action-preview' ? [block.previewId] : []) ?? []);
   const historicalPreviews = task.data?.historicalPreviews.filter((preview, index, all) => all.findIndex((candidate) => candidate.previewId === preview.previewId) === index) ?? [];
+  const hideTask = async () => {
+    if (!task.data || hiding || !window.confirm('删除此聊天展示？业务记录、操作审计和回执会保留。')) return;
+    setHiding(true);
+    setHideError(null);
+    try {
+      await apiRequest(`/api/assistant/tasks/${encodeURIComponent(threadId)}`, (value): value is { hidden: true } => isRecord(value) && value.hidden === true, { method: 'DELETE' }, { 403: TASK_HISTORY_ACCESS_MESSAGE, 404: TASK_HISTORY_ACCESS_MESSAGE });
+      if (user) publishHiddenTask(user, threadId);
+      try {
+        if (user && readAssistantSession(user)?.threadId === threadId) window.sessionStorage.removeItem(assistantSessionKey(user));
+      } catch { /* Session storage may be unavailable. */ }
+      queryClient.removeQueries({ queryKey: ['assistant-task', user?.id, user?.role, user?.teacherId ?? null, threadId] });
+      await queryClient.invalidateQueries({ queryKey: ['assistant-tasks', user?.id, user?.role, user?.teacherId ?? null] });
+      navigate('/');
+    } catch (error) {
+      setHideError(error instanceof Error ? error.message : '暂时无法删除聊天展示，请重试。');
+    } finally { setHiding(false); }
+  };
   return <section className="task-history-page">
-    <div className="task-history-head"><div><span className="eyebrow accent-eyebrow">PERSISTED TASK</span><Title level={1}>{task.data?.title ?? '任务详情'}</Title><p>消息和确认单按当前登录身份重新读取；执行状态与回执以系统当前记录为准。</p></div><div className="task-history-actions"><Button onClick={() => navigate('/')}>返回工作台</Button><Button disabled={!task.data} onClick={() => { if (!task.data) return; writeAssistantSession(user, { threadId: task.data.threadId, messages: task.data.messages.map((message) => ({ id: message.id, role: message.role, text: message.content })), ...(workspaceForRecovery ? { workspace: workspaceForRecovery, workspaceThreadId: task.data.threadId, requireCorePreviewDisplay: true } : {}) }); navigate('/'); }} type="primary">继续此任务</Button></div></div>
+    <div className="task-history-head"><div><span className="eyebrow accent-eyebrow">PERSISTED TASK</span><Title level={1}>{task.data?.title ?? '任务详情'}</Title><p>消息和确认单按当前登录身份重新读取；执行状态与回执以系统当前记录为准。</p></div><div className="task-history-actions"><Button onClick={() => navigate('/')}>返回工作台</Button><Button disabled={!task.data || hiding} loading={hiding} onClick={() => void hideTask()}>删除聊天展示</Button><Button disabled={!task.data || hiding || Boolean(before)} onClick={() => { if (!task.data) return; writeAssistantSession(user, { threadId: task.data.threadId, messages: task.data.messages.map((message) => ({ id: message.id, role: message.role, text: message.content })), ...(workspaceForRecovery ? { workspace: workspaceForRecovery, workspaceThreadId: task.data.threadId, requireCorePreviewDisplay: true } : {}) }); navigate('/'); }} type="primary">继续此任务</Button></div></div>
+    {hideError && <Alert message="无法删除聊天展示" description={hideError} type="error" showIcon />}
     {task.isLoading ? <div className="loading-state">正在读取任务…</div> : task.isError ? <Alert message="暂时无法读取任务" description={task.error.message} type="error" showIcon /> : <>
-      {task.data && <div className="task-transcript">{task.data.messages.map((message) => <article className={`task-message ${message.role}`} key={message.id}><header><strong>{message.role === 'user' ? '你' : 'AI 助手'}</strong><time>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(message.createdAt))}</time></header><p>{formatAssistantReply(message.content)}</p></article>)}</div>}
       <section aria-label="历史确认单列表" className="task-history-workspace">
+        {task.data?.previewHistoryTruncated && !task.data.nextPreviewAfter && <Alert type="warning" showIcon message="确认单历史过多，当前仅显示部分记录" description="请通过业务页面核对记录；此处不能完整恢复全部历史确认单。" />}
         {historicalPreviews.length ? historicalPreviews.map((preview, index) => <div className="task-history-preview-step" key={preview.previewId}>
-          <span className="eyebrow">第 {index + 1} 步</span>
-          <PreviewConfirmationCard confirmAllowed={currentWorkspacePreviewIds.has(preview.previewId)} interactionDisabled={false} key={preview.previewId} onConfirmed={invalidateHomeAfterConfirmation} preview={{ type: 'action-preview', ...preview, title: `第 ${index + 1} 步确认单` }} previewRecheckVersion={0} requireCoreDisplay />
+          <span className="eyebrow">本页确认单 {index + 1}</span>
+          <PreviewConfirmationCard confirmAllowed={currentWorkspacePreviewIds.has(preview.previewId)} interactionDisabled={false} key={preview.previewId} onConfirmed={invalidateHomeAfterConfirmation} preview={{ type: 'action-preview', ...preview, title: `确认单 ${index + 1}` }} previewRecheckVersion={0} requireCoreDisplay />
         </div>) : <p className="workspace-empty">此任务没有已保存的确认单。</p>}
+        {task.data && (previewCursors.length > 0 || task.data.nextPreviewAfter) && <nav aria-label="历史确认单分页"><Button disabled={!previewCursors.length} onClick={() => setPreviewCursors((current) => current.slice(0, -1))}>上一页确认单</Button><Button disabled={!task.data.nextPreviewAfter} onClick={() => { if (task.data?.nextPreviewAfter) setPreviewCursors((current) => [...current, task.data!.nextPreviewAfter!]); }}>更多确认单</Button></nav>}
       </section>
+      {workspace && workspace.sources.length > 0 && <section aria-label="数据来源" className="workspace-summary workspace-sources"><strong>数据来源</strong>{workspace.sources.map((source) => <SourceLink key={`${source.type}-${source.id}`} source={source} />)}</section>}
+      {task.data && <div className="task-transcript">{task.data.messages.map((message) => <article className={`task-message ${message.role}`} key={message.id}><header><strong>{message.role === 'user' ? '你' : 'AI 助手'}</strong><time>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(message.createdAt))}</time></header><p>{formatAssistantReply(message.content)}</p></article>)}</div>}
+      {task.data && (pageCursors.length > 0 || task.data.nextBefore) && <nav aria-label="历史消息分页"><Button disabled={!pageCursors.length} onClick={() => setPageCursors((current) => current.slice(0, -1))}>较新消息</Button><Button disabled={!task.data.nextBefore} onClick={() => { if (task.data?.nextBefore) setPageCursors((current) => [...current, task.data!.nextBefore!]); }}>更早消息</Button></nav>}
     </>}
   </section>;
 }
 
 function StructuredBusinessPage({ section }: { section: 'students' | 'schedule' | 'finance' | 'settings' }) {
-  const { assistantState, user } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null }>();
+  const { assistantState, user, hiddenTask, hiddenThreads } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string> }>();
   const [resultTarget, setResultTarget] = useState<HTMLDivElement | null>(null);
   const [showResult, setShowResult] = useState(false);
   const [assistantDraft, setAssistantDraft] = useState<{ text: string; revision: number } | null>(null);
   return <ResizableWorkspace className={`business-page-${section}`}>
-    <AssistantCompanion assistantState={assistantState} section={section} user={user} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} draft={assistantDraft} />
+    <AssistantCompanion assistantState={assistantState} section={section} user={user} hiddenTask={hiddenTask} hiddenThreads={hiddenThreads} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} onHideResult={() => setShowResult(false)} draft={assistantDraft} />
     <div aria-label="业务工作区" className="business-workspace panel-surface"><div hidden={showResult}><StructuredWorkbench section={section} role={user?.role ?? ''} onAskAssistant={(text) => setAssistantDraft((current) => ({ text, revision: (current?.revision ?? 0) + 1 }))} /></div><div hidden={!showResult} ref={setResultTarget} /><div hidden={!showResult} className="business-result-actions"><Button onClick={() => setShowResult(false)}>返回业务功能</Button></div></div>
   </ResizableWorkspace>;
 }
@@ -395,12 +439,12 @@ const pageAssistantCopy = {
   settings: { title: '教师与课程', welcome: '在这里维护教师资料、默认薪酬和课程信息，也可以告诉我你想要办理的事项。', suggestions: ['查看教师', '查看课程', '新增课程'] },
 } as const;
 
-function AssistantCompanion({ assistantState, section, user, resultTarget, onShowResult, draft }: { assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; resultTarget: HTMLDivElement | null; onShowResult: () => void; draft: { text: string; revision: number } | null }) {
+function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenThreads, resultTarget, onShowResult, onHideResult, draft }: { assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; resultTarget: HTMLDivElement | null; onShowResult: () => void; onHideResult: () => void; draft: { text: string; revision: number } | null }) {
   const copy = pageAssistantCopy[section];
   const queryClient = useQueryClient();
   const initialRef = useRef<PersistedAssistantSession | null>(null);
   if (!initialRef.current) initialRef.current = newConversation(user);
-  const [threadId] = useState(() => initialRef.current?.threadId ?? createAssistantIds().threadId);
+  const [threadId, setThreadId] = useState(() => initialRef.current?.threadId ?? createAssistantIds().threadId);
   const [messages, setMessages] = useState<ConversationMessage[]>(() => initialRef.current?.messages ?? []);
   const [prompt, setPrompt] = useState('');
   const [reply, setReply] = useState('');
@@ -419,9 +463,17 @@ function AssistantCompanion({ assistantState, section, user, resultTarget, onSho
   }, [draft]);
 
   useEffect(() => {
+    if (hiddenThreads.has(threadId)) return;
     writeAssistantSession(user, { threadId, messages, ...(workspace ? { workspace, workspaceThreadId } : {}) });
-  }, [messages, threadId, user, workspace, workspaceThreadId]);
+  }, [hiddenThreads, messages, threadId, user, workspace, workspaceThreadId]);
   useEffect(() => () => controllerRef.current?.abort(), []);
+  useEffect(() => {
+    if (hiddenTask?.threadId !== threadId) return;
+    const nextThreadId = createAssistantIds().threadId;
+    setThreadId(nextThreadId); setMessages([]);
+    if (workspaceThreadId === threadId) { setWorkspace(undefined); setWorkspaceThreadId(nextThreadId); onHideResult(); }
+    setReply(''); setPrompt(''); setStatus('idle');
+  }, [hiddenTask, threadId]);
 
   const append = (role: ConversationMessage['role'], text: string) => {
     const trimmed = text.trim();
@@ -440,7 +492,9 @@ function AssistantCompanion({ assistantState, section, user, resultTarget, onSho
     try {
       const { clientRequestId } = createAssistantIds();
       const run = await startAssistantRun({ token: getToken(), message, threadId, clientRequestId });
+      if (hiddenThreads.has(threadId)) return;
       await streamAssistantEvents({ token: getToken(), run, signal: controller.signal, onEvent: (event) => {
+        if (hiddenThreads.has(threadId)) return true;
         if (event.type === 'assistant.delta') { streamedReply += event.text; setReply(streamedReply); }
         if (event.type === 'assistant.message') { streamedReply = event.markdown; setReply(streamedReply); }
         if (event.type === 'workspace.replace') { setWorkspace(event.document); setWorkspaceThreadId(threadId); onShowResult(); }
@@ -450,7 +504,7 @@ function AssistantCompanion({ assistantState, section, user, resultTarget, onSho
         return false;
       } });
     } catch (error) {
-      if (!controller.signal.aborted) { append('assistant', error instanceof Error ? error.message : '暂时无法连接助手。'); setStatus('failed'); setPreviewRecheckVersion((current) => current + 1); }
+      if (!controller.signal.aborted && !hiddenThreads.has(threadId)) { append('assistant', error instanceof Error ? error.message : '暂时无法连接助手。'); setStatus('failed'); setPreviewRecheckVersion((current) => current + 1); }
     }
   };
   const selectCandidate = (candidateId: string, taskVersion?: number) => {
@@ -528,6 +582,9 @@ function LoginPage({ onLogin, notice }: { onLogin: (token: string, refreshToken:
 }
 
 function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthUser | null }) {
+  const queryClient = useQueryClient();
+  const hiddenThreads = useRef(new Set<string>());
+  const [hiddenTask, setHiddenTask] = useState<HiddenTaskUpdate>(null);
   const [workspace, setWorkspaceState] = useState<WorkspaceState | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [workspaceInteractionDisabled, setWorkspaceInteractionDisabled] = useState(false);
@@ -541,6 +598,39 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
   const assistantState = useAssistantState();
   const isAssistantWorkspace = location.pathname === '/';
   const normalizedPath = location.pathname.replace(/^\/structured/, '') || '/';
+  useEffect(() => {
+    if (!user || typeof BroadcastChannel === 'undefined') return;
+    let channel: BroadcastChannel;
+    try { channel = new BroadcastChannel(HIDDEN_TASK_CHANNEL); } catch { return; }
+    let active = true;
+    channel.onmessage = (event: MessageEvent<unknown>) => {
+      const value = event.data;
+      if (!isRecord(value) || value.type !== 'task-hidden' || typeof value.threadId !== 'string' || !UUID_PATTERN.test(value.threadId) || !isRecord(value.actor) ||
+        value.actor.id !== user.id || value.actor.role !== user.role || value.actor.teacherId !== (user.teacherId ?? null)) return;
+      const threadId = value.threadId;
+      const token = getToken();
+      void (async () => {
+        try {
+          const response = await sendAuthorized(`/api/assistant/tasks/${encodeURIComponent(threadId)}`);
+          if (!active || !token || token !== getToken() || response.status !== 404) return;
+          hiddenThreads.current.add(threadId);
+          setHiddenTask({ threadId, hiddenThreads: hiddenThreads.current });
+          setWorkspaceState(current => current?.threadId === threadId ? null : current);
+          try {
+            if (readAssistantSession(user)?.threadId === threadId) window.sessionStorage.removeItem(assistantSessionKey(user));
+          } catch { /* Session storage may be unavailable. */ }
+          const detailKey = ['assistant-task', user.id, user.role, user.teacherId ?? null, threadId];
+          const listKey = ['assistant-tasks', user.id, user.role, user.teacherId ?? null];
+          await Promise.all([queryClient.cancelQueries({ queryKey: detailKey }), queryClient.cancelQueries({ queryKey: listKey })]);
+          if (!active) return;
+          queryClient.removeQueries({ queryKey: detailKey });
+          queryClient.setQueryData<AssistantTaskSummary[]>(listKey, current => current?.filter(task => task.threadId !== threadId));
+          if (location.pathname === `/tasks/${threadId}`) navigate('/');
+        } catch { /* A failed recheck must leave local state intact. */ }
+      })();
+    };
+    return () => { active = false; channel.close(); };
+  }, [location.pathname, navigate, queryClient, user]);
   const setWorkspace = useCallback((document: WorkspaceDocument | null, threadId?: string, requireCoreDisplay = false) => {
     setWorkspaceState(document && threadId ? { document, threadId, ...(requireCoreDisplay ? { requireCoreDisplay: true } : {}) } : null);
   }, []);
@@ -591,7 +681,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
             <Button aria-label="退出登录" ghost onClick={onLogout} size="small">退出</Button>
           </div>
         </aside>
-        <main className="main-column"><Outlet context={{ assistantState, onLogout, user, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction }} /></main>
+        <main className="main-column"><Outlet context={{ assistantState, onLogout, user, hiddenTask, hiddenThreads: hiddenThreads.current, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction }} /></main>
         {isAssistantWorkspace && <aside aria-label="经营工作区" className="context-panel panel-surface"><ContextPanel
           activeThreadId={activeThreadId}
           interactionDisabled={workspaceInteractionDisabled}
@@ -623,10 +713,12 @@ function WorkspaceHome() {
   const [reply, setReply] = useState('');
   const [clarification, setClarification] = useState('');
   const [runError, setRunError] = useState('');
-  const { assistantState, onLogout, user, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction } = useOutletContext<{
+  const { assistantState, onLogout, user, hiddenTask, hiddenThreads, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction } = useOutletContext<{
     assistantState: ReturnType<typeof useAssistantState>;
     onLogout: () => void;
     user: AuthUser | null;
+    hiddenTask: HiddenTaskUpdate;
+    hiddenThreads: Set<string>;
     setWorkspace: (workspace: WorkspaceDocument | null, threadId?: string, requireCoreDisplay?: boolean) => void;
     setActiveThreadId: (threadId: string | null) => void;
     setWorkspaceInteractionDisabled: (disabled: boolean) => void;
@@ -660,6 +752,7 @@ function WorkspaceHome() {
   }, [requireCorePreviewDisplay, setActiveThreadId, setWorkspace, threadId, workspace, workspaceThreadId]);
 
   useEffect(() => {
+    if (hiddenThreads.has(threadId)) return;
     writeAssistantSession(user, {
       threadId,
       messages,
@@ -667,7 +760,7 @@ function WorkspaceHome() {
       ...(requireCorePreviewDisplay ? { requireCorePreviewDisplay: true } : {}),
       ...(confirmedPreviewIds.size > 0 ? { confirmedPreviewIds: [...confirmedPreviewIds] } : {}),
     });
-  }, [confirmedPreviewIds, messages, requireCorePreviewDisplay, threadId, user, workspace, workspaceThreadId]);
+  }, [confirmedPreviewIds, hiddenThreads, messages, requireCorePreviewDisplay, threadId, user, workspace, workspaceThreadId]);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
@@ -740,6 +833,7 @@ function WorkspaceHome() {
     try {
       const { clientRequestId } = createAssistantIds();
       const run = await startAssistantRun({ token: getToken(), message: normalizedMessage, threadId, clientRequestId });
+      if (hiddenThreads.has(threadId)) return false;
       setRunId(run.runId);
       setRunStatus(run.status);
       if (run.status === 'completed' || run.status === 'failed') setRunStatus('running');
@@ -751,12 +845,14 @@ function WorkspaceHome() {
         run,
         signal: controller.signal,
         onEvent: (assistantEvent) => {
+          if (hiddenThreads.has(threadId)) return true;
           if (isTerminalAssistantEvent(assistantEvent) || assistantEvent.type === 'clarification.requested') receivedFinalEvent = true;
           if (assistantEvent.type === 'workspace.replace' && assistantEvent.document.blocks.some((block) => block.type === 'error-recovery')) hasErrorRecovery = true;
           if (assistantEvent.type === 'run.completed') completedSuccessfully = true;
           return handleEvent(assistantEvent);
         },
       });
+      if (hiddenThreads.has(threadId)) return false;
       if (!receivedFinalEvent && !controller.signal.aborted) {
         setRunStatus('connection_failed');
         setRunError('事件连接已结束，但运行没有返回完成状态。可以稍后重试。');
@@ -765,7 +861,7 @@ function WorkspaceHome() {
       }
       return completedSuccessfully && !hasErrorRecovery;
     } catch (cause) {
-      if (controller.signal.aborted) return false;
+      if (controller.signal.aborted || hiddenThreads.has(threadId)) return false;
       setRunStatus('connection_failed');
       setRunError(cause instanceof Error ? cause.message : '无法连接 AI 助手，请检查网络后重试。');
       setPreviewRecheckVersion((current) => current + 1);
@@ -818,6 +914,21 @@ function WorkspaceHome() {
     setWorkspaceInteractionDisabled(false);
     setActiveThreadId(newThreadId);
   };
+
+  useEffect(() => {
+    if (hiddenTask?.threadId !== threadId) return;
+    const nextThreadId = createAssistantIds().threadId;
+    setThreadId(nextThreadId);
+    setMessages([]);
+    if (workspaceThreadId === threadId) {
+      setLocalWorkspace(null);
+      setWorkspaceThreadId(nextThreadId);
+      setRequireCorePreviewDisplay(false);
+      setConfirmedPreviewIds(new Set());
+    }
+    setRunStatus('idle'); setRunId(''); updateReply(''); setClarification(''); setRunError(''); setPrompt('');
+    setWorkspaceInteractionDisabled(false); setActiveThreadId(nextThreadId);
+  }, [hiddenTask, threadId]);
 
   useEffect(() => registerClearConversation(() => {
     if (clearingRef.current) return;
@@ -890,7 +1001,7 @@ function HomeOverview({ user, overview }: { user: AuthUser | null; overview: Ret
       <section className="overview-panel" aria-labelledby="today-lessons-heading"><div className="overview-panel-heading"><div><h4 id="today-lessons-heading">今日排课</h4><p>{lessons.length ? `共 ${overview.data?.today.total ?? lessons.length} 节 · 最多显示 3 节` : '今天暂无排课记录'}</p></div><button onClick={() => navigate('/schedule')} type="button">进入排课 →</button></div>
         {overview.isError ? <Alert message="暂时无法读取经营概览" type="warning" showIcon /> : lessons.length ? <div className="overview-list">{lessons.slice(0, 3).map((lesson) => <Link aria-label={`查看${lesson.student.name}的排课`} className="overview-list-row overview-list-link" key={lesson.id} to={`/schedule?week=${overview.data?.businessDate ? overviewWeekStart(overview.data.businessDate) : ''}&lesson=${encodeURIComponent(lesson.id)}`}><strong>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(lesson.startsAt))}</strong><span>{lesson.student.name} · {lesson.course.name}</span><Tag>{lesson.status === 'COMPLETED' ? '已完成' : lesson.status === 'CANCELLED' ? '已取消' : '待处理'}</Tag></Link>)}</div> : <div className="overview-empty">暂无排课。</div>}
       </section>
-      {isOwner && overview.data && <><section className="overview-panel"><div className="overview-panel-heading"><div><h4>待处理事项</h4><p>截至 {formatDateTime(overview.data.asOf)}</p></div></div><div className="overview-actions"><button onClick={() => navigate('/students')} type="button"><strong>欠费学生</strong><span>{overview.data.students?.arrearsCount ?? '—'} 人 →</span></button><button onClick={() => navigate('/finance?tab=payroll')} type="button"><strong>待支付工资</strong><span>{overview.data.preclose?.unpaidPayrollCount ?? '—'} 笔 →</span></button><button onClick={() => navigate('/finance?tab=periods')} type="button"><strong>关账阻断项</strong><span>{blockers.length} 项 →</span></button></div></section><section className="overview-panel"><div className="overview-panel-heading"><div><h4>最近账户流水</h4><p>按时间倒序 · 最多显示 3 笔</p></div><button onClick={() => navigate('/students')} type="button">查看账户 →</button></div>{overview.data.recentRecords?.length ? <div className="overview-list">{overview.data.recentRecords.slice(0, 3).map((record) => <Link aria-label={`查看${record.studentName}的账户`} className="overview-list-row overview-list-link" key={record.id} to={`/students?q=${encodeURIComponent(record.studentName)}`}><strong>{formatDateTime(record.occurredAt)}</strong><span>{record.studentName} · {record.courseName}</span><span>{overviewRecordKind(record.kind)} · 实付 {record.paidDelta} / 赠送 {record.giftDelta}</span></Link>)}</div> : <div className="overview-empty">暂无账户流水</div>}</section></>}
+      {isOwner && overview.data && <><section className="overview-panel"><div className="overview-panel-heading"><div><h4>待处理事项</h4><p>截至 {formatDateTime(overview.data.asOf)}</p></div></div><div className="overview-actions"><button onClick={() => navigate('/students?arrears=true')} type="button"><strong>欠费学生</strong><span>{overview.data.students?.arrearsCount ?? '—'} 人 →</span></button><button onClick={() => navigate('/finance?tab=payroll')} type="button"><strong>待支付工资</strong><span>{overview.data.preclose?.unpaidPayrollCount ?? '—'} 笔 →</span></button><button onClick={() => navigate('/finance?tab=periods')} type="button"><strong>关账阻断项</strong><span>{blockers.length} 项 →</span></button></div></section><section className="overview-panel"><div className="overview-panel-heading"><div><h4>最近账户流水</h4><p>按时间倒序 · 最多显示 3 笔</p></div><button onClick={() => navigate('/students')} type="button">查看账户 →</button></div>{overview.data.recentRecords?.length ? <div className="overview-list">{overview.data.recentRecords.slice(0, 3).map((record) => <Link aria-label={`查看${record.studentName}的账户`} className="overview-list-row overview-list-link" key={record.id} to={`/students?student=${encodeURIComponent(record.studentId)}&account=${encodeURIComponent(record.accountId)}&tab=ledger&entry=${encodeURIComponent(record.id)}`}><strong>{formatDateTime(record.occurredAt)}</strong><span>{record.studentName} · {record.courseName}</span><span>{overviewRecordKind(record.kind)} · 实付 {record.paidDelta} / 赠送 {record.giftDelta}</span></Link>)}</div> : <div className="overview-empty">暂无账户流水</div>}</section></>}
       <section className="overview-panel" aria-labelledby="overview-actions-heading"><div className="overview-panel-heading"><div><h4 id="overview-actions-heading">常用入口</h4></div></div><div className="overview-actions">{isOwner && <><button onClick={() => navigate('/students')} type="button"><strong>学生与账户</strong><span>查找学生、课程账户和余额 →</span></button><button onClick={() => navigate('/finance')} type="button"><strong>收支与报表</strong><span>月度结果、工资和关账 →</span></button></>}<button onClick={() => navigate('/schedule')} type="button"><strong>排课与课消</strong><span>查看课程 →</span></button></div><div className="recent-tasks"><strong>最近任务</strong>{tasks.data?.slice(0, 3).map((task) => <button key={task.threadId} onClick={() => navigate(`/tasks/${task.threadId}`)} type="button"><span>{task.title}</span><em>{task.latestStatus === 'completed' ? '已回复' : task.latestStatus === 'failed' ? '需重试' : '进行中'}</em></button>)}{tasks.isError ? <small>任务列表暂不可用</small> : !tasks.isLoading && !tasks.data?.length && <small>暂无已保存任务</small>}</div></section>
     </div>
   </section>;
@@ -966,9 +1077,22 @@ function WorkspaceContent({ document, interactionDisabled, isCurrentWorkspace, o
         if (block.type === 'error-recovery') return <section aria-label="错误恢复" className="workspace-summary error-recovery" key={`error-${index}`}><Alert message={block.message} showIcon type="error" /><div className="recovery-actions">{block.actions.map((action) => <button className="recovery-action" disabled={interactionDisabled} key={action} onClick={() => { if (action === 'open-structured-page') navigate('/finance'); else onRecoveryAction(action); }} type="button">{action === 'refresh' ? '刷新结果' : action === 'repreview' ? '重新生成预览' : '打开结构化页面'}</button>)}</div></section>;
         return null;
       })}
-      {document.sources.length > 0 && <section aria-label="数据来源" className="workspace-summary workspace-sources"><strong>数据来源</strong>{document.sources.map((source) => <div className="source-row" key={`${source.type}-${source.id}`}><span>{source.label}</span><small>{source.type} · {source.id}</small></div>)}</section>}
+      {document.sources.length > 0 && <section aria-label="数据来源" className="workspace-summary workspace-sources"><strong>数据来源</strong>{document.sources.map((source) => <SourceLink key={`${source.type}-${source.id}`} source={source} />)}</section>}
       {document.blocks.length === 0 && <p className="workspace-empty">当前结果没有可展示的工作区内容。</p>}
     </div>;
+}
+
+function SourceLink({ source }: { source: WorkspaceDocument['sources'][number] }) {
+  const actor = window.sessionStorage.getItem(ACTOR_SESSION_KEY) ?? '';
+  const link = useQuery({
+    queryKey: ['source-link', actor, source.type, source.id],
+    queryFn: () => apiRequest(`/api/source-links/${encodeURIComponent(source.type)}/${encodeURIComponent(source.id)}`, (value): value is { path: string } => isRecord(value) && typeof value.path === 'string' && /^\/(?:students|schedule|finance)\?[A-Za-z0-9%=&-]+$/.test(value.path)),
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnMount: 'always',
+    retry: false,
+  });
+  return <div className="source-row">{link.data && !link.isFetching && !link.isError ? <Link to={link.data.path}>{source.label}</Link> : <span>{source.label}</span>}</div>;
 }
 
 type PreviewCardData = Pick<Extract<WorkspaceBlock, { type: 'action-preview' }>, 'type' | 'previewId' | 'actionType' | 'schemaVersion' | 'riskLevel' | 'title'> & { expiresAt?: string };

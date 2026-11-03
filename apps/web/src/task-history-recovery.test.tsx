@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from './App.js';
@@ -7,6 +7,16 @@ import type { WorkspaceBlock } from './assistant-client.js';
 
 const threadId = '10000000-0000-4000-8000-000000000001';
 const previewId = '20000000-0000-4000-8000-000000000002';
+const syncChannelName = 'pianomanager.assistant.hidden.v1';
+class TestBroadcastChannel {
+  static instances: TestBroadcastChannel[] = [];
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  postMessage = vi.fn();
+  close = vi.fn();
+  constructor(public name: string) { TestBroadcastChannel.instances.push(this); }
+  static emit(data: unknown) { for (const channel of TestBroadcastChannel.instances) if (channel.name === syncChannelName) channel.onmessage?.({ data } as MessageEvent); }
+}
+const hiddenNotice = { type: 'task-hidden', actor: { id: 'user-current', role: 'OWNER', teacherId: null }, threadId };
 const previewBlock = {
   type: 'action-preview',
   previewId,
@@ -44,6 +54,230 @@ function taskFetch(previewStatus: 'PENDING' | 'EXECUTED' | 'STALE' | 'EXPIRED', 
 }
 
 describe('cross-session task recovery', () => {
+  it('跨标签通知仅在服务端确认隐藏后清除相同账号和任务的会话及详情', async () => {
+    TestBroadcastChannel.instances = [];
+    vi.stubGlobal('BroadcastChannel', TestBroadcastChannel);
+    const sessionKey = 'pianomanager.assistant.session.v1:user-current%3AOWNER%3A';
+    const otherKey = 'pianomanager.assistant.session.v1:other%3AOWNER%3A';
+    const otherThread = '10000000-0000-4000-8000-000000000009';
+    window.sessionStorage.setItem(sessionKey, JSON.stringify({threadId,messages:[{id:'secret',role:'user',text:'私人对话'}]}));
+    window.sessionStorage.setItem(otherKey, JSON.stringify({threadId,messages:[]}));
+    let hidden = false;
+    const base = taskFetch('EXECUTED', {});
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === `/api/assistant/tasks/${threadId}` && hidden) return new Response('{}', {status:404});
+      return base(input, init);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const queryClient = new QueryClient({defaultOptions:{queries:{retry:false}}});
+    queryClient.setQueryData(['assistant-task','other','OWNER',null,threadId,null,null], {title:'other actor'});
+    queryClient.setQueryData(['assistant-task','user-current','OWNER',null,otherThread,null,null], {title:'other task'});
+    renderHistory(queryClient);
+    await screen.findByText('收取 120 元');
+    await act(async () => { TestBroadcastChannel.emit({...hiddenNotice,actor:{...hiddenNotice.actor,id:'other'}}); });
+    expect(screen.getByText('收取 120 元')).toBeInTheDocument();
+    await act(async () => { TestBroadcastChannel.emit(hiddenNotice); });
+    expect(screen.getByText('收取 120 元')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(sessionKey)).toContain('私人对话');
+    hidden = true;
+    await act(async () => { TestBroadcastChannel.emit(hiddenNotice); });
+    await waitFor(() => expect(screen.queryByText('收取 120 元')).not.toBeInTheDocument());
+    expect(window.sessionStorage.getItem(sessionKey)).not.toContain('私人对话');
+    expect(window.sessionStorage.getItem(otherKey)).not.toBeNull();
+    expect(queryClient.getQueryData(['assistant-task','other','OWNER',null,threadId,null,null])).toEqual({title:'other actor'});
+    expect(queryClient.getQueryData(['assistant-task','user-current','OWNER',null,otherThread,null,null])).toEqual({title:'other task'});
+  });
+
+  it('只有服务端成功隐藏后才广播不含对话内容的通知', async () => {
+    TestBroadcastChannel.instances = [];
+    vi.stubGlobal('BroadcastChannel', TestBroadcastChannel);
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    let succeeds = false;
+    const base = taskFetch('EXECUTED', {});
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === `/api/assistant/tasks/${threadId}` && init?.method === 'DELETE') return succeeds ? Response.json({hidden:true}) : new Response('{}',{status:503});
+      return base(input, init);
+    }));
+    try {
+      renderHistory();
+      await user.click(await screen.findByRole('button', {name:'删除聊天展示'}));
+      await screen.findByText('无法删除聊天展示');
+      expect(TestBroadcastChannel.instances.flatMap(channel => channel.postMessage.mock.calls)).toHaveLength(0);
+      succeeds = true;
+      await user.click(screen.getByRole('button', {name:'删除聊天展示'}));
+      await waitFor(() => expect(TestBroadcastChannel.instances.flatMap(channel => channel.postMessage.mock.calls)).toEqual([[hiddenNotice]]));
+    } finally { confirm.mockRestore(); }
+  });
+  it('隐藏正在运行的会话后丢弃迟到 SSE，不取消服务端业务或恢复旧缓存', async () => {
+    TestBroadcastChannel.instances = [];
+    vi.stubGlobal('BroadcastChannel', TestBroadcastChannel);
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-current');
+    const sessionKey = 'pianomanager.assistant.session.v1:user-current%3AOWNER%3A';
+    window.sessionStorage.setItem(sessionKey, JSON.stringify({threadId,messages:[{id:'old',role:'user',text:'旧私人消息'}]}));
+    const runId = '40000000-0000-4000-8000-000000000001';
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let streamSignal: AbortSignal | null | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return Response.json({id:'user-current',username:'owner',role:'OWNER'});
+      if (path === '/api/assistant/status') return Response.json({available:true,core:{available:true},agentRuntime:{available:true},checkedAt:new Date().toISOString(),message:'AI 助手已连接'});
+      if (path === '/api/assistant/runs') return Response.json({runId,threadId,status:'running'});
+      if (path === `/api/assistant/runs/${runId}/events`) {
+        streamSignal = init?.signal;
+        return new Response(new ReadableStream<Uint8Array>({start(controller) { streamController = controller; }}), {headers:{'Content-Type':'text/event-stream'}});
+      }
+      if (path === `/api/assistant/tasks/${threadId}`) return new Response('{}',{status:404});
+      if (path === '/api/assistant/tasks') return Response.json([]);
+      return new Response('{}',{status:404});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const queryClient = new QueryClient({defaultOptions:{queries:{retry:false}}});
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/']}><App /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByText('旧私人消息')).toBeInTheDocument();
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    await user.type(screen.getByLabelText('经营问题'), '正在处理的业务');
+    await user.click(screen.getByRole('button', {name:'发送消息'}));
+    await waitFor(() => expect(streamController).toBeDefined());
+    await act(async () => { TestBroadcastChannel.emit(hiddenNotice); });
+    await waitFor(() => expect(screen.queryByText('旧私人消息')).not.toBeInTheDocument());
+    expect(streamSignal?.aborted).toBe(false);
+    await act(async () => { streamController!.enqueue(new TextEncoder().encode('event: assistant.delta\ndata: {"type":"assistant.delta","text":"隐藏后的迟到内容"}\n\n')); });
+    await waitFor(() => expect(window.sessionStorage.getItem(sessionKey)).not.toContain(threadId));
+    expect(screen.queryByText('隐藏后的迟到内容')).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([path]) => String(path) === '/api/assistant/runs')).toHaveLength(1);
+  });
+  it('业务页助手隐藏后不会被迟到的 SSE 内容重新填充', async () => {
+    TestBroadcastChannel.instances = [];
+    vi.stubGlobal('BroadcastChannel', TestBroadcastChannel);
+    window.localStorage.setItem('pianomanager.accessToken', 'jwt-current');
+    const sessionKey = 'pianomanager.assistant.session.v1:user-current%3AOWNER%3A';
+    window.sessionStorage.setItem(sessionKey, JSON.stringify({threadId,messages:[{id:'old',role:'user',text:'业务页私人消息'}]}));
+    const runId = '40000000-0000-4000-8000-000000000001';
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return Response.json({id:'user-current',username:'owner',role:'OWNER'});
+      if (path === '/api/assistant/status') return Response.json({available:true,core:{available:true},agentRuntime:{available:true},checkedAt:new Date().toISOString(),message:'AI 助手已连接'});
+      if (path === '/api/assistant/runs') return Response.json({runId,threadId,status:'running'});
+      if (path === `/api/assistant/runs/${runId}/events`) return new Response(new ReadableStream<Uint8Array>({start(controller) { streamController = controller; }}), {headers:{'Content-Type':'text/event-stream'}});
+      return new Response('{}',{status:404});
+    }));
+    render(<QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><MemoryRouter initialEntries={['/schedule']}><App /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByText('业务页私人消息')).toBeInTheDocument();
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    await user.type(screen.getByLabelText('排课与课消经营问题'), '处理业务');
+    await user.click(screen.getByRole('button',{name:'发送 ↑'}));
+    await waitFor(() => expect(streamController).toBeDefined());
+    await act(async () => { TestBroadcastChannel.emit(hiddenNotice); });
+    await waitFor(() => expect(screen.queryByText('业务页私人消息')).not.toBeInTheDocument());
+    await act(async () => { streamController!.enqueue(new TextEncoder().encode('event: assistant.delta\ndata: {"type":"assistant.delta","text":"业务页迟到内容"}\n\n')); });
+    expect(screen.queryByText('业务页迟到内容')).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem(sessionKey)).not.toContain(threadId);
+  });
+  it('resolves a source through Core before offering a link', async () => {
+    const sourceId = '30000000-0000-4000-8000-000000000001';
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return Response.json({ id: 'user-current', username: 'owner', role: 'OWNER' });
+      if (path === `/api/assistant/tasks/${threadId}`) return Response.json({ ...task(), workspace: { protocolVersion: '1.0', title: '历史结果', blocks: [], sources: [{ type: 'student', id: sourceId, label: '学生资料' }] }, historicalPreviews: [] });
+      if (path === `/api/source-links/student/${sourceId}`) return Response.json({ path: `/students?student=${sourceId}&tab=profile` });
+      return new Response('{}', { status: 404 });
+    }));
+    renderHistory();
+    expect(await screen.findByRole('link', { name: '学生资料' })).toHaveAttribute('href', `/students?student=${sourceId}&tab=profile`);
+  });
+  it('does not expose a link when Core denies the source', async () => {
+    const sourceId = '30000000-0000-4000-8000-000000000001';
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return Response.json({ id: 'user-current', username: 'owner', role: 'OWNER' });
+      if (path === `/api/assistant/tasks/${threadId}`) return Response.json({ ...task(), workspace: { protocolVersion: '1.0', title: '历史结果', blocks: [], sources: [{ type: 'student', id: sourceId, label: '受限学生资料' }] }, historicalPreviews: [] });
+      return new Response('{}', { status: 404 });
+    }));
+    renderHistory();
+    expect(await screen.findByText('受限学生资料')).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith('/api/source-links/'))).toBe(true));
+    expect(screen.queryByRole('link', { name: '受限学生资料' })).not.toBeInTheDocument();
+  });
+  it('warns when the saved preview history exceeds the safe read limit', async () => {
+    const fetchMock = taskFetch('EXECUTED', { paymentId: 'record-1' });
+    fetchMock.mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'user-current', username: 'owner', role: 'OWNER' }));
+      if (path === `/api/assistant/tasks/${threadId}`) return new Response(JSON.stringify({ ...task(), previewHistoryTruncated: true }));
+      if (path === `/api/assistant/previews/${previewId}`) return new Response(JSON.stringify({ previewId, actionType: previewBlock.actionType, schemaVersion: previewBlock.schemaVersion, riskLevel: previewBlock.riskLevel, status: 'EXECUTED', expiresAt: previewBlock.expiresAt, receipt: {}, display: { title: '当前收款确认' } }));
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderHistory();
+    expect(await screen.findByText('确认单历史过多，当前仅显示部分记录')).toBeInTheDocument();
+  });
+  it('loads older messages by cursor and can return to the latest page', async () => {
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    const cursor = '30000000-0000-4000-8000-000000000004';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'user-current', username: 'owner', role: 'OWNER' }));
+      if (path === `/api/assistant/tasks/${threadId}`) return new Response(JSON.stringify({ ...task(), nextBefore: cursor }));
+      if (path === `/api/assistant/tasks/${threadId}?before=${cursor}`) return new Response(JSON.stringify({ ...task(), messages: [{ id: 'older', role: 'user', content: '更早的消息', createdAt: '2026-10-27T00:00:00.000Z' }], nextBefore: null }));
+      if (path === `/api/assistant/previews/${previewId}`) return new Response(JSON.stringify({ previewId, actionType: previewBlock.actionType, schemaVersion: previewBlock.schemaVersion, riskLevel: previewBlock.riskLevel, status: 'EXECUTED', expiresAt: previewBlock.expiresAt, receipt: {}, display: { title: '当前收款确认' } }));
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderHistory();
+    await user.click(await screen.findByRole('button', { name: '更早消息' }));
+    expect(await screen.findByText('更早的消息')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '较新消息' }));
+    expect(await screen.findByText('收取 120 元')).toBeInTheDocument();
+  });
+  it('paginates confirmation history independently of message pages', async () => {
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    const nextId = '20000000-0000-4000-8000-000000000003';
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return Response.json({ id:'user-current', username:'owner', role:'OWNER' });
+      if (path === `/api/assistant/tasks/${threadId}`) return Response.json({ ...task(), nextPreviewAfter:'1000:1' });
+      if (path === `/api/assistant/tasks/${threadId}?previewAfter=1000%3A1`) return Response.json({ ...task(), nextPreviewAfter:null, historicalPreviews:[{ previewId:nextId, actionType:previewBlock.actionType, schemaVersion:previewBlock.schemaVersion, riskLevel:previewBlock.riskLevel }] });
+      if (path.startsWith('/api/assistant/previews/')) return Response.json({ previewId:path.slice(path.lastIndexOf('/') + 1), actionType:previewBlock.actionType, schemaVersion:previewBlock.schemaVersion, riskLevel:previewBlock.riskLevel, status:'EXECUTED', expiresAt:previewBlock.expiresAt, receipt:{}, display:{ title:'确认单' } });
+      return new Response('{}', { status:404 });
+    }));
+    renderHistory();
+    await user.click(await screen.findByRole('button', { name:'更多确认单' }));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('previewAfter=1000%3A1'))).toBe(true));
+    await user.click(await screen.findByRole('button', { name:'上一页确认单' }));
+    expect(await screen.findByRole('button', { name:'更多确认单' })).toBeEnabled();
+  });
+  it('presents the current execution receipt before the conversation transcript', async () => {
+    vi.stubGlobal('fetch', taskFetch('EXECUTED', { paymentId: 'record-1' }));
+    renderHistory();
+    const receipt = await screen.findByText('执行回执');
+    const message = await screen.findByText('收取 120 元');
+    expect(receipt.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+  it('hides the current task only after confirmation and clears its cached conversation', async () => {
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    window.sessionStorage.setItem('pianomanager.assistant.session.v1:user-current%3AOWNER%3A', JSON.stringify({ threadId, messages: [{ id: 'old', role: 'user', text: '旧会话' }] }));
+    const fetchMock = taskFetch('EXECUTED', { paymentId: 'record-1' });
+    fetchMock.mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path === `/api/assistant/tasks/${threadId}` && init?.method === 'DELETE') return new Response(JSON.stringify({ hidden: true }));
+      if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'user-current', username: 'owner', role: 'OWNER' }));
+      if (path === `/api/assistant/tasks/${threadId}`) return new Response(JSON.stringify(task()));
+      if (path === `/api/assistant/previews/${previewId}`) return new Response(JSON.stringify({ previewId, actionType: previewBlock.actionType, schemaVersion: previewBlock.schemaVersion, riskLevel: previewBlock.riskLevel, status: 'EXECUTED', expiresAt: previewBlock.expiresAt, receipt: { paymentId: 'record-1' }, display: { title: '当前收款确认' } }));
+      if (path === '/api/assistant/tasks') return new Response('[]');
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      renderHistory();
+      await user.click(await screen.findByRole('button', { name: '删除聊天展示' }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(`/api/assistant/tasks/${threadId}`, expect.objectContaining({ method: 'DELETE' })));
+      expect(confirm).toHaveBeenCalled();
+      await waitFor(() => expect(window.sessionStorage.getItem('pianomanager.assistant.session.v1:user-current%3AOWNER%3A')).not.toContain(threadId));
+    } finally { confirm.mockRestore(); }
+  });
   it.each([403, 404])('shows one non-disclosing message when task history returns HTTP %i', async (status) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const path = String(input);

@@ -284,6 +284,7 @@ button { cursor: pointer; }
 .student-directory strong { font-size: 12px; }
 .student-directory span { margin-top: 4px; color: #72796f; font-size: 9px; }
 .student-detail { min-width: 0; }
+.account-ledger-row.is-linked { border-color: #3159ec; background: #f2f5ff; box-shadow: inset 4px 0 0 #3159ec; }
 .student-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .student-detail-head h3 { margin: 0; font-family: Georgia, 'Noto Serif SC', serif; font-size: 21px; }
 .student-detail-head p { margin: 5px 0 0; color: #72796f; font-size: 10px; }

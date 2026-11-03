@@ -11,6 +11,7 @@ import {
 } from '@piano/assistant-protocol';
 
 const schema = 'agent_runtime';
+const previewPageSize = 50;
 
 export type AgentRunRecord = AssistantRun & {
   userMessage: string;
@@ -33,6 +34,9 @@ export type AssistantThreadSummary = {
 
 export type AssistantThreadDetail = AssistantThreadSummary & {
   messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string }>;
+  nextBefore?: string | null;
+  previewHistoryTruncated?: boolean;
+  nextPreviewAfter?: string | null;
   workspace: WorkspaceDocument | null;
   historicalPreviews: HistoricalPreviewReference[];
 };
@@ -66,7 +70,8 @@ export interface AppendMessageInput {
 export interface AgentRuntimeRepository {
   getThreadOwner(threadId: string): Promise<string | null>;
   listThreads?(actorKey: string, limit: number): Promise<AssistantThreadSummary[]>;
-  getThread?(threadId: string, actorKey: string): Promise<AssistantThreadDetail | null>;
+  getThread?(threadId: string, actorKey: string, before?: string, previewAfter?: string): Promise<AssistantThreadDetail | null>;
+  archiveThread?(threadId: string, actorKey: string): Promise<boolean>;
   createRun(input: CreateRunInput): Promise<{ run: AgentRunRecord; created: boolean }>;
   findRun(runId: string): Promise<AgentRunRecord | null>;
   hasActiveRun?(threadId: string): Promise<boolean>;
@@ -213,8 +218,15 @@ export function createAgentRuntimeRepository(input: {
 
   return {
     async getThreadOwner(threadId) {
-      const result = await pool.query<{ user_id: string | null }>(`SELECT user_id FROM ${schema}.agent_threads WHERE id = $1`, [threadId]);
+      const result = await pool.query<{ user_id: string | null }>(`SELECT user_id FROM ${schema}.agent_threads WHERE id = $1 AND status = 'active'`, [threadId]);
       return result.rows[0]?.user_id ?? null;
+    },
+    async archiveThread(threadId, actorKey) {
+      const result = await pool.query(
+        `UPDATE ${schema}.agent_threads SET status = 'archived', updated_at = now()
+          WHERE id = $1 AND user_id = $2`, [threadId, actorKey],
+      );
+      return result.rowCount === 1;
     },
     async listThreads(actorKey, limit) {
       const result = await pool.query<{
@@ -244,24 +256,29 @@ export function createAgentRuntimeRepository(input: {
         latestStatus: row.latest_status,
       }));
     },
-    async getThread(threadId, actorKey) {
-      const thread = await pool.query<{ id: string; title: string | null; last_activity_at: Date }>(
-        `SELECT id, title, last_activity_at FROM ${schema}.agent_threads WHERE id = $1 AND user_id = $2 AND status = 'active'`,
+    async getThread(threadId, actorKey, before, previewAfter) {
+      if (previewAfter && !/^[1-9]\d{0,18}:(?:0|[1-9]\d{0,18})$/.test(previewAfter)) throw new Error('确认单游标不合法');
+      const [afterEvent, afterBlock] = previewAfter?.split(':') ?? [];
+      if ((afterEvent && BigInt(afterEvent) > 9_223_372_036_854_775_807n) || (afterBlock && BigInt(afterBlock) > 9_223_372_036_854_775_807n)) throw new Error('确认单游标不合法');
+      const client = await pool.connect();
+      try {
+      await client.query('BEGIN');
+      const thread = await client.query<{ id: string; title: string | null; last_activity_at: Date }>(
+        `SELECT id, title, last_activity_at FROM ${schema}.agent_threads WHERE id = $1 AND user_id = $2 AND status = 'active' FOR SHARE`,
         [threadId, actorKey],
       );
       const row = thread.rows[0];
-      if (!row) return null;
-      const [latestRun, messages, latestWorkspace, previewEvents] = await Promise.all([
-        pool.query<{ status: AssistantRun['status'] }>(`SELECT status FROM ${schema}.agent_runs WHERE thread_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [threadId]),
-        pool.query<{ id: string; role: 'user' | 'assistant'; content: string; created_at: Date }>(`SELECT id, role, content, created_at FROM ${schema}.agent_messages WHERE thread_id = $1 ORDER BY created_at ASC, id ASC LIMIT 500`, [threadId]),
-        pool.query<{ payload: unknown }>(`SELECT event.payload FROM ${schema}.agent_run_events AS event JOIN ${schema}.agent_runs AS run ON run.id = event.run_id WHERE run.thread_id = $1 AND event.event_type = 'workspace.replace' ORDER BY event.event_id DESC LIMIT 1`, [threadId]),
-        pool.query<{ preview_id: string; action_type: string; schema_version: string; risk_level: string; event_id: string; block_order: string }>(
-          `SELECT refs.preview ->> 'previewId' AS preview_id,
+      if (!row) { await client.query('COMMIT'); return null; }
+      const latestRun = await client.query<{ status: AssistantRun['status'] }>(`SELECT status FROM ${schema}.agent_runs WHERE thread_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, [threadId]);
+      const messages = await client.query<{ id: string; role: 'user' | 'assistant'; content: string; created_at: Date }>(`SELECT id, role, content, created_at FROM ${schema}.agent_messages WHERE thread_id = $1 AND ($2::uuid IS NULL OR (created_at, id) < (SELECT created_at, id FROM ${schema}.agent_messages WHERE thread_id = $1 AND id = $2::uuid)) ORDER BY created_at DESC, id DESC LIMIT 101`, [threadId, before ?? null]);
+      const latestWorkspace = await client.query<{ payload: unknown }>(`SELECT event.payload FROM ${schema}.agent_run_events AS event JOIN ${schema}.agent_runs AS run ON run.id = event.run_id WHERE run.thread_id = $1 AND event.event_type = 'workspace.replace' ORDER BY event.event_id DESC LIMIT 1`, [threadId]);
+      const previewEvents = await client.query<{ preview_id: string; action_type: string; schema_version: string; risk_level: string; event_id: string; block_order: string }>(
+          `WITH refs_all AS (SELECT refs.preview ->> 'previewId' AS preview_id,
                   refs.preview ->> 'actionType' AS action_type,
                   refs.preview ->> 'schemaVersion' AS schema_version,
                   refs.preview ->> 'riskLevel' AS risk_level,
-                  event.event_id::text AS event_id,
-                  refs.block_order::text AS block_order
+                  event.event_id AS event_id,
+                  refs.block_order AS block_order
              FROM ${schema}.agent_run_events AS event
              JOIN ${schema}.agent_runs AS run ON run.id = event.run_id
              CROSS JOIN LATERAL (
@@ -275,15 +292,24 @@ export function createAgentRuntimeRepository(input: {
              ) AS refs
             WHERE run.thread_id = $1
               AND event.event_type IN ('action.previewed', 'workspace.replace')
-            ORDER BY event.event_id ASC, refs.block_order ASC`,
-          [threadId],
-        ),
-      ]);
-      const latestUser = [...messages.rows].reverse().find((message) => message.role === 'user');
+          ), valid AS (
+            SELECT *, row_number() OVER (PARTITION BY lower(preview_id) ORDER BY event_id, block_order) AS occurrence
+              FROM refs_all
+             WHERE (preview_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                    OR lower(preview_id) IN ('00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-ffff-ffff-ffffffffffff'))
+               AND length(action_type) > 0 AND length(schema_version) > 0 AND risk_level IN ('L0', 'L1', 'L2')
+          )
+          SELECT preview_id, action_type, schema_version, risk_level, event_id::text, block_order::text
+            FROM valid WHERE occurrence = 1 AND ($2::bigint IS NULL OR (event_id, block_order) > ($2::bigint, $3::bigint))
+           ORDER BY valid.event_id, valid.block_order LIMIT $4`,
+          [threadId, afterEvent ?? null, afterBlock ?? null, previewPageSize + 1],
+        );
+      const page = messages.rows.slice(0, 100).reverse();
+      const latestUser = [...page].reverse().find((message) => message.role === 'user');
       const workspaceEvent = AssistantEventSchema.safeParse(latestWorkspace.rows[0]?.payload);
       const historicalPreviews: HistoricalPreviewReference[] = [];
       const seenPreviewIds = new Set<string>();
-      for (const event of previewEvents.rows) {
+      for (const event of previewEvents.rows.slice(0, previewPageSize)) {
         if (seenPreviewIds.has(event.preview_id)) continue;
         const reference = HistoricalPreviewReferenceSchema.safeParse({
           previewId: event.preview_id,
@@ -295,15 +321,21 @@ export function createAgentRuntimeRepository(input: {
         seenPreviewIds.add(reference.data.previewId);
         historicalPreviews.push(reference.data);
       }
+      await client.query('COMMIT');
       return {
         threadId: row.id,
         title: row.title?.trim() || latestUser?.content.slice(0, 60) || '新对话',
         lastActivityAt: row.last_activity_at.toISOString(),
         latestStatus: latestRun.rows[0]?.status ?? null,
-        messages: messages.rows.map((message) => ({ id: message.id, role: message.role, content: message.content, createdAt: message.created_at.toISOString() })),
+        messages: page.map((message) => ({ id: message.id, role: message.role, content: message.content, createdAt: message.created_at.toISOString() })),
+        nextBefore: messages.rows.length > 100 ? page[0]!.id : null,
+        previewHistoryTruncated: previewEvents.rows.length > previewPageSize,
+        nextPreviewAfter: previewEvents.rows.length > previewPageSize ? `${previewEvents.rows[previewPageSize - 1]!.event_id}:${previewEvents.rows[previewPageSize - 1]!.block_order}` : null,
         workspace: workspaceEvent.success && workspaceEvent.data.type === 'workspace.replace' ? workspaceEvent.data.document : null,
         historicalPreviews,
       };
+      } catch (error) { await client.query('ROLLBACK'); throw error; }
+      finally { client.release(); }
     },
     async createRun(runInput) {
       const client = await pool.connect();
@@ -313,7 +345,7 @@ export function createAgentRuntimeRepository(input: {
           `INSERT INTO ${schema}.agent_threads (id, user_id, last_activity_at, updated_at)
            VALUES ($1, $2, now(), now())
            ON CONFLICT (id) DO UPDATE SET last_activity_at = now(), updated_at = now()
-           WHERE agent_threads.user_id IS NOT DISTINCT FROM EXCLUDED.user_id`,
+           WHERE agent_threads.user_id IS NOT DISTINCT FROM EXCLUDED.user_id AND agent_threads.status = 'active'`,
           [runInput.threadId, runInput.actorKey ?? null],
         );
         if (bound.rowCount !== 1) throw new Error('任务身份或作用域无效');

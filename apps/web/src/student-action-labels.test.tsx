@@ -12,6 +12,7 @@ describe('student account action amount labels', () => {
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
+      if (path.startsWith('/api/students/page?')) return new Response(JSON.stringify({ items: [{ id: 'student-1', name: '小周', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }], total: 1, page: 1, pageSize: 8 }), { status: 200 });
       if (path === '/api/students') return new Response(JSON.stringify([{ id: 'student-1', name: '小周', phone: null, notes: null, enrollmentStatus: 'ACTIVE', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }]), { status: 200 });
       if (path === '/api/students/student-1/course-accounts') return new Response(JSON.stringify([{ id: 'account-1', courseId: 'course-1', courseName: '钢琴课', defaultDurationMinutes: 60, currentUnitPrice: '100.00', version: 1 }]), { status: 200 });
       if (path === '/api/student-course-accounts/account-1/balance') return new Response(JSON.stringify({ accountId: 'account-1', paidBalance: '100.00', giftBalance: '0.00', totalBalance: '100.00' }), { status: 200 });

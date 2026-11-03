@@ -152,14 +152,21 @@ export class AssistantGatewayService {
     }
   }
 
-  async getThread(input: { userId: string; role: UserRole; teacherId?: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail> {
+  async getThread(input: { userId: string; role: UserRole; teacherId?: string; threadId: string; before?: string; previewAfter?: string; traceId?: string }): Promise<AgentThreadDetail> {
     const capability = this.issueCapability(input.userId, input.role, input.teacherId, input.threadId, randomUUID());
     try {
-      const detail = await this.agentRuntime.getThread({ capability, threadId: input.threadId, ...(input.traceId ? { traceId: input.traceId } : {}) });
+      const detail = await this.agentRuntime.getThread({ capability, threadId: input.threadId, ...(input.before ? { before: input.before } : {}), ...(input.previewAfter ? { previewAfter: input.previewAfter } : {}), ...(input.traceId ? { traceId: input.traceId } : {}) });
       return { ...detail, workspace: sanitizeTaskWorkspace(detail.workspace) };
     } catch (error) {
       throw this.toPublicError(error);
     }
+  }
+
+  async archiveThread(input: { userId: string; role: UserRole; teacherId?: string; threadId: string; traceId?: string }): Promise<{ hidden: true }> {
+    const capability = this.issueCapability(input.userId, input.role, input.teacherId, input.threadId, randomUUID());
+    try {
+      return await this.agentRuntime.archiveThread({ capability, threadId: input.threadId, ...(input.traceId ? { traceId: input.traceId } : {}) });
+    } catch (error) { throw this.toPublicError(error); }
   }
 
   private issueCapability(userId: string, role: UserRole, teacherId: string | undefined, threadId: string, runId: string): string {

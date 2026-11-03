@@ -82,7 +82,7 @@ if (hasDatabase) {
       expect(entries).toHaveLength(2);
       const dashboard = await new DashboardRepository(prisma).ownerFacts();
       expect(dashboard.recentRecords).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: entries.find((entry) => entry.kind === 'PAYMENT')?.id, paidDelta: '100.00', giftDelta: '0.00' }),
+        expect.objectContaining({ id: entries.find((entry) => entry.kind === 'PAYMENT')?.id, studentId: student.id, accountId: account.id, paidDelta: '100.00', giftDelta: '0.00' }),
       ]));
       const paymentEntry = entries.find((entry) => entry.kind === 'PAYMENT');
       expect(paymentEntry).toBeDefined();

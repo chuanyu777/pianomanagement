@@ -57,6 +57,9 @@ const AgentThreadSummarySchema = z.object({
 });
 const AgentThreadDetailSchema = AgentThreadSummarySchema.extend({
   messages: z.array(z.object({ id: z.string().uuid(), role: z.enum(['user', 'assistant']), content: z.string(), createdAt: z.string().datetime() })),
+  nextBefore: z.string().uuid().nullable().optional(),
+  previewHistoryTruncated: z.boolean().optional(),
+  nextPreviewAfter: z.string().regex(/^[1-9]\d{0,18}:(?:0|[1-9]\d{0,18})$/).nullable().optional(),
   workspace: WorkspaceDocumentSchema.nullable(),
   historicalPreviews: z.array(HistoricalPreviewReferenceSchema).default([]),
 });
@@ -68,7 +71,8 @@ export interface AgentRuntimeClient {
   resume(input: AgentRuntimeResumeInput): Promise<AgentRuntimeRun>;
   openEvents(input: AgentRuntimeEventsInput): Promise<AgentRuntimeEventStream>;
   listThreads(input: { capability: string; limit?: number; traceId?: string }): Promise<AgentThreadSummary[]>;
-  getThread(input: { capability: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail>;
+  getThread(input: { capability: string; threadId: string; before?: string; previewAfter?: string; traceId?: string }): Promise<AgentThreadDetail>;
+  archiveThread(input: { capability: string; threadId: string; traceId?: string }): Promise<{ hidden: true }>;
 }
 export const AGENT_RUNTIME_CLIENT = Symbol('AGENT_RUNTIME_CLIENT');
 
@@ -190,9 +194,27 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
     return this.getJson(`/internal/assistant/threads?limit=${limit}`, input.capability, z.array(AgentThreadSummarySchema), input.traceId);
   }
 
-  getThread(input: { capability: string; threadId: string; traceId?: string }): Promise<AgentThreadDetail> {
+  getThread(input: { capability: string; threadId: string; before?: string; previewAfter?: string; traceId?: string }): Promise<AgentThreadDetail> {
     assertUuid(input.threadId);
-    return this.getJson(`/internal/assistant/threads/${encodeURIComponent(input.threadId)}`, input.capability, AgentThreadDetailSchema, input.traceId, { hideTaskExistence: true });
+    if (input.before) assertUuid(input.before);
+    const query = new URLSearchParams();
+    if (input.before) query.set('before', input.before);
+    if (input.previewAfter) {
+      if (!/^[1-9]\d{0,18}:(?:0|[1-9]\d{0,18})$/.test(input.previewAfter) || input.previewAfter.split(':').some((part) => BigInt(part) > 9_223_372_036_854_775_807n)) throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE);
+      query.set('previewAfter', input.previewAfter);
+    }
+    return this.getJson(`/internal/assistant/threads/${encodeURIComponent(input.threadId)}${query.size ? `?${query}` : ''}`, input.capability, AgentThreadDetailSchema, input.traceId, { hideTaskExistence: true });
+  }
+
+  async archiveThread(input: { capability: string; threadId: string; traceId?: string }): Promise<{ hidden: true }> {
+    assertUuid(input.threadId);
+    const url = `${this.#baseUrl}/internal/assistant/threads/${encodeURIComponent(input.threadId)}`;
+    const response = await this.request(url, { method: 'DELETE', headers: this.headers(url, 'DELETE', input.capability, input.traceId, 'application/json') }, { hideTaskExistence: true });
+    let payload: unknown;
+    try { payload = await response.json(); } catch { throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE); }
+    const parsed = z.object({ hidden: z.literal(true) }).safeParse(payload);
+    if (!parsed.success) throw new BadGatewayException(PUBLIC_PROTOCOL_MESSAGE);
+    return parsed.data;
   }
 
   private async getJson<T>(path: string, capability: string, schema: z.ZodType<T>, traceId?: string, options?: { hideTaskExistence?: boolean }): Promise<T> {
@@ -254,7 +276,7 @@ export class HttpAgentRuntimeClient implements AgentRuntimeClient {
         },
       }),
     };
-    if (accept === 'application/json') headers['content-type'] = 'application/json';
+    if (accept === 'application/json' && body !== undefined) headers['content-type'] = 'application/json';
     if (traceId) headers['x-trace-id'] = traceId;
     return headers;
   }

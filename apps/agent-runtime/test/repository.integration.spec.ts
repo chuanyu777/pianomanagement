@@ -17,6 +17,157 @@ describe('Agent Runtime PostgreSQL repository', () => {
     vi.unstubAllGlobals();
   });
 
+  test('serializes a history read and hiding while preserving an active run', async () => {
+    const threadId = crypto.randomUUID();
+    const runId = crypto.randomUUID();
+    const actorKey = `race-owner-${crypto.randomUUID()}`;
+    const repo = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const pool = new Pool({ connectionString: databaseUrl });
+    const blocker = await pool.connect();
+    let read: ReturnType<NonNullable<typeof repo.getThread>> | undefined;
+    let hidden: ReturnType<NonNullable<typeof repo.archiveThread>> | undefined;
+    const waitForLock = async (pattern: string) => {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const waiting = await pool.query('SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = $1 AND query LIKE $2', ['Lock', pattern]);
+        if (waiting.rowCount) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error('expected database lock wait was not observed');
+    };
+    try {
+      await repo.createRun({ runId, threadId, userMessage: '正在处理', actorKey });
+      await repo.updateRun({ runId, status: 'running' });
+      await blocker.query('BEGIN');
+      await blocker.query('LOCK TABLE agent_runtime.agent_run_events IN ACCESS EXCLUSIVE MODE');
+      read = repo.getThread!(threadId, actorKey);
+      await waitForLock('%SELECT event.payload%');
+      hidden = repo.archiveThread!(threadId, actorKey);
+      await waitForLock('%UPDATE agent_runtime.agent_threads SET status%');
+      await blocker.query('COMMIT');
+      expect((await read)?.threadId).toBe(threadId);
+      expect(await hidden).toBe(true);
+      expect(await repo.getThread!(threadId, actorKey)).toBeNull();
+      await expect(repo.createRun({ runId: crypto.randomUUID(), threadId, userMessage: '不应继续', actorKey })).rejects.toThrow();
+      expect((await repo.findRun(runId))?.status).toBe('running');
+      await repo.appendMessage({ threadId, runId, role: 'assistant', content: '运行已结束' });
+      await repo.updateRun({ runId, status: 'completed' });
+      expect((await repo.findRun(runId))?.status).toBe('completed');
+      expect((await pool.query('SELECT count(*)::int AS n FROM agent_runtime.agent_messages WHERE thread_id = $1', [threadId])).rows[0].n).toBe(2);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      await Promise.allSettled([...(read ? [read] : []), ...(hidden ? [hidden] : [])]);
+      blocker.release();
+      await repo.close();
+      await pool.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await pool.query('DELETE FROM agent_runtime.agent_messages WHERE thread_id = $1', [threadId]);
+      await pool.query('DELETE FROM agent_runtime.agent_runs WHERE thread_id = $1', [threadId]);
+      await pool.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await pool.end();
+    }
+  }, 30_000);
+
+  test('restores a long task and hides it without deleting persisted records or accepting a new run', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const actorKey = `history-owner-${crypto.randomUUID()}`;
+    const repo = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const pool = new Pool({ connectionString: databaseUrl });
+    try {
+      await repo.createRun({ runId, threadId, userMessage: '第一条', actorKey });
+      await pool.query(`INSERT INTO agent_runtime.agent_messages (id, thread_id, run_id, role, content)
+        SELECT gen_random_uuid(), $1, $2, 'assistant', '消息 ' || n FROM generate_series(1, 500) AS n`, [threadId, runId]);
+      await repo.appendEvent(runId, { type: 'workspace.replace', document: { protocolVersion: '1.0', title: '结果', blocks: [], sources: [] } });
+      const firstPage = await repo.getThread!(threadId, actorKey);
+      expect(firstPage?.messages).toHaveLength(100);
+      expect(firstPage?.previewHistoryTruncated).toBe(false);
+      expect(firstPage?.nextBefore).toBeTruthy();
+      const seen = new Set(firstPage?.messages.map((message) => message.id));
+      let cursor = firstPage?.nextBefore;
+      while (cursor) {
+        const page = await repo.getThread!(threadId, actorKey, cursor);
+        for (const message of page!.messages) {
+          expect(seen.has(message.id)).toBe(false);
+          seen.add(message.id);
+        }
+        cursor = page?.nextBefore;
+      }
+      expect(seen.size).toBe(501);
+      await pool.query(`INSERT INTO agent_runtime.agent_run_events (run_id, event_type, payload)
+        SELECT $1, 'action.previewed', jsonb_build_object('preview', jsonb_build_object('previewId', gen_random_uuid(), 'actionType', 'test', 'schemaVersion', 'test.v1', 'riskLevel', 'L1')) FROM generate_series(1, 1001)`, [runId]);
+      const previews = await repo.getThread!(threadId, actorKey);
+      expect(previews?.previewHistoryTruncated).toBe(true);
+      expect(previews?.historicalPreviews).toHaveLength(50);
+      expect(previews?.nextPreviewAfter).toBeTruthy();
+      await pool.query(`INSERT INTO agent_runtime.agent_run_events (run_id, event_type, payload)
+        SELECT $1, event_type, payload FROM agent_runtime.agent_run_events
+         WHERE run_id = $1 AND event_type = 'action.previewed' ORDER BY event_id LIMIT 1`, [runId]);
+      const all = [...previews!.historicalPreviews];
+      let previewCursor = previews!.nextPreviewAfter;
+      while (previewCursor) {
+        const page = await repo.getThread!(threadId, actorKey, undefined, previewCursor);
+        expect(page!.historicalPreviews.length).toBeLessThanOrEqual(50);
+        all.push(...page!.historicalPreviews);
+        previewCursor = page!.nextPreviewAfter;
+      }
+      expect(all).toHaveLength(1001);
+      expect(new Set(all.map((item) => item.previewId)).size).toBe(1001);
+      expect(await repo.getThread!(threadId, 'other-actor', undefined, previews!.nextPreviewAfter!)).toBeNull();
+      expect(await repo.archiveThread!(threadId, 'other-actor')).toBe(false);
+      expect(await repo.archiveThread!(threadId, actorKey)).toBe(true);
+      expect(await repo.archiveThread!(threadId, actorKey)).toBe(true);
+      expect(await repo.getThreadOwner(threadId)).toBeNull();
+      expect(await repo.getThread!(threadId, actorKey)).toBeNull();
+      expect(await repo.listThreads!(actorKey, 12)).not.toContainEqual(expect.objectContaining({ threadId }));
+      await expect(repo.createRun({ runId: crypto.randomUUID(), threadId, userMessage: '不应继续', actorKey })).rejects.toThrow();
+      expect((await pool.query('SELECT count(*)::int AS n FROM agent_runtime.agent_messages WHERE thread_id = $1', [threadId])).rows[0].n).toBe(501);
+      expect((await pool.query('SELECT count(*)::int AS n FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId])).rows[0].n).toBe(1003);
+    } finally {
+      await repo.close();
+      await pool.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await pool.query('DELETE FROM agent_runtime.agent_messages WHERE thread_id = $1', [threadId]);
+      await pool.query('DELETE FROM agent_runtime.agent_runs WHERE thread_id = $1', [threadId]);
+      await pool.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await pool.end();
+    }
+  }, 30_000);
+
+  test('paginates multiple preview blocks within one event in order', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const actorKey = `preview-blocks-${crypto.randomUUID()}`;
+    const repo = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const pool = new Pool({ connectionString: databaseUrl });
+    try {
+      await repo.createRun({ runId, threadId, userMessage: '测试', actorKey });
+      await pool.query(`INSERT INTO agent_runtime.agent_run_events (run_id, event_type, payload)
+        SELECT $1, 'workspace.replace', jsonb_build_object('document', jsonb_build_object('blocks',
+          jsonb_agg(jsonb_build_object('type', 'action-preview', 'previewId', gen_random_uuid(), 'actionType', 'test', 'schemaVersion', 'test.v1', 'riskLevel', 'L1') ORDER BY n)))
+        FROM generate_series(1, 50) n`, [runId]);
+      const exact = await repo.getThread!(threadId, actorKey);
+      expect(exact?.historicalPreviews).toHaveLength(50);
+      expect(exact?.nextPreviewAfter).toBeNull();
+      await pool.query(`UPDATE agent_runtime.agent_run_events SET payload = jsonb_set(payload, '{document,blocks}',
+        (payload #> '{document,blocks}') || jsonb_build_array(jsonb_build_object('type', 'action-preview', 'previewId', gen_random_uuid(), 'actionType', 'test', 'schemaVersion', 'test.v1', 'riskLevel', 'L1')))
+        WHERE run_id = $1 AND event_type = 'workspace.replace'`, [runId]);
+      const first = await repo.getThread!(threadId, actorKey);
+      const second = await repo.getThread!(threadId, actorKey, undefined, first!.nextPreviewAfter!);
+      expect(first?.historicalPreviews).toHaveLength(50);
+      expect(second?.historicalPreviews).toHaveLength(1);
+      expect(second?.nextPreviewAfter).toBeNull();
+      expect(new Set([...first!.historicalPreviews, ...second!.historicalPreviews].map((p) => p.previewId)).size).toBe(51);
+      await expect(repo.getThread!(threadId, actorKey, undefined, '9223372036854775808:1')).rejects.toThrow();
+      await repo.archiveThread!(threadId, actorKey);
+      expect(await repo.getThread!(threadId, actorKey, undefined, first!.nextPreviewAfter!)).toBeNull();
+    } finally {
+      await repo.close();
+      await pool.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = $1', [runId]);
+      await pool.query('DELETE FROM agent_runtime.agent_messages WHERE thread_id = $1', [threadId]);
+      await pool.query('DELETE FROM agent_runtime.agent_runs WHERE thread_id = $1', [threadId]);
+      await pool.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await pool.end();
+    }
+  }, 30_000);
+
   test('restores task messages only for the bound actor across repository instances', async () => {
     const runId = crypto.randomUUID();
     const threadId = crypto.randomUUID();

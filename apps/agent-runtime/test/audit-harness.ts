@@ -56,7 +56,7 @@ class FixedJsonModel extends BaseChatModelClass {
   _llmType(): string { return 'audit-fixed-json'; }
 
   async _generate(_messages: BaseMessage[], _options: this['ParsedCallOptions']): Promise<ChatResult> {
-    const isMultiStepProbe = _messages.some(message => typeof message.content === 'string' && message.content.includes('两步任务识别节点'));
+    const isMultiStepProbe = _messages.some(message => typeof message.content === 'string' && message.content.includes('有序任务识别节点'));
     if (isMultiStepProbe) {
       const plan = this.#multiStepPlans[this.#multiStepIndex];
       if (plan) this.#multiStepIndex += 1;
@@ -111,7 +111,7 @@ export function createAuditHarness(plans: DialogueIntent[], overrides: AuditTool
       return { candidates: query.courseName ? candidates.filter(item => item.courseName === query.courseName) : candidates };
     }),
     getTeacherCandidates: vi.fn(async () => ({ candidates: [{ teacherId: TEACHER_ID, name: '王老师' }] })),
-    getStudentCandidates: vi.fn(async () => ({ candidates: [{ studentId: STUDENT_ID, name: '小林' }] })),
+    getStudentCandidates: vi.fn(async (_capability: string, query: { studentName: string }) => ({ candidates: [{ studentId: STUDENT_ID, name: query.studentName }] })),
     getLessonCandidates: vi.fn(async () => ({ candidates: [{ lessonId: LESSON_ID, studentName: '林悦', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-22T01:00:00.000Z', status: 'SCHEDULED' }] })),
     getPayrollCandidates: vi.fn(async () => ({ candidates: [{ payrollId: PAYROLL_ID, teacherId: TEACHER_ID, teacherName: '王老师', period: '2026-10', status: 'GENERATED' }] })),
     createPaymentPreview: vi.fn(async (_capability: string, request: Record<string, unknown>) => ({ ...preview('course-account.payment', request), actionType: 'course-account.payment', display: { title: '课程交费', summary: '交费 ¥100.00', beforeBalance: { accountId: ACCOUNT_ID, paidBalance: '500.00', giftBalance: '80.00', totalBalance: '580.00' }, afterBalance: { accountId: ACCOUNT_ID, paidBalance: '600.00', giftBalance: '80.00', totalBalance: '680.00' } }, auditEventId: randomUUID() })),

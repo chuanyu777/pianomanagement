@@ -131,6 +131,15 @@ if (hasDatabase) {
       expect(await teacherMe.json()).toMatchObject({ username: teacherUsername, teacherId: expect.any(String) });
       const forbidden = await fetch(`${baseUrl}/api/teachers`, { headers: teacherAuthorization });
       expect(forbidden.status).toBe(403);
+      expect((await fetch(`${baseUrl}/api/students/page`, { headers: teacherAuthorization })).status).toBe(403);
+      expect((await fetch(`${baseUrl}/api/students/${randomUUID()}`, { headers: teacherAuthorization })).status).toBe(403);
+      expect((await fetch(`${baseUrl}/api/students/page`)).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/students/${randomUUID()}`, { headers: authorization })).status).toBe(404);
+      expect((await fetch(`${baseUrl}/api/source-links/student/${randomUUID()}`)).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/source-links/student/${randomUUID()}`, { headers: teacherAuthorization })).status).toBe(404);
+      const teacherDashboard = await fetch(`${baseUrl}/api/dashboard/overview`, { headers: teacherAuthorization });
+      expect(teacherDashboard.status).toBe(200);
+      expect(await teacherDashboard.json()).toMatchObject({ recentRecords: null });
     });
 
     it('lets the owner manage students, courses, and per-course unit prices through protected routes', async () => {
@@ -160,6 +169,18 @@ if (hasDatabase) {
       expect(studentResponse.status).toBe(201);
       const student = await studentResponse.json() as { id: string };
       studentIds.push(student.id);
+      const sourceLink = await fetch(`${baseUrl}/api/source-links/student/${student.id}`, { headers: authorization });
+      expect(sourceLink.status).toBe(200);
+      expect(await sourceLink.json()).toEqual({ path: `/students?student=${student.id}&tab=profile` });
+      const directory = await fetch(`${baseUrl}/api/students/page?q=${encodeURIComponent('林同学')}&page=1&pageSize=8&enrollmentStatus=STUDYING&arrears=false`, { headers: authorization });
+      expect(directory.status).toBe(200);
+      expect(await directory.json()).toMatchObject({ items: [expect.objectContaining({ id: student.id })], total: 1, page: 1, pageSize: 8 });
+      const located = await fetch(`${baseUrl}/api/students/page?q=${encodeURIComponent('林同学')}&pageSize=1&locateStudentId=${student.id}`, { headers: authorization });
+      expect(await located.json()).toMatchObject({ items: [expect.objectContaining({ id: student.id })], total: 1, page: 1, pageSize: 1 });
+      expect(await (await fetch(`${baseUrl}/api/students/${student.id}`, { headers: authorization })).json()).toMatchObject({ id: student.id, name: '林同学' });
+      expect((await fetch(`${baseUrl}/api/students/page?page=0`, { headers: authorization })).status).toBe(400);
+      const legacy = await fetch(`${baseUrl}/api/students?q=${encodeURIComponent('林同学')}`, { headers: authorization });
+      expect(await legacy.json()).toEqual([expect.objectContaining({ id: student.id })]);
 
       const courseResponse = await fetch(`${baseUrl}/api/courses`, {
         method: 'POST',
@@ -215,6 +236,8 @@ if (hasDatabase) {
       });
       expect(gift.status).toBe(201);
       expect(await gift.json()).toMatchObject({ paidBalance: '300.00', giftBalance: '50.00', totalBalance: '350.00' });
+      const ownerDashboard = await fetch(`${baseUrl}/api/dashboard/overview`, { headers: authorization });
+      expect((await ownerDashboard.json() as { recentRecords: unknown[] }).recentRecords).toEqual(expect.arrayContaining([expect.objectContaining({ studentId: student.id, accountId: account.id })]));
 
       const balance = await fetch(`${baseUrl}/api/student-course-accounts/${account.id}/balance`, {
         headers: authorization,

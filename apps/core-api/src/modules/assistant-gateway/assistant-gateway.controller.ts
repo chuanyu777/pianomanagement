@@ -1,5 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiProperty, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiProperty, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import { UserRole } from '../../generated/prisma/client.js';
 import { JwtAuthGuard, type AuthenticatedRequest } from '../auth/jwt-auth.guard.js';
@@ -16,7 +16,8 @@ class RunResponse { @ApiProperty({ type: String, format: 'uuid' }) runId!: strin
 class TaskSummaryResponse { @ApiProperty({ type: String, format: 'uuid' }) threadId!: string; @ApiProperty({ type: String }) title!: string; @ApiProperty({ type: String, format: 'date-time' }) lastActivityAt!: string; @ApiProperty({ type: String, nullable: true }) latestStatus!: string | null; }
 class TaskMessageResponse { @ApiProperty({ type: String, format: 'uuid' }) id!: string; @ApiProperty({ enum: ['user', 'assistant'] }) role!: string; @ApiProperty({ type: String }) content!: string; @ApiProperty({ type: String, format: 'date-time' }) createdAt!: string; }
 class HistoricalPreviewReferenceResponse { @ApiProperty({ type: String, format: 'uuid' }) previewId!: string; @ApiProperty({ type: String }) actionType!: string; @ApiProperty({ type: String }) schemaVersion!: string; @ApiProperty({ type: String, enum: ['L0', 'L1', 'L2'] }) riskLevel!: string; }
-class TaskDetailResponse extends TaskSummaryResponse { @ApiProperty({ type: TaskMessageResponse, isArray: true }) messages!: TaskMessageResponse[]; @ApiProperty({ type: Object, nullable: true }) workspace!: Record<string, unknown> | null; @ApiProperty({ type: HistoricalPreviewReferenceResponse, isArray: true }) historicalPreviews!: HistoricalPreviewReferenceResponse[]; }
+class TaskDetailResponse extends TaskSummaryResponse { @ApiProperty({ type: TaskMessageResponse, isArray: true }) messages!: TaskMessageResponse[]; @ApiProperty({ type: String, nullable: true, required: false, format: 'uuid' }) nextBefore?: string | null; @ApiProperty({ type: Boolean, required: false }) previewHistoryTruncated?: boolean; @ApiProperty({ type: String, nullable: true, required: false, description: '下一页确认单引用游标；为空表示没有更多' }) nextPreviewAfter?: string | null; @ApiProperty({ type: Object, nullable: true }) workspace!: Record<string, unknown> | null; @ApiProperty({ type: HistoricalPreviewReferenceResponse, isArray: true }) historicalPreviews!: HistoricalPreviewReferenceResponse[]; }
+class HiddenTaskResponse { @ApiProperty({ type: Boolean, enum: [true] }) hidden!: true; }
 function actor(request: AuthenticatedRequest): NonNullable<AuthenticatedRequest['actor']> {
   if (!request.actor) throw new BadRequestException('登录状态无效或已过期');
   return request.actor;
@@ -32,10 +33,17 @@ export class AssistantGatewayController {
     return this.gateway.listThreads({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}) });
   }
   @Get('tasks/:threadId') @ApiOkResponse({ type: TaskDetailResponse })
-  getTask(@Param('threadId') threadId: string, @Req() request: AuthenticatedRequest) {
+  @ApiQuery({ name: 'previewAfter', required: false, type: String, description: '上一页返回的确认单引用游标' })
+  getTask(@Param('threadId') threadId: string, @Req() request: AuthenticatedRequest, @Query('before') before?: string, @Query('previewAfter') previewAfter?: string) {
+    if (!UUID.safeParse(threadId).success || (before !== undefined && !UUID.safeParse(before).success) || (previewAfter !== undefined && (typeof previewAfter !== 'string' || !/^[1-9]\d{0,18}:(?:0|[1-9]\d{0,18})$/.test(previewAfter) || previewAfter.split(':').some((part) => BigInt(part) > 9_223_372_036_854_775_807n)))) throw new BadRequestException('请求参数不合法');
+    const currentActor = actor(request);
+    return this.gateway.getThread({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}), threadId, ...(before ? { before } : {}), ...(previewAfter ? { previewAfter } : {}) });
+  }
+  @Delete('tasks/:threadId') @ApiOkResponse({ type: HiddenTaskResponse })
+  hideTask(@Param('threadId') threadId: string, @Req() request: AuthenticatedRequest) {
     if (!UUID.safeParse(threadId).success) throw new BadRequestException('请求参数不合法');
     const currentActor = actor(request);
-    return this.gateway.getThread({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}), threadId });
+    return this.gateway.archiveThread({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}), threadId });
   }
   @Post('runs') @ApiBody({ type: StartBody }) @ApiOkResponse({ type: RunResponse })
   start(@Body() body: unknown, @Req() request: AuthenticatedRequest) {

@@ -40,6 +40,7 @@ describe('core structured business flows', () => {
     let submittedBody: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.startsWith('/api/students/page?')) return Response.json({ items: [], total: 0, page: 1, pageSize: 8 });
       if (path === '/api/students') return new Response('[]', { status: 200 });
       if (path === '/api/assistant/previews/structured-action') {
         submittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -71,6 +72,7 @@ describe('core structured business flows', () => {
     const commands: Array<{ path: string; body: Record<string, unknown>; headers: Headers }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
+      if (path.startsWith('/api/students/page?')) return new Response(JSON.stringify({ items: [{ id: studentId, name: '小林', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }], total: 1, page: 1, pageSize: 8 }), { status: 200 });
       if (path === '/api/students') return new Response(JSON.stringify([{ id: studentId, name: '小林', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }]), { status: 200 });
       if (path === `/api/students/${studentId}/course-accounts`) return new Response(JSON.stringify([account()]), { status: 200 });
       if (path === `/api/student-course-accounts/${accountId}/balance`) return new Response(JSON.stringify({ accountId, paidBalance: '600.00', giftBalance: '0.00', totalBalance: '600.00' }), { status: 200 });
@@ -130,6 +132,7 @@ describe('core structured business flows', () => {
         requests.push(path);
         return new Response(JSON.stringify([{ id: 'lesson-1', accountId, teacherId: 'teacher-1', teacher: { id: 'teacher-1', name: '王老师' }, startsAt: '2026-10-25T16:15:00.000Z', endsAt: '2026-10-25T17:15:00.000Z', status: 'SCHEDULED', student: { id: studentId, name: '小林' }, course: { id: 'course-1', name: '钢琴课' }, unitPriceSnapshot: null }]), { status: 200 });
       }
+      if (path.startsWith('/api/students/page?')) return new Response(JSON.stringify({ items: [{ id: studentId, name: '小林', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }], total: 1, page: 1, pageSize: 8 }), { status: 200 });
       if (path === '/api/students') return new Response(JSON.stringify([{ id: studentId, name: '小林', phone: null, notes: null, enrollmentStatus: 'STUDYING', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' }]), { status: 200 });
       if (path === '/api/teachers') return new Response('[]', { status: 200 });
       return new Response('{}', { status: 404 });

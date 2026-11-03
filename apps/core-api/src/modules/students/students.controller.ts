@@ -52,6 +52,23 @@ class StudentResponse implements StudentSummary {
   updatedAt!: Date;
 }
 
+class StudentPageResponse {
+  @ApiProperty({ type: StudentResponse, isArray: true }) items!: StudentResponse[];
+  @ApiProperty({ type: Number }) total!: number;
+  @ApiProperty({ type: Number, nullable: true, description: '定位目标不存在或不符合筛选时为 null' }) page!: number | null;
+  @ApiProperty({ type: Number }) pageSize!: number;
+}
+
+const pageInteger = (max: number) => z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().max(max));
+const StudentPageQuery = z.object({
+  q: z.string().trim().max(120).optional(),
+  page: pageInteger(1000000).optional().default(1),
+  pageSize: pageInteger(100).optional().default(8),
+  enrollmentStatus: z.enum(['STUDYING', 'FROZEN', 'WITHDRAWN']).optional(),
+  arrears: z.enum(['true', 'false']).transform((value) => value === 'true').optional(),
+  locateStudentId: z.uuid().optional(),
+}).strict();
+
 const NotesSchema = z.string().trim().min(1).max(2000).nullable().optional();
 
 const CreateStudentBodySchema = z.object({
@@ -95,6 +112,26 @@ export class StudentsController {
     const parsed = z.object({ q: z.string().trim().max(120).optional() }).strict().safeParse(query);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
     return this.students.list(parsed.data.q);
+  }
+
+  @Get('page')
+  @ApiOkResponse({ type: StudentPageResponse })
+  @ApiQuery({ name: 'q', required: false, type: String, description: '按姓名或联系电话搜索' })
+  @ApiQuery({ name: 'page', required: false, type: Number, minimum: 1, maximum: 1000000, description: '页码，从 1 开始，默认 1' })
+  @ApiQuery({ name: 'pageSize', required: false, type: Number, minimum: 1, maximum: 100, description: '每页条数，默认 8' })
+  @ApiQuery({ name: 'enrollmentStatus', required: false, enum: ['STUDYING', 'FROZEN', 'WITHDRAWN'] })
+  @ApiQuery({ name: 'arrears', required: false, type: Boolean, description: 'true 仅欠费；false 仅非欠费（含退学生）' })
+  @ApiQuery({ name: 'locateStudentId', required: false, type: String, format: 'uuid', description: '定位筛选结果中该学生所在页；未命中返回 page=null' })
+  listPage(@Query() query: unknown) {
+    const parsed = StudentPageQuery.safeParse(query);
+    if (!parsed.success) throw new BadRequestException('请求参数不合法');
+    return this.students.listPage(parsed.data);
+  }
+
+  @Get(':id')
+  @ApiOkResponse({ type: StudentResponse })
+  get(@Param('id', new ParseUUIDPipe()) id: string): Promise<StudentSummary> {
+    return this.students.get(id);
   }
 
   @Patch(':id')

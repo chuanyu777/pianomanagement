@@ -14,7 +14,7 @@ export class DashboardRepository {
       }),
       this.prisma.ledgerEntry.findMany({
         orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }], take: 5,
-        select: { id: true, kind: true, occurredAt: true, paidDelta: true, giftDelta: true, account: { select: { student: { select: { name: true } }, course: { select: { name: true } } } } },
+        select: { id: true, kind: true, occurredAt: true, paidDelta: true, giftDelta: true, account: { select: { id: true, studentId: true, student: { select: { name: true } }, course: { select: { name: true } } } } },
       }),
     ]);
     const arrears = new Set<string>();
@@ -25,7 +25,7 @@ export class DashboardRepository {
     return {
       arrearsCount: arrears.size,
       recentRecords: recent.map((entry) => ({
-        id: entry.id, kind: entry.kind, occurredAt: entry.occurredAt.toISOString(), studentName: entry.account.student.name,
+        id: entry.id, studentId: entry.account.studentId, accountId: entry.account.id, kind: entry.kind, occurredAt: entry.occurredAt.toISOString(), studentName: entry.account.student.name,
         courseName: entry.account.course.name, paidDelta: entry.paidDelta.toFixed(2), giftDelta: entry.giftDelta.toFixed(2),
       })),
     };

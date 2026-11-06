@@ -96,13 +96,16 @@ describe('core structured business flows', () => {
     await user.type(screen.getByLabelText('交费金额'), '180.00');
     await user.clear(screen.getByLabelText('业务发生时间'));
     await user.type(screen.getByLabelText('业务发生时间'), '2026-10-28T10:30');
+    await user.click(screen.getByRole('combobox', { name: '收付款渠道' }));
+    await user.click(await screen.findByText('现金'));
     await user.click(screen.getByRole('button', { name: '生成确认单' }));
 
     await waitFor(() => expect(commands).toHaveLength(1));
     expect(commands[0]).toMatchObject({
       path: '/api/assistant/previews/course-accounts/payment',
-      body: { accountId, amount: '180.00', channel: 'CASH', occurredAt: '2026-10-28T10:30:00+08:00' },
+      body: { studentId, courseId: 'course-1', amount: '180.00', channel: 'CASH', occurredAt: '2026-10-28T10:30:00+08:00' },
     });
+    expect(commands[0]?.body).not.toHaveProperty('currentUnitPrice');
     expect(commands[0]?.headers.get('Authorization')).toBe('Bearer jwt-test');
     expect(fetchMock.mock.calls.some(([path, init]) => String(path) === '/api/course-accounts/payment' && init?.method === 'POST')).toBe(false);
 

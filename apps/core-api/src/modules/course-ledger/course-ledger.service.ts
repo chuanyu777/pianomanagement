@@ -76,6 +76,10 @@ export type ReverseLedgerEntryInput = {
   createdById: string;
   commandId: string;
 };
+type ExpectedLedgerCommand =
+  | {kind:'PAYMENT';input:RecordPaymentInput}
+  | {kind:'GIFT';input:RecordGiftInput}
+  | {kind:'REVERSAL';input:ReverseLedgerEntryInput};
 export type ReverseLedgerEntryPreview = {
   entryId: string;
   accountId: string;
@@ -212,7 +216,7 @@ export class CourseLedgerService {
       return await this.prisma.$transaction((tx) => this.recordPaymentInTransaction(tx, input));
     } catch (error) {
       if (!isUniqueConstraintError(error)) throw error;
-      return this.resolveCommandConflict(input.commandId, input.createdById);
+      return this.resolveCommandConflict(input.commandId, input.createdById, {kind:'PAYMENT',input});
     }
   }
 
@@ -224,11 +228,12 @@ export class CourseLedgerService {
     if (input.channel === 'OTHER' && !input.note?.trim()) {
       throw new BadRequestException('选择其他渠道时必须填写备注');
     }
+    await this.lockCommand(tx,input.commandId);
     await this.periods.assertWritableForDate(input.occurredAt, tx);
-    const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    const replay = await this.findCommandResult(tx, input.commandId, input.createdById,{kind:'PAYMENT',input});
     if (replay) return replay;
     await this.lockAccount(tx, input.accountId);
-    const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById,{kind:'PAYMENT',input});
     if (afterLockReplay) return afterLockReplay;
     const payment = await tx.paymentRecord.create({
       data: {
@@ -264,7 +269,7 @@ export class CourseLedgerService {
       return await this.prisma.$transaction((tx) => this.recordGiftInTransaction(tx, input));
     } catch (error) {
       if (!isUniqueConstraintError(error)) throw error;
-      return this.resolveCommandConflict(input.commandId, input.createdById);
+      return this.resolveCommandConflict(input.commandId, input.createdById,{kind:'GIFT',input});
     }
   }
 
@@ -273,11 +278,12 @@ export class CourseLedgerService {
     input: RecordGiftInput,
   ): Promise<CourseAccountBalance> {
     this.assertPositiveAmount(input.amount);
+    await this.lockCommand(tx,input.commandId);
     await this.periods.assertWritableForDate(input.occurredAt, tx);
-    const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    const replay = await this.findCommandResult(tx, input.commandId, input.createdById,{kind:'GIFT',input});
     if (replay) return replay;
     await this.lockAccount(tx, input.accountId);
-    const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById);
+    const afterLockReplay = await this.findCommandResult(tx, input.commandId, input.createdById,{kind:'GIFT',input});
     if (afterLockReplay) return afterLockReplay;
     const gift = await tx.giftRecord.create({
       data: {
@@ -311,7 +317,7 @@ export class CourseLedgerService {
       return await this.prisma.$transaction((tx) => this.reverseEntryInTransaction(tx, input));
     } catch (error) {
       if (!isUniqueConstraintError(error)) throw error;
-      return this.resolveCommandConflict(input.commandId, input.createdById);
+      return this.resolveCommandConflict(input.commandId, input.createdById,{kind:'REVERSAL',input});
     }
   }
 
@@ -337,8 +343,9 @@ export class CourseLedgerService {
   }
 
   async reverseEntryInTransaction(tx: LedgerTransaction, input: ReverseLedgerEntryInput): Promise<CourseAccountBalance> {
+        await this.lockCommand(tx,input.commandId);
         await this.periods.assertWritableForDate(input.occurredAt, tx);
-        const replay = await this.findCommandResult(tx, input.commandId, input.createdById);
+        const replay = await this.findCommandResult(tx, input.commandId, input.createdById,{kind:'REVERSAL',input});
         if (replay) return replay;
         const original = await tx.ledgerEntry.findUnique({
           where: { id: input.entryId },
@@ -408,22 +415,32 @@ export class CourseLedgerService {
     });
   }
 
+  private async lockCommand(tx:LedgerTransaction,commandId:string):Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`piano.ledger.command:${commandId}`}, 0))`;
+  }
+
   private async findCommandResult(
     client: Pick<LedgerTransaction, 'ledgerEntry' | 'studentCourseAccount'>,
     commandId: string,
     actorId: string,
+    expected: ExpectedLedgerCommand,
   ): Promise<CourseAccountBalance | undefined> {
     const entry = await client.ledgerEntry.findUnique({
       where: { commandId },
-      select: { accountId: true, createdById: true },
+      select: { accountId:true,createdById:true,kind:true,paidDelta:true,giftDelta:true,occurredAt:true,note:true,reversesEntryId:true,payment:{select:{channel:true}} },
     });
     if (!entry) return undefined;
     if (entry.createdById !== actorId) throw new ConflictException('幂等键已被其他用户使用');
+    const input=expected.input;
+    const different=entry.occurredAt.getTime()!==input.occurredAt.getTime() || entry.note!==(input.note?.trim()||null) || (expected.kind==='REVERSAL'
+      ? entry.reversesEntryId!==expected.input.entryId
+      : entry.accountId!==expected.input.accountId || entry.kind!==expected.kind || !(expected.kind==='PAYMENT'?entry.paidDelta:entry.giftDelta).eq(expected.input.amount) || (expected.kind==='PAYMENT'&&entry.payment?.channel!==expected.input.channel));
+    if(different) throw new ConflictException('幂等键已用于不同业务');
     return this.getBalanceWithClient(client, entry.accountId);
   }
 
-  private async resolveCommandConflict(commandId: string, actorId: string): Promise<CourseAccountBalance> {
-    const result = await this.findCommandResult(this.prisma, commandId, actorId);
+  private async resolveCommandConflict(commandId: string, actorId: string, expected:ExpectedLedgerCommand): Promise<CourseAccountBalance> {
+    const result = await this.findCommandResult(this.prisma, commandId, actorId,expected);
     if (!result) throw new ConflictException('命令重复提交，请使用新的幂等键重试');
     return result;
   }

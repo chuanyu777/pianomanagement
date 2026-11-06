@@ -7,7 +7,7 @@ const ownerId = 'owner-1';
 describe('PeriodsService', () => {
   it('uses the Shanghai business month when checking whether a date is writable', async () => {
     const findFirst = vi.fn().mockResolvedValue({ id: 'closed-period' });
-    const service = new PeriodsService({ closedPeriod: { findFirst } } as never);
+    const service = new PeriodsService({ $executeRaw: vi.fn(), closedPeriod: { findFirst } } as never);
 
     await expect(service.assertWritableForDate(new Date('2026-10-31T16:30:00.000Z')))
       .rejects.toBeInstanceOf(ConflictException);
@@ -20,6 +20,7 @@ describe('PeriodsService', () => {
   it('reopens only the most recently closed period, even when periods were closed out of calendar order', async () => {
     const target = { id: 'october', reopenedAt: null };
     const tx = {
+      $executeRaw: vi.fn(),
       closedPeriod: {
         findUnique: vi.fn().mockResolvedValue(target),
         findFirst: vi.fn().mockResolvedValue({ id: 'october' }),
@@ -49,6 +50,7 @@ describe('PeriodsService', () => {
 
   it('rejects reopening an older period and distinguishes missing or already reopened periods', async () => {
     const tx = {
+      $executeRaw: vi.fn(),
       closedPeriod: {
         findUnique: vi.fn().mockResolvedValue({ id: 'september', reopenedAt: null }),
         findFirst: vi.fn().mockResolvedValue({ id: 'october' }),
@@ -72,6 +74,7 @@ describe('PeriodsService', () => {
 
   it('allows reopening the previous still-closed month after the latest month has already been reopened', async () => {
     const tx = {
+      $executeRaw: vi.fn(),
       closedPeriod: {
         findUnique: vi.fn().mockResolvedValue({ id: 'september', reopenedAt: null }),
         findFirst: vi.fn().mockResolvedValue({ id: 'september' }),

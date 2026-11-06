@@ -41,11 +41,12 @@ export class CoreDialogueError extends Error {
 
   static async fromResponse(response: Response): Promise<CoreDialogueError> {
     if (response.status >= 500) return new CoreDialogueError(response.status);
-    const body = await response.json().catch(() => null) as { message?: unknown; code?: unknown } | null;
+    const body = await response.json().catch(() => null) as { message?: unknown; code?: unknown; guidance?: unknown } | null;
     const raw = Array.isArray(body?.message) ? body.message.join('；') : body?.message;
     const message = typeof raw === 'string' && raw.length > 0 && raw.length <= 500 ? raw : undefined;
     const code = typeof body?.code === 'string' && body.code.length <= 100 ? body.code : undefined;
-    return new CoreDialogueError(response.status, message, code);
+    const guidance = code === 'PERIOD_CLOSED' && typeof body?.guidance === 'string' && body.guidance.length <= 300 ? body.guidance : undefined;
+    return new CoreDialogueError(response.status, guidance && message ? `${message}。${guidance}` : message, code);
   }
 }
 

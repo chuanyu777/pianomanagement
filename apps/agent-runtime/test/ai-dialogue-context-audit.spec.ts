@@ -9,7 +9,7 @@ describe('AI 对话上下文专项审计（C01-C08、E01、E06）', () => {
       newIntent('accounts.read', { studentName: '小明', courseName: '主课' }),
       newIntent('accounts.read', { selectionId: ACCOUNT_ID_3 }, 'continue'),
       newIntent('payment.preview', { amount: '100', channel: '微信' }, 'continue'),
-    ], { getCourseAccountCandidates: (async () => ({ candidates: [{ accountId: ACCOUNT_ID_2, studentName: '小明', courseName: '主课' }, { accountId: ACCOUNT_ID_3, studentName: '小明', courseName: '主课' }] })) as unknown });
+    ], { getStudentCandidates: async () => ({ candidates:[{studentId:ACCOUNT_ID_2,name:'小明'},{studentId:ACCOUNT_ID_3,name:'小明'}] }), getCourseAccountCandidates: (async () => ({ candidates: [{ accountId: ACCOUNT_ID_2, studentId:ACCOUNT_ID_2, studentName: '小明', courseName: '主课' }, { accountId: ACCOUNT_ID_3, studentId:ACCOUNT_ID_3, studentName: '小明', courseName: '主课' }] })) as unknown });
     const first = await h.run('c01', '小明主课还剩多少钱？');
     expect(first.answer).not.toMatch(/500\.00|600\.00|余额\s*[:：]?\s*\d/u);
     expect(first.answer).toMatch(/选择|匹配/u);

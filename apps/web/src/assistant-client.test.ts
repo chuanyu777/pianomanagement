@@ -28,6 +28,35 @@ describe('assistant client', () => {
       : new Response(pending));
     await expect(confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl })).rejects.toThrow('该月份已经关账');
   });
+  it('recovers the authoritative receipt when a conflicting confirmation was executed concurrently', async () => {
+    let reads = 0;
+    let posts = 0;
+    const base = { previewId, actionType: 'period.close', schemaVersion: 'period.close.v1', riskLevel: 'L2', expiresAt: '2099-10-28T00:00:00.000Z' };
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') { posts++; return Response.json({ message: '预览已被确认' }, { status: 409 }); }
+      reads++;
+      return Response.json({ ...base, status: reads === 1 ? 'PENDING' : 'EXECUTED', receipt: reads === 1 ? null : { closeId: 'authoritative-receipt' } });
+    });
+    await expect(confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl })).resolves.toEqual({ previewId, status: 'EXECUTED', receipt: { closeId: 'authoritative-receipt' } });
+    expect(reads).toBe(2);
+    expect(posts).toBe(1);
+  });
+
+  it.each(['pending', 'unavailable'] as const)('keeps a 409 read-only and retains the business message when the recheck is %s', async (recheck) => {
+    let reads = 0;
+    let posts = 0;
+    const pending = { previewId, actionType: 'period.close', schemaVersion: 'period.close.v1', riskLevel: 'L2', status: 'PENDING', expiresAt: '2099-10-28T00:00:00.000Z', receipt: null };
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') { posts++; return Response.json({ message: '该月份已经关账' }, { status: 409 }); }
+      reads++;
+      return reads > 1 && recheck === 'unavailable' ? new Response(null, { status: 503 }) : Response.json(pending);
+    });
+    const result = confirmAssistantPreview({ token: 'jwt', previewId, idempotencyKey: runId, fetchImpl });
+    await expect(result).rejects.toBeInstanceOf(UnknownConfirmationError);
+    await expect(result).rejects.toThrow('该月份已经关账');
+    expect(reads).toBe(2);
+    expect(posts).toBe(1);
+  });
   it.each(['student.create', 'lesson.schedule'])('reads the authoritative version when %s preview creation omits schemaVersion', async (actionType) => {
     const draft = { previewId, actionType, riskLevel: 'L2', expiresAt: '2099-10-21T02:00:00.000Z', display: { title: '确认操作' } };
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(init?.method === 'POST' ? draft : { ...draft, schemaVersion: `${actionType}.v1`, status: 'PENDING', receipt: null }), { status: 200 }));

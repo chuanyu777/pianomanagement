@@ -8,7 +8,7 @@ export function refusalGuidance(code: string | undefined, status: number | undef
     case 'ROLE_OWNER_ONLY':
       return '这项数据只有店主账号能查看。老师账号可以查自己的课表、本月课时和工资。';
     case 'PERIOD_CLOSED':
-      return '这个月份已经关账，不能再改动资金或课消。需要补录的话，要先重开关账，办完再关回去。';
+      return '这个月份已经关账，不能再改动资金或课消。请由店主核实账期；只有最近一次关账的月份可以填写原因后重新打开。';
     case 'PAYROLL_ALREADY_PAID':
       return '这笔工资已经支付过了，不能重复支付。如果要更正，请先撤销支付登记。';
     case 'VERSION_CONFLICT':

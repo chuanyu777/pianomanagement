@@ -86,13 +86,20 @@ const StructuredActionPreviewSchema = z.object({
 
 const MoneyPreviewBaseSchema = z.object({
   accountId: z.string().uuid(),
-  amount: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/),
+  amount: z.string().regex(/^(?:0|[1-9]\d{0,11})\.\d{2}$/),
   occurredAt: z.string().datetime({ offset: true }).transform((value) => new Date(value)),
   note: z.string().trim().max(2000).optional(),
   idempotencyKey: z.string().uuid(),
   requestId: z.string().uuid(),
 }).strict();
-const PaymentPreviewSchema = MoneyPreviewBaseSchema.extend({ channel: z.nativeEnum(PaymentChannel) });
+const PaymentPreviewSchema = z.union([
+  MoneyPreviewBaseSchema.extend({ channel: z.nativeEnum(PaymentChannel) }),
+  MoneyPreviewBaseSchema.omit({accountId:true}).extend({
+    studentId:z.string().uuid(), courseId:z.string().uuid(),
+    currentUnitPrice:z.string().regex(/^(?:0|[1-9]\d{0,11})\.\d{2}$/).optional(),
+    channel:z.nativeEnum(PaymentChannel),
+  }).strict(),
+]);
 const FinalRefundPreviewSchema = z.object({
   studentId: z.string().uuid(),
   feeAmount: z.string().regex(/^(?:0|[1-9]\d{0,11})\.\d{2}$/),
@@ -308,7 +315,10 @@ export class AssistantActionsController {
   }
 
   @Post('course-accounts/payment/preview')
-  @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['accountId', 'amount', 'channel', 'occurredAt', 'idempotencyKey', 'requestId'] } })
+  @ApiBody({ schema: { oneOf: [
+    {type:'object',required:['accountId','amount','channel','occurredAt','idempotencyKey','requestId'],properties:{accountId:{type:'string',format:'uuid'},amount:{type:'string'},channel:{type:'string',enum:Object.values(PaymentChannel)},occurredAt:{type:'string',format:'date-time'},idempotencyKey:{type:'string',format:'uuid'},requestId:{type:'string',format:'uuid'},note:{type:'string'}}},
+    {type:'object',required:['studentId','courseId','amount','channel','occurredAt','idempotencyKey','requestId'],properties:{studentId:{type:'string',format:'uuid'},courseId:{type:'string',format:'uuid'},currentUnitPrice:{type:'string'},amount:{type:'string'},channel:{type:'string',enum:Object.values(PaymentChannel)},occurredAt:{type:'string',format:'date-time'},idempotencyKey:{type:'string',format:'uuid'},requestId:{type:'string',format:'uuid'},note:{type:'string'}}},
+  ] } })
   @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'expiresAt'] } })
   @RequiresCapability('PREVIEW_L2')
   createPaymentPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {

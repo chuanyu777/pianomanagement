@@ -109,6 +109,7 @@ export async function startAssistantRun(input: {
   message: string;
   threadId: string;
   clientRequestId: string;
+  runId?: string;
   fetchImpl?: typeof fetch;
 }): Promise<AssistantRun> {
   if (!input.token) {
@@ -118,7 +119,7 @@ export async function startAssistantRun(input: {
   const response = await sendWithSession(input, '/api/assistant/runs', {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: input.message, threadId: input.threadId, clientRequestId: input.clientRequestId }),
+    body: JSON.stringify({ message: input.message, threadId: input.threadId, clientRequestId: input.clientRequestId, ...(input.runId ? { runId: input.runId } : {}) }),
   });
   if (!response.ok) {
     if (response.status === 401) {
@@ -403,8 +404,12 @@ export async function confirmAssistantPreview(input: {
     if (response.status === 403) throw new Error('当前账号无权确认该预览。');
     if (response.status === 409) {
       const payload: unknown = await response.json().catch(() => null);
-      if (isRecord(payload) && typeof payload.message === 'string' && payload.message.trim() && payload.message.length <= 500) throw new Error(payload.message);
-      throw new Error('预览已失效或已被其他请求确认，请重新生成预览。');
+      const reason = isRecord(payload) && typeof payload.message === 'string' && payload.message.trim() && payload.message.length <= 500
+        ? payload.message
+        : '预览已失效或已被其他请求确认，请重新生成预览。';
+      return input.fetchImpl
+        ? recoverUnknownConfirmation({ token: input.token!, previewId: input.previewId, fetchImpl: input.fetchImpl, reason })
+        : recoverUnknownConfirmation({ token: input.token!, previewId: input.previewId, reason });
     }
     return recover();
   }

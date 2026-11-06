@@ -257,20 +257,27 @@ describe('InternalToolsService AI read tools', () => {
 });
 
 describe('InternalToolsService.courseAccountCandidates', () => {
+  it('associates each safe account candidate with its student identity', async () => {
+    const prisma = mockPrisma();
+    const service = new InternalToolsService(prisma as never);
+    prisma.user.findUnique.mockResolvedValue({ role: UserRole.OWNER, isActive: true });
+    prisma.studentCourseAccount.findMany.mockResolvedValue([{ id: 'account-a', studentId: 'student-a', student: { name: '林同学' }, course: { name: '钢琴' } }]);
+    await expect(service.courseAccountCandidates('owner', { studentName: '林同学' })).resolves.toEqual({ candidates: [{ accountId: 'account-a', studentId: 'student-a', studentName: '林同学', courseName: '钢琴' }] });
+  });
   it('returns all exact account matches with only the required candidate fields', async () => {
     const prisma = mockPrisma();
     const service = new InternalToolsService(prisma as never);
     prisma.user.findUnique.mockResolvedValue({ role: UserRole.OWNER, isActive: true });
     prisma.studentCourseAccount.findMany.mockResolvedValue([
-      { id: 'account-a', student: { name: '林同学' }, course: { name: '钢琴' } },
-      { id: 'account-b', student: { name: '林同学' }, course: { name: '钢琴' } },
+      { id: 'account-a', studentId: 'student-a', student: { name: '林同学' }, course: { name: '钢琴' } },
+      { id: 'account-b', studentId: 'student-a', student: { name: '林同学' }, course: { name: '钢琴' } },
     ]);
 
     await expect(service.courseAccountCandidates('owner-1', {
       studentName: '林同学', courseName: '钢琴',
     })).resolves.toEqual({ candidates: [
-      { accountId: 'account-a', studentName: '林同学', courseName: '钢琴' },
-      { accountId: 'account-b', studentName: '林同学', courseName: '钢琴' },
+      { accountId: 'account-a', studentId: 'student-a', studentName: '林同学', courseName: '钢琴' },
+      { accountId: 'account-b', studentId: 'student-a', studentName: '林同学', courseName: '钢琴' },
     ] });
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { id: 'owner-1' }, select: { role: true, isActive: true },
@@ -280,6 +287,7 @@ describe('InternalToolsService.courseAccountCandidates', () => {
       orderBy: { id: 'asc' },
       select: {
         id: true,
+        studentId: true,
         student: { select: { name: true } },
         course: { select: { name: true } },
       },
@@ -306,14 +314,14 @@ describe('InternalToolsService.courseAccountCandidates', () => {
     const service = new InternalToolsService(prisma as never);
     prisma.user.findUnique.mockResolvedValue({ role: UserRole.OWNER, isActive: true });
     prisma.studentCourseAccount.findMany.mockResolvedValue([
-      { id: 'account-a', student: { name: '林同学' }, course: { name: '主课' } },
-      { id: 'account-b', student: { name: '林同学' }, course: { name: '陪练' } },
+      { id: 'account-a', studentId: 'student-a', student: { name: '林同学' }, course: { name: '主课' } },
+      { id: 'account-b', studentId: 'student-a', student: { name: '林同学' }, course: { name: '陪练' } },
     ]);
 
     await expect(service.courseAccountCandidates('owner-1', { studentName: '林同学' })).resolves.toEqual({
       candidates: [
-        { accountId: 'account-a', studentName: '林同学', courseName: '主课' },
-        { accountId: 'account-b', studentName: '林同学', courseName: '陪练' },
+        { accountId: 'account-a', studentId: 'student-a', studentName: '林同学', courseName: '主课' },
+        { accountId: 'account-b', studentId: 'student-a', studentName: '林同学', courseName: '陪练' },
       ],
     });
     expect(prisma.studentCourseAccount.findMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -327,21 +335,22 @@ describe('InternalToolsService.courseAccountCandidates', () => {
     const service = new InternalToolsService(prisma as never);
     prisma.user.findUnique.mockResolvedValue({ role: UserRole.OWNER, isActive: true });
     prisma.studentCourseAccount.findMany.mockResolvedValue([
-      { id: 'account-fuzzy', student: { name: '测试林同学' }, course: { name: '陪练' } },
-      { id: 'account-exact-a', student: { name: '林同学' }, course: { name: '主课' } },
-      { id: 'account-exact-b', student: { name: '林同学' }, course: { name: '陪练' } },
+      { id: 'account-fuzzy', studentId: 'student-a', student: { name: '测试林同学' }, course: { name: '陪练' } },
+      { id: 'account-exact-a', studentId: 'student-a', student: { name: '林同学' }, course: { name: '主课' } },
+      { id: 'account-exact-b', studentId: 'student-a', student: { name: '林同学' }, course: { name: '陪练' } },
     ]);
 
     await expect(service.courseAccountCandidates('owner-1', {
       studentName: '林同学', courseName: undefined, match: 'search',
     })).resolves.toEqual({ candidates: [
-      { accountId: 'account-exact-a', studentName: '林同学', courseName: '主课' },
-      { accountId: 'account-exact-b', studentName: '林同学', courseName: '陪练' },
+      { accountId: 'account-exact-a', studentId: 'student-a', studentName: '林同学', courseName: '主课' },
+      { accountId: 'account-exact-b', studentId: 'student-a', studentName: '林同学', courseName: '陪练' },
     ] });
     expect(prisma.studentCourseAccount.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { student: { name: { contains: '林同学', mode: 'insensitive' } } },
       select: {
         id: true,
+        studentId: true,
         student: { select: { name: true } },
         course: { select: { name: true } },
       },

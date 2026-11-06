@@ -20,15 +20,10 @@ export function createDialogueRunExecutor(input: {
   now?: () => Date;
   runTimeoutMs: number;
 }) {
-  // The parser is the single entry point for understanding. Legacy rules are
-  // shadow-only by default so their accuracy can be compared before removal,
-  // and can be re-enabled as an emergency fallback without a code change.
+  // Natural-language understanding uses the configured model.
   const intentParser = input.intentParser ?? (input.understand
     ? undefined
-    : createIntentParser(input.model, {
-        shadowRules: process.env['AGENT_INTENT_SHADOW_RULES'] !== 'false',
-        emergencyRuleFallback: process.env['AGENT_INTENT_RULE_FALLBACK'] === 'true',
-      }));
+    : createIntentParser(input.model));
   const understandMultiStep = input.understandMultiStep ?? (input.model ? createModelMultiStepInterpreter(input.model) : undefined);
   return async (context: RunExecutionContext): Promise<void> => {
     const capability = context.run.capability;

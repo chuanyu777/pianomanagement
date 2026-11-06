@@ -8,6 +8,18 @@ import { InternalRequestGuard } from '../../common/internal-auth/internal-reques
 import { CapabilityGuard } from '../../common/capability/capability.guard.js';
 
 describe('Assistant Actions controllers', () => {
+  it('在生成缴费预览前拒绝超出数据库精度的金额', async () => {
+    const service = { createPaymentPreview: vi.fn() };
+    const controller = new AssistantActionsController(service as never);
+    expect(() => controller.createPaymentPreview({ studentId:'9b50ce88-0db0-4b02-8a33-11ebd45d8ee3', courseId:'888a5319-30bd-4db6-a915-8f10d3f19b38', amount:'1000000000000.00', channel:'WECHAT', occurredAt:'2026-11-02T09:00:00+08:00', idempotencyKey:'392c6583-b831-4073-bb34-f3f923c3590b', requestId:'e795886b-4024-4758-94f1-19a90e03914e' }, { capability:{sub:'owner-1',runId:'run-1'} } as never)).toThrow();
+    expect(service.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('支持按学生和课程创建合并缴费预览，绑定当前 Capability', async () => {
+    const service={createPaymentPreview:vi.fn(async input=>input)};
+    const controller=new AssistantActionsController(service as never);
+    const result=await controller.createPaymentPreview({studentId:'9b50ce88-0db0-4b02-8a33-11ebd45d8ee3',courseId:'888a5319-30bd-4db6-a915-8f10d3f19b38',currentUnitPrice:'200.00',amount:'1000.00',channel:'WECHAT',occurredAt:'2026-11-02T09:00:00+08:00',idempotencyKey:'392c6583-b831-4073-bb34-f3f923c3590b',requestId:'e795886b-4024-4758-94f1-19a90e03914e'}, {capability:{sub:'owner-1',runId:'run-1'}} as never);
+    expect(result).toMatchObject({studentId:'9b50ce88-0db0-4b02-8a33-11ebd45d8ee3',currentUnitPrice:'200.00',actorUserId:'owner-1',runId:'run-1'});
+  });
   it('keeps preview behind internal Capability and confirmation behind public JWT plus role guards', () => {
     expect(Reflect.getMetadata('__guards__', AssistantActionsController)).toEqual([InternalRequestGuard, CapabilityGuard]);
     expect(Reflect.getMetadata(CAPABILITY_PERMISSION, AssistantActionsController.prototype.createSingleLessonPreview)).toBe('PREVIEW_L1');

@@ -45,6 +45,7 @@ function sanitizeTaskWorkspace(workspace: WorkspaceDocument | null): WorkspaceDo
 }
 
 export type StartAssistantRunInput = {
+  runId?: string;
   userId: string;
   role: UserRole;
   teacherId?: string;
@@ -88,7 +89,7 @@ export class AssistantGatewayService {
   ) {}
 
   async startRun(input: StartAssistantRunInput): Promise<AgentRuntimeRun> {
-    const runId = randomUUID();
+    const runId = input.runId ?? randomUUID();
     const threadId = input.threadId ?? randomUUID();
     const capability = this.issueCapability(input.userId, input.role, input.teacherId, threadId, runId);
     try {

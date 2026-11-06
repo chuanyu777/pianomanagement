@@ -28,7 +28,7 @@ function reasonFor(status: number, message: string): BusinessReason | undefined 
     return /店主|OWNER/u.test(message) ? 'ROLE_OWNER_ONLY' : 'FORBIDDEN';
   }
   if (status === HttpStatus.CONFLICT) {
-    if (/关账/u.test(message)) return 'PERIOD_CLOSED';
+    if (/^(?:该业务月份已关账，不能修改资金或课消记录|该月份已经关账)$/u.test(message)) return 'PERIOD_CLOSED';
     if (/已经支付|已支付/u.test(message)) return 'PAYROLL_ALREADY_PAID';
     if (/已变化|版本/u.test(message)) return 'VERSION_CONFLICT';
     if (/已失效|已被其他请求|过期/u.test(message)) return 'PREVIEW_STALE';
@@ -56,6 +56,7 @@ export class BusinessReasonFilter implements ExceptionFilter {
       ...body,
       statusCode: status,
       ...(reason ? { code: reason } : {}),
+      ...(!body.code && reason === 'PERIOD_CLOSED' ? { guidance: '请核对实际业务日期；如需补录，请由店主核实账期。只有最近一次关账的月份可填写原因后重新打开；也可按规定在当前开放月份办理。' } : {}),
     });
   }
 }

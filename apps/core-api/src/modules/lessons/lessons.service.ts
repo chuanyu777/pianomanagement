@@ -737,11 +737,11 @@ export class LessonsService {
     if (!consumption || (expected && consumption.id !== expected.consumptionEntryId)) {
       throw new ConflictException('课程消费流水已变化，请重新预览');
     }
+    const occurredAt = businessNow();
+    await this.periods.assertWritableForDate(occurredAt, tx);
     await this.lockAccount(tx, lesson.accountId);
     const existingReversal = await tx.ledgerEntry.findUnique({ where: { reversesEntryId: consumption.id }, select: { id: true } });
     if (existingReversal) throw new ConflictException('该课程确认已撤销');
-    const occurredAt = businessNow();
-    await this.periods.assertWritableForDate(occurredAt, tx);
     await tx.ledgerEntry.create({ data: {
       accountId: consumption.accountId, kind: LedgerEntryKind.LESSON_CONSUMPTION_REVERSAL,
       paidDelta: consumption.paidDelta.negated(), giftDelta: consumption.giftDelta.negated(), occurredAt,
@@ -861,14 +861,14 @@ export class LessonsService {
     }
     if (expected && consumption.id !== expected.consumptionEntryId) throw new ConflictException('原课消流水已变化，请重新预览');
     if (expected && expected.correctedUnitPrice !== input.correctedUnitPrice.toFixed(2)) throw new ConflictException('纠正金额已变化，请重新预览');
+    const occurredAt = businessNow();
+    await this.periods.assertWritableForDate(occurredAt, tx);
     await this.lockAccount(tx, lesson.accountId);
     const [existingReversal, existingCorrection] = await Promise.all([
       tx.ledgerEntry.findUnique({ where: { reversesEntryId: consumption.id }, select: { id: true } }),
       tx.ledgerEntry.findUnique({ where: { correctsEntryId: consumption.id }, select: { id: true } }),
     ]);
     if (existingReversal || existingCorrection) throw new ConflictException('该历史课消已处理，不能重复纠正');
-    const occurredAt = businessNow();
-    await this.periods.assertWritableForDate(occurredAt, tx);
     const originalGift = consumption.giftDelta.negated();
     const correctedGift = originalGift.gt(input.correctedUnitPrice) ? input.correctedUnitPrice : originalGift;
     const correctedPaid = input.correctedUnitPrice.sub(correctedGift);
@@ -1008,6 +1008,8 @@ export class LessonsService {
   }
 
   private assertScheduled(status: LessonStatus): void {
+    if (status === LessonStatus.COMPLETED) throw new ConflictException('该课程已完成，不能直接调课或取消；如需纠错，请由店主另行撤销上课确认');
+    if (status === LessonStatus.CANCELLED) throw new ConflictException('该课程已取消，不能再次调课或取消');
     if (status !== LessonStatus.SCHEDULED) throw new ConflictException('只有待上课排课可以改期或取消');
   }
 

@@ -15,10 +15,12 @@ it('recovers an executed confirmation without submitting the operation again', a
   const confirm = vi.fn().mockRejectedValue(new UnknownConfirmationError('确认结果未知'));
   const recovered = vi.fn();
   render(<QueryClientProvider client={new QueryClient()}><PreviewDialog preview={{ ...base, status: 'PENDING', receipt: null, display: { title: '新增学生' }, success: '学生已创建', invalidate: [] }} onCancel={() => {}} onConfirm={confirm} onRecovered={recovered} /></QueryClientProvider>);
+  expect(screen.queryByText(/预览有效期至/)).not.toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole('button', { name: '确认执行' })).toBeEnabled());
   await user.click(screen.getByRole('button', { name: '确认执行' }));
   await user.click(await screen.findByRole('button', { name: '重查状态' }));
   expect(await screen.findByText('执行回执')).toBeInTheDocument();
+  expect(screen.queryByText(/预览有效期至/)).not.toBeInTheDocument();
   expect(confirm).toHaveBeenCalledTimes(1);
   expect(recovered).toHaveBeenCalledTimes(1);
 });

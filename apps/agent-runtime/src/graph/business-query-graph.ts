@@ -322,7 +322,7 @@ function createMoneyWorkspace(intent: MoneyIntent, preview: MoneyPreview): Works
     ] },
     { type: 'calculation-breakdown', title: `本次${intent.kind === 'payment' ? '交费' : '赠送'}`, lines: [{ label: '金额', amount: intent.amount }], total: intent.amount },
     { type: 'action-preview', previewId: preview.previewId, actionType: preview.actionType, schemaVersion: `${preview.actionType}.v1`, title: preview.display.title, riskLevel: 'L2', expiresAt: preview.expiresAt },
-  ], sources: [{ type: 'courseAccount', id: preview.command.accountId, label: `${intent.studentName} / ${intent.courseName}` }] });
+  ], sources: 'accountId' in preview.command ? [{ type: 'courseAccount', id: preview.command.accountId, label: `${intent.studentName} / ${intent.courseName}` }] : [] });
 }
 
 function createLessonWorkspace(intent: LessonIntent, preview: SingleLessonPreviewResponse): WorkspaceDocument {

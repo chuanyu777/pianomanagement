@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { MemorySaver } from '@langchain/langgraph';
 import { createSignedInternalRequestHeaders } from '@piano/assistant-protocol/internal-auth';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCheckpointer } from '../src/checkpoint/checkpointer.js';
@@ -229,6 +230,36 @@ describe('Agent Runtime PostgreSQL repository', () => {
       await cleanup.query('DELETE FROM agent_runtime.agent_run_events WHERE run_id = ANY($1::uuid[])', [[firstRunId, secondRunId]]);
       await cleanup.query('DELETE FROM agent_runtime.agent_messages WHERE run_id = ANY($1::uuid[])', [[firstRunId, secondRunId]]);
       await cleanup.query('DELETE FROM agent_runtime.agent_runs WHERE id = ANY($1::uuid[])', [[firstRunId, secondRunId]]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
+      await cleanup.end();
+    }
+  }, 30_000);
+
+  test('concurrent retries of one active run use one PostgreSQL record and message', async () => {
+    const runId = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    const clientRequestId = crypto.randomUUID();
+    const capability = 'integration-test-capability';
+    const secret = 'integration-only-secret-01234567890123456789';
+    const repository = createAgentRuntimeRepository({ connectionString: databaseUrl! });
+    const cleanup = new Pool({ connectionString: databaseUrl });
+    const config = { AGENT_PORT: 3100, AGENT_WORKER_ENABLED: false, AGENT_WORKER_LEASE_DURATION_MS: 30000, AGENT_WORKER_RENEW_INTERVAL_MS: 10000, AGENT_WORKER_POLL_INTERVAL_MS: 1000, AGENT_WORKER_RECOVERY_BATCH_SIZE: 20, AI_ENABLED: false, AI_PROVIDER: '', AI_MODEL: '', AI_API_KEY: '', AGENT_DATABASE_URL: databaseUrl!, CORE_INTERNAL_API_URL: 'http://core.test', INTERNAL_SERVICE_SECRET: secret, AI_REQUEST_TIMEOUT_MS: 1000, AI_RUN_TIMEOUT_MS: 5000, AI_MAX_STEPS: 8, AI_MAX_TOOL_CALLS: 6, AI_MAX_OUTPUT_TOKENS: 1200, AI_TRACING_ENABLED: false } as const;
+    const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
+    const path = '/internal/assistant/runs/start';
+    const body = { runId, threadId, userMessage: '恢复同一条请求', clientRequestId };
+    const send = () => app.inject({ method: 'POST', url: path, payload: body, headers: { ...createSignedInternalRequestHeaders({ secret, method: 'POST', path, body, securityHeaders: { 'x-assistant-capability': capability } }), 'x-assistant-capability': capability } });
+    try {
+      const first = await send();
+      expect(first.statusCode).toBe(200);
+      const retries = await Promise.all([send(), send()]);
+      expect(retries.map((reply) => reply.statusCode)).toEqual([200, 200]);
+      expect(retries.map((reply) => reply.json().runId)).toEqual([runId, runId]);
+      const counts = await cleanup.query('SELECT (SELECT count(*)::int FROM agent_runtime.agent_runs WHERE thread_id = $1) AS runs, (SELECT count(*)::int FROM agent_runtime.agent_messages WHERE thread_id = $1) AS messages', [threadId]);
+      expect(counts.rows[0]).toEqual({ runs: 1, messages: 1 });
+    } finally {
+      await app.close();
+      await cleanup.query('DELETE FROM agent_runtime.agent_messages WHERE thread_id = $1', [threadId]);
+      await cleanup.query('DELETE FROM agent_runtime.agent_runs WHERE thread_id = $1', [threadId]);
       await cleanup.query('DELETE FROM agent_runtime.agent_threads WHERE id = $1', [threadId]);
       await cleanup.end();
     }

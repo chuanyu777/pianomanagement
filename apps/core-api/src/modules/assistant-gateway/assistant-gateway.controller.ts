@@ -8,9 +8,9 @@ import { RolesGuard } from '../auth/roles.guard.js';
 import { AssistantGatewayService } from './assistant-gateway.service.js';
 
 const UUID = z.string().uuid();
-const StartSchema = z.object({ message: z.string().trim().min(1).max(4000), threadId: UUID.optional(), clientRequestId: z.string().trim().min(1).max(200).optional() }).strict();
+const StartSchema = z.object({ message: z.string().trim().min(1).max(4000), runId: UUID.optional(), threadId: UUID.optional(), clientRequestId: z.string().trim().min(1).max(200).optional() }).strict();
 const ResumeSchema = z.object({ threadId: UUID, approved: z.boolean() }).strict();
-class StartBody { @ApiProperty({ type: String, maxLength: 4000 }) message!: string; @ApiProperty({ type: String, required: false, format: 'uuid' }) threadId?: string; @ApiProperty({ type: String, required: false }) clientRequestId?: string; }
+class StartBody { @ApiProperty({ type: String, maxLength: 4000 }) message!: string; @ApiProperty({ type: String, required: false, format: 'uuid' }) runId?: string; @ApiProperty({ type: String, required: false, format: 'uuid' }) threadId?: string; @ApiProperty({ type: String, required: false }) clientRequestId?: string; }
 class ResumeBody { @ApiProperty({ type: String, format: 'uuid' }) threadId!: string; @ApiProperty({ type: Boolean }) approved!: boolean; }
 class RunResponse { @ApiProperty({ type: String, format: 'uuid' }) runId!: string; @ApiProperty({ type: String, format: 'uuid' }) threadId!: string; @ApiProperty({ type: String, enum: ['queued', 'running', 'waiting_for_input', 'completed', 'failed'] }) status!: string; }
 class TaskSummaryResponse { @ApiProperty({ type: String, format: 'uuid' }) threadId!: string; @ApiProperty({ type: String }) title!: string; @ApiProperty({ type: String, format: 'date-time' }) lastActivityAt!: string; @ApiProperty({ type: String, nullable: true }) latestStatus!: string | null; }
@@ -49,7 +49,7 @@ export class AssistantGatewayController {
   start(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = StartSchema.safeParse(body); if (!parsed.success) throw new BadRequestException('请求参数不合法');
     const currentActor = actor(request);
-    return this.gateway.startRun({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}), message: parsed.data.message, ...(parsed.data.threadId ? { threadId: parsed.data.threadId } : {}), ...(parsed.data.clientRequestId ? { clientRequestId: parsed.data.clientRequestId } : {}) });
+    return this.gateway.startRun({ userId: currentActor.id, role: currentActor.role, ...(currentActor.teacherId ? { teacherId: currentActor.teacherId } : {}), message: parsed.data.message, ...(parsed.data.runId ? { runId: parsed.data.runId } : {}), ...(parsed.data.threadId ? { threadId: parsed.data.threadId } : {}), ...(parsed.data.clientRequestId ? { clientRequestId: parsed.data.clientRequestId } : {}) });
   }
   @Post('runs/:runId/resume') @ApiBody({ type: ResumeBody }) @ApiOkResponse({ type: RunResponse })
   resume(@Param('runId') runId: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {

@@ -21,7 +21,7 @@ describe('AI dialogue query audit: Q01-Q11', () => {
     ['查看昨天排课', '2026-10-20', ['林悦']], ['查看明天排课', '2026-10-22', ['林悦']],
     ['后天排课', '2026-10-23', ['林悦']], ['查看2026-10-24的排课', '2026-10-24', []],
   ])('Q02 routes date wording to the requested lesson range: %s', async (message, date, students) => {
-    const h = createAuditHarness([newIntent('lessons.read', { dateFrom: '2026-10-01', dateTo: '2026-10-02' })]);
+    const h = createAuditHarness([newIntent('lessons.read', { dateFrom: date, dateTo: date })]);
     const result = await h.run(`q02-${date}`, message);
     expect(result.workspace).toMatchObject({ title: expect.stringContaining(date) });
     expect(result.answer).toContain(date);
@@ -31,7 +31,7 @@ describe('AI dialogue query audit: Q01-Q11', () => {
   });
 
   it('Q02 keeps the query intent in the same task when “那明天呢” changes only the date', async () => {
-    const h = createAuditHarness([newIntent('lessons.read', { dateFrom: '2026-10-01', dateTo: '2026-10-02' }), newIntent('lessons.read', { dateFrom: '2026-10-01', dateTo: '2026-10-02' }, 'continue')]);
+    const h = createAuditHarness([newIntent('lessons.read', { dateFrom: '2026-10-21', dateTo: '2026-10-21' }), newIntent('lessons.read', { dateFrom: '2026-10-22', dateTo: '2026-10-22' }, 'continue')]);
     await h.run('q02-relative', '今天有哪些排课？');
     const result = await h.run('q02-relative', '那明天呢？');
     expect(result.workspace).toMatchObject({ title: expect.stringContaining('2026-10-22') });
@@ -41,7 +41,7 @@ describe('AI dialogue query audit: Q01-Q11', () => {
   });
 
   it('Q03 preserves an explicit multi-day range when a teacher filter is added', async () => {
-    const h = createAuditHarness([newIntent('lessons.read', { dateFrom: '2026-10-01', dateTo: '2026-10-02' }), newIntent('lessons.read', { teacherName: '王老师' }, 'continue')]);
+    const h = createAuditHarness([newIntent('lessons.read', { dateFrom: '2026-10-20', dateTo: '2026-10-22' }), newIntent('lessons.read', { teacherName: '王老师' }, 'continue')]);
     await h.run('q03-range', '查10月20日到22日的排课。');
     const result = await h.run('q03-range', '只看王老师的。');
     expect(h.readCalls.readLessons).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ dateFrom: '2026-10-20', dateTo: '2026-10-22', teacherName: '王老师' }));
@@ -56,7 +56,7 @@ describe('AI dialogue query audit: Q01-Q11', () => {
     ['上月排课', { dateFrom: '2026-09-01', dateTo: '2026-09-30' }, ['2026-09-01', '2026-09-30']],
     ['查最近几天的课', {}, ['请补充具体范围']],
   ])('Q03 handles calendar range or ambiguity without guessing: %s', async (message, fields, expected) => {
-    const h = createAuditHarness([newIntent('lessons.read', Object.keys(fields).length ? { dateFrom: '2026-10-02', dateTo: '2026-10-03' } : fields)]);
+    const h = createAuditHarness([newIntent('lessons.read', fields)]);
     const result = await h.run('q03-calendar', message);
     for (const term of expected) expect(result.answer).toContain(term);
     expect(result.workspace?.title).not.toBe('暂不支持此查询');
@@ -108,8 +108,9 @@ describe('AI dialogue query audit: Q01-Q11', () => {
     const h = createAuditHarness([newIntent('accounts.read', { studentName: '小明' }), newIntent('accounts.read', { selectionId: ACCOUNT_ID_3 }, 'continue')], {
       getStudentCandidates: async () => ({ candidates: [
         { studentId: '11111111-1111-4111-8111-111111111111', name: '小明' },
-        { studentId: '22222222-2222-4222-8222-222222222222', name: '小明' },
+        { studentId: ACCOUNT_ID_3, name: '小明' },
       ] }),
+      getCourseAccountCandidates: async () => ({ candidates:[{ accountId:ACCOUNT_ID_3, studentId:ACCOUNT_ID_3, studentName:'小明', courseName:'陪练' }] }),
     });
     const result = await h.run('ambiguous-balances', '小明每门课还有多少钱？');
     expect(result.workspace.resultKind).toBe('selection');

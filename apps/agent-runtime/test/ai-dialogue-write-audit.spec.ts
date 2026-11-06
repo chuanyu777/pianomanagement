@@ -13,11 +13,12 @@ describe('AI 对话写操作离线编排审计（B/S/F/R/W/M/K）', () => {
     expect(h.calls.getDashboardSummary).not.toHaveBeenCalled();
   });
 
-  it('B06 开户并按默认价的自然语句应申请课程账户预览', async () => {
+  it('B06 开户请求引导首次缴费', async () => {
     const h = createAuditHarness([newIntent('course-account.open', { studentName: '小雨', courseName: '主课' })]);
     const result = await h.run('b06', '给小雨开通主课，按默认价。');
     expect(result.answer).toContain('预览');
-    expect(result.workspace?.blocks).toContainEqual(expect.objectContaining({ type: 'action-preview', actionType: 'course-account.open' }));
+    expect(result.answer).toContain('缴费');
+    expect(result.workspace?.blocks).not.toContainEqual(expect.objectContaining({ type: 'action-preview', actionType: 'course-account.open' }));
   });
 
   it('S01 “明天下午三点排课”应识别学生、老师、课程和日期并申请单节预览', async () => {
@@ -112,8 +113,12 @@ describe('AI 对话写操作离线编排审计（B/S/F/R/W/M/K）', () => {
   it('P03 多动作请求仍先由 Core 权限边界拒绝，不产生任何预览', async () => {
     const h = createAuditHarness([newIntent(null, {}, 'clarify')], {
       checkActionAccess: async () => { throw new CoreDialogueError(403); },
-    });
-    const result = await h.run('p03-composite', '把李老师明天的课取消，再撤销林悦今天的上课确认。');
+    }, [{ steps: [
+      { operation: 'lesson.cancel', fields: { date: '2026-10-22' } },
+      { operation: 'lesson.complete.reversal', fields: { studentName: '林悦', date: '2026-10-21' } },
+    ] }]);
+    await h.run('p03-composite', '把李老师明天的课取消，再撤销林悦今天的上课确认。');
+    const result = await h.run('p03-composite', '开始第一步');
     expect(result.answer).toMatch(/无权|权限/u);
     expect(h.calls.createStructuredActionPreview).not.toHaveBeenCalled();
   });
@@ -165,7 +170,8 @@ describe('AI 对话写操作离线编排审计（B/S/F/R/W/M/K）', () => {
 
   it('C01 同名课程账户未选择前不得读取金额或申请交费预览', async () => {
     const h = createAuditHarness([newIntent('payment.preview', { studentName: '小明', courseName: '主课', amount: '100', channel: '微信' })], {
-      getCourseAccountCandidates: (async () => ({ candidates: [{ accountId: ACCOUNT_ID, studentName: '小明', courseName: '主课' }, { accountId: ACCOUNT_ID_2, studentName: '小明', courseName: '主课' }] })) as unknown,
+      getStudentCandidates: async () => ({ candidates:[{studentId:ACCOUNT_ID,name:'小明'},{studentId:ACCOUNT_ID_2,name:'小明'}] }),
+      getCourseAccountCandidates: (async () => ({ candidates: [{ accountId: ACCOUNT_ID, studentId:ACCOUNT_ID, studentName: '小明', courseName: '主课' }, { accountId: ACCOUNT_ID_2, studentId:ACCOUNT_ID_2, studentName: '小明', courseName: '主课' }] })) as unknown,
     });
     const result = await h.run('c01', '给小明的主课交费100元，微信。');
     expect(result.answer).toContain('选择');

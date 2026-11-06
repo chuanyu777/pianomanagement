@@ -55,7 +55,12 @@ function makePrisma(options?: { openingPaid?: string; openingGift?: string }) {
     },
     ledgerEntry: {
       findUnique: vi.fn(async ({ where }: { where: Record<string, string> }) => {
-        if (where.commandId) return entries.find((entry) => entry.commandId === where.commandId) ?? null;
+        if (where.commandId) {
+          const entry = entries.find((item) => item.commandId === where.commandId);
+          if (!entry) return null;
+          const payment = payments.find((item) => item.id === (entry as Entry & { paymentId?: string }).paymentId);
+          return { ...entry, note: (entry as Entry & { note?: string }).note ?? null, payment: payment ? { channel: payment.channel } : null };
+        }
         if (where.id) return entries.find((entry) => entry.id === where.id) ?? null;
         if (where.reversesEntryId) {
           return entries.find((entry) => entry.reversesEntryId === where.reversesEntryId) ?? null;
@@ -71,6 +76,7 @@ function makePrisma(options?: { openingPaid?: string; openingGift?: string }) {
       }),
     },
     $queryRaw: vi.fn(async () => [{ id: accountId }]),
+    $executeRaw: vi.fn(async () => 1),
   };
 
   const prisma = {

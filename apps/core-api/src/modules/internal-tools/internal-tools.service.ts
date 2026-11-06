@@ -69,6 +69,7 @@ const TODAY_LESSON_SELECT = {
 
 export type CourseAccountCandidate = {
   accountId: string;
+  studentId: string;
   studentName: string;
   courseName: string;
 };
@@ -802,6 +803,7 @@ export class InternalToolsService {
       orderBy: { id: 'asc' },
       select: {
         id: true,
+        studentId: true,
         student: { select: { name: true } },
         course: { select: { name: true } },
       },
@@ -811,6 +813,7 @@ export class InternalToolsService {
     return {
       candidates: preferred.map((account) => ({
         accountId: account.id,
+        studentId: account.studentId,
         studentName: account.student.name,
         courseName: account.course.name,
       })),

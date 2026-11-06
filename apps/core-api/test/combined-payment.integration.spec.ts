@@ -1,0 +1,121 @@
+import { randomUUID } from 'node:crypto';
+import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { PaymentChannel, UserRole } from '../src/generated/prisma/client.js';
+import { PrismaService } from '../src/prisma/prisma.service.js';
+import { PeriodsService } from '../src/modules/periods/periods.service.js';
+import { CourseLedgerService } from '../src/modules/course-ledger/course-ledger.service.js';
+import { StudentCourseAccountsService } from '../src/modules/student-course-accounts/student-course-accounts.service.js';
+import { AssistantActionsService } from '../src/modules/assistant-actions/assistant-actions.service.js';
+
+const databaseUrl=process.env['CORE_COMBINED_PAYMENT_TEST_DATABASE_URL'];
+describe.skipIf(!databaseUrl)('combined payment against isolated PostgreSQL',()=>{
+  let prisma:PrismaService;
+  let service:AssistantActionsService;
+  let periods:PeriodsService;
+  let studentId:string;
+  let courseId:string;
+  let ownerId:string;
+  const happenedAt=new Date('2098-09-05T03:00:00.000Z');
+  const actor=()=>({id:ownerId,username:'isolated-combined-owner',role:UserRole.OWNER});
+  const preview=(student:string,course:string,price?:string,occurredAt=happenedAt)=>service.createPaymentPreview({actorUserId:ownerId,runId:randomUUID(),requestId:randomUUID(),idempotencyKey:randomUUID(),studentId:student,courseId:course,amount:'2000.00',channel:PaymentChannel.WECHAT,occurredAt,...(price?{currentUnitPrice:price}:{})});
+  beforeAll(async()=>{
+    const url=new URL(databaseUrl!);
+    if(!['127.0.0.1','localhost'].includes(url.hostname)||url.port!=='55492'||url.pathname!=='/piano_combined_test')throw new Error('Dedicated isolated payment database required');
+    process.env['CORE_DATABASE_URL']=databaseUrl;
+    prisma=new PrismaService(); await prisma.$connect();
+    periods=new PeriodsService(prisma);
+    const ledger=new CourseLedgerService(prisma,periods),accounts=new StudentCourseAccountsService(prisma);
+    service=new AssistantActionsService(prisma,{} as never,ledger,undefined,undefined,undefined,periods,undefined,undefined,accounts);
+    ownerId=(await prisma.user.create({data:{username:`combined-${randomUUID()}`,passwordHash:'test-only',role:UserRole.OWNER}})).id;
+    studentId=(await prisma.student.create({data:{name:`合成学生-${randomUUID()}`}})).id;
+    courseId=(await prisma.course.create({data:{name:`合成课程-${randomUUID()}`,defaultUnitPrice:'200.00',defaultDurationMinutes:60}})).id;
+  });
+  afterAll(async()=>{if(prisma)await prisma.$disconnect();});
+  it('预览不写入，确认一次原子创建账户及入账，重复确认不重复',async()=>{
+    const p=await preview(studentId,courseId,'180.00');
+    expect(p.display).toMatchObject({priceAfter:'180.00',beforeBalance:{paidBalance:'0.00'},afterBalance:{paidBalance:'2000.00'}});
+    expect(await prisma.studentCourseAccount.count({where:{studentId,courseId}})).toBe(0);
+    const key=randomUUID();
+    const result=await service.confirmPreview(p.previewId,actor(),key);
+    expect(result.status).toBe('EXECUTED');
+    const account=await prisma.studentCourseAccount.findUniqueOrThrow({where:{studentId_courseId:{studentId,courseId}}});
+    expect(account.currentUnitPrice.toFixed(2)).toBe('180.00');
+    expect((await service.confirmPreview(p.previewId,actor(),key)).status).toBe('EXECUTED');
+    expect(await prisma.paymentRecord.count({where:{accountId:account.id}})).toBe(1);
+    expect((await prisma.ledgerEntry.findMany({where:{accountId:account.id}})).map(entry=>entry.paidDelta.toFixed(2))).toEqual(['2000.00']);
+  });
+  it('预览后关账时，账户创建及交费都必须回滚',async()=>{
+    const student=(await prisma.student.create({data:{name:`回滚学生-${randomUUID()}`}})).id;
+    const date=new Date('2098-10-05T03:00:00.000Z');
+    const p=await preview(student,courseId,'190.00',date);
+    await prisma.closedPeriod.create({data:{periodStart:new Date('2098-10-01T00:00:00.000Z'),closedById:ownerId}});
+    await expect(service.confirmPreview(p.previewId,actor(),randomUUID())).rejects.toMatchObject({status:409});
+    expect(await prisma.studentCourseAccount.count({where:{studentId:student,courseId}})).toBe(0);
+    expect(await prisma.paymentRecord.count({where:{account:{studentId:student}}})).toBe(0);
+  });
+  it('已有账户改价后遇关账失败时，原价格及原流水保持不变',async()=>{
+    const date=new Date('2098-11-05T03:00:00.000Z');
+    const p=await preview(studentId,courseId,'220.00',date);
+    await prisma.closedPeriod.create({data:{periodStart:new Date('2098-11-01T00:00:00.000Z'),closedById:ownerId}});
+    await expect(service.confirmPreview(p.previewId,actor(),randomUUID())).rejects.toMatchObject({status:409});
+    const account=await prisma.studentCourseAccount.findUniqueOrThrow({where:{studentId_courseId:{studentId,courseId}}});
+    expect(account.currentUnitPrice.toFixed(2)).toBe('180.00');
+    expect(await prisma.paymentRecord.count({where:{accountId:account.id}})).toBe(1);
+  });
+  it('已有账户一次确认同时改价并缴费，不修改先前流水',async()=>{
+    const account=await prisma.studentCourseAccount.findUniqueOrThrow({where:{studentId_courseId:{studentId,courseId}}});
+    const prior=await prisma.ledgerEntry.findMany({where:{accountId:account.id},orderBy:{createdAt:'asc'}});
+    const p=await preview(studentId,courseId,'220.00',new Date('2098-12-05T03:00:00.000Z'));
+    expect(p.display).toMatchObject({priceBefore:'180.00',priceAfter:'220.00',beforeBalance:{paidBalance:'2000.00'},afterBalance:{paidBalance:'4000.00'}});
+    expect((await prisma.studentCourseAccount.findUniqueOrThrow({where:{id:account.id}})).currentUnitPrice.toFixed(2)).toBe('180.00');
+    await service.confirmPreview(p.previewId,actor(),randomUUID());
+    expect((await prisma.studentCourseAccount.findUniqueOrThrow({where:{id:account.id}})).currentUnitPrice.toFixed(2)).toBe('220.00');
+    const afterEntries=await prisma.ledgerEntry.findMany({where:{accountId:account.id},orderBy:{createdAt:'asc'}});
+    expect(afterEntries).toHaveLength(2);
+    expect(afterEntries[0]).toEqual(prior[0]);
+  });
+  it('已有账户没有要求改价时，缴费后单节价格保持不变',async()=>{
+    const p=await preview(studentId,courseId,undefined,new Date('2099-01-05T03:00:00.000Z'));
+    expect(p.display).toMatchObject({priceBefore:'220.00',priceAfter:'220.00'});
+    await service.confirmPreview(p.previewId,actor(),randomUUID());
+    const account=await prisma.studentCourseAccount.findUniqueOrThrow({where:{studentId_courseId:{studentId,courseId}}});
+    expect(account.currentUnitPrice.toFixed(2)).toBe('220.00');
+    expect(await prisma.paymentRecord.count({where:{accountId:account.id}})).toBe(3);
+  });
+  it('同一学生课程并发确认不会创建重复账户或重复入账',async()=>{
+    const student=(await prisma.student.create({data:{name:`并发学生-${randomUUID()}`}})).id;
+    const [first,second]=await Promise.all([preview(student,courseId),preview(student,courseId)]);
+    const results=await Promise.allSettled([service.confirmPreview(first.previewId,actor(),randomUUID()),service.confirmPreview(second.previewId,actor(),randomUUID())]);
+    expect(results.filter(result=>result.status==='fulfilled')).toHaveLength(1);
+    expect(results.filter(result=>result.status==='rejected')).toHaveLength(1);
+    expect(await prisma.studentCourseAccount.count({where:{studentId:student,courseId}})).toBe(1);
+    expect(await prisma.paymentRecord.count({where:{account:{studentId:student,courseId}}})).toBe(1);
+  });
+  it('不同学生并发复用确认键时不能把另一笔缴费当作本次成功',async()=>{
+    const firstStudent=(await prisma.student.create({data:{name:`并发甲-${randomUUID()}`}})).id;
+    const secondStudent=(await prisma.student.create({data:{name:`并发乙-${randomUUID()}`}})).id;
+    const [first,second]=await Promise.all([preview(firstStudent,courseId),preview(secondStudent,courseId)]);
+    const key=randomUUID();
+    const results=await Promise.allSettled([service.confirmPreview(first.previewId,actor(),key),service.confirmPreview(second.previewId,actor(),key)]);
+    expect(results.filter(result=>result.status==='fulfilled')).toHaveLength(1);
+    expect(results.filter(result=>result.status==='rejected')).toHaveLength(1);
+    expect(await prisma.studentCourseAccount.count({where:{studentId:{in:[firstStudent,secondStudent]},courseId}})).toBe(1);
+    expect(await prisma.paymentRecord.count({where:{account:{studentId:{in:[firstStudent,secondStudent]},courseId}}})).toBe(1);
+  });
+  it('资金写入检查与同月关账必须串行，不能在检查后被关账抢先',async()=>{
+    const date=new Date('2099-05-05T03:00:00.000Z');
+    let release!:()=>void,started!:()=>void;
+    const startedSignal=new Promise<void>(resolve=>{started=resolve;});
+    const releaseSignal=new Promise<void>(resolve=>{release=resolve;});
+    const writer=prisma.$transaction(async tx=>{await periods.assertWritableForDate(date,tx);started();await releaseSignal;});
+    await startedSignal;
+    let finished=false;
+    const closing=periods.close(new Date('2099-05-01T00:00:00.000Z'),ownerId).then(()=>{finished=true;});
+    await new Promise(resolve=>setTimeout(resolve,200));
+    const finishedBeforeRelease=finished;
+    release();
+    await Promise.all([writer,closing]);
+    expect(finishedBeforeRelease).toBe(false);
+    expect(finished).toBe(true);
+  });
+});

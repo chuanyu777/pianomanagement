@@ -189,6 +189,16 @@ describe('LessonsService', () => {
     expect(lesson.update).not.toHaveBeenCalled();
   });
 
+  it('已完成课程不可普通调课，提示店主通过撤销确认纠错', async () => {
+    const {service} = makeService({findUnique:vi.fn(async () => makeLesson({status:'COMPLETED'}))});
+    await expect(service.cancel(lessonId, {note:'纠错'}, owner)).rejects.toThrow(/已完成.*店主.*撤销/);
+  });
+
+  it('已取消课程提示真实状态，不误导成已完成', async () => {
+    const {service} = makeService({findUnique:vi.fn(async () => makeLesson({status:'CANCELLED'}))});
+    await expect(service.cancel(lessonId, {note:'纠错'}, owner)).rejects.toThrow(/已取消/);
+  });
+
   it('limits a teacher’s schedule list to their own lessons while allowing the owner to list all lessons', async () => {
     const { service, lesson } = makeService();
 

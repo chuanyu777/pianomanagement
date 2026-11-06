@@ -56,6 +56,15 @@ class FixedJsonModel extends BaseChatModelClass {
   _llmType(): string { return 'audit-fixed-json'; }
 
   async _generate(_messages: BaseMessage[], _options: this['ParsedCallOptions']): Promise<ChatResult> {
+    if (_messages.some(message => typeof message.content === 'string' && message.content.startsWith('核对候选缴费意图'))) {
+      const content = JSON.stringify({ actionSupported: true, unsupportedFields: [] });
+      return { generations: [{ text: content, message: new AIMessage(content) }] };
+    }
+    if (_messages.some(message => typeof message.content === 'string' && message.content.includes('独立的琴行业务计划审核员'))) {
+      const payload = JSON.parse(String(_messages.at(-1)?.content)) as {plan: unknown};
+      const content = JSON.stringify({decision:payload.plan ? 'approve' : 'single'});
+      return { generations: [{ text: content, message: new AIMessage(content) }] };
+    }
     const isMultiStepProbe = _messages.some(message => typeof message.content === 'string' && message.content.includes('有序任务识别节点'));
     if (isMultiStepProbe) {
       const plan = this.#multiStepPlans[this.#multiStepIndex];
@@ -105,8 +114,8 @@ export function createAuditHarness(plans: DialogueIntent[], overrides: AuditTool
     getDashboardSummary: vi.fn(async () => ({ role:'OWNER' as const,businessDate: '2026-10-21', period: '2026-10', highlights: ['已结束未确认课程 1 节', '欠费学生：周宁（主课）', '冻结学生：赵一（超过31天未完成课程）', '待支付工资 2 笔', '本月经营收入 2670.00 元', '现金收入 3370.00 元，现金支出 3750.00 元，现金净额 -380.00 元', '经营利润 190.00 元'], todayLessons: { total: 3, scheduled: 1, completed: 1, cancelled: 1 }, todayEndedUnconfirmedCount:1,todayLessonItems: lessons.slice(1, 4), monthlyOperatingIncome: '2670.00', frozenStudentCount: 1, studentsWithNegativeBalanceCount: 1, unpaidPayrollCount: 2 })),
     getCourseAccountCandidates: vi.fn(async (_capability: string, query: { studentName: string; courseName?: string }) => {
       const candidates = [
-        { accountId: ACCOUNT_ID, studentName: query.studentName, courseName: '主课' },
-        { accountId: ACCOUNT_ID_3, studentName: query.studentName, courseName: '陪练' },
+        { accountId: ACCOUNT_ID, studentId: STUDENT_ID, studentName: query.studentName, courseName: '主课' },
+        { accountId: ACCOUNT_ID_3, studentId: STUDENT_ID, studentName: query.studentName, courseName: '陪练' },
       ];
       return { candidates: query.courseName ? candidates.filter(item => item.courseName === query.courseName) : candidates };
     }),

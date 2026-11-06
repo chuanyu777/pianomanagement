@@ -47,13 +47,73 @@ function taskFetch(previewStatus: 'PENDING' | 'EXECUTED' | 'STALE' | 'EXPIRED', 
     if (path === '/api/auth/me') return new Response(JSON.stringify({ id: 'user-current', username: 'owner', role: 'OWNER' }));
     if (path === `/api/assistant/tasks/${threadId}`) return new Response(JSON.stringify(task(workspacePreview)));
     if (path === `/api/assistant/previews/${previewId}`) return new Response(JSON.stringify({ previewId, actionType: previewBlock.actionType, schemaVersion: previewBlock.schemaVersion, riskLevel: previewBlock.riskLevel, status: previewStatus, expiresAt: previewBlock.expiresAt, receipt, display: { title: '当前收款确认', studentName: '小林', amount: '120.00' } }));
-    if (path.endsWith(`/previews/${previewId}/confirm`) && init?.method === 'POST') return new Response(JSON.stringify({ previewId, status: 'EXECUTED', receipt: { paymentId: 'should-not-confirm-again' } }));
+    if (path.endsWith(`/previews/${previewId}/confirm`) && init?.method === 'POST') return new Response(JSON.stringify({ previewId, status: 'EXECUTED', receipt: { paymentId: 'should-not-confirm-again', amount: '121.00' } }));
     if (path === '/api/assistant/status') return new Response(JSON.stringify({ available: true, core: { available: true }, agentRuntime: { available: true }, checkedAt: new Date().toISOString(), message: 'AI 助手已连接' }));
     return new Response('{}', { status: 404 });
   });
 }
 
 describe('cross-session task recovery', () => {
+  it('keeps a conflicting confirmation read-only through refresh until the authoritative receipt appears', async () => {
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    let executed = false;
+    let confirmations = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return Response.json({ id: 'user-current', username: 'owner', role: 'OWNER' });
+      if (path === `/api/assistant/tasks/${threadId}`) return Response.json(task());
+      if (path === `/api/assistant/previews/${previewId}`) return Response.json({ ...previewBlock, status: executed ? 'EXECUTED' : 'PENDING', receipt: executed ? { paymentId: 'concurrent-receipt', amount: '31.00' } : null, display: { title: '当前收款确认' } });
+      if (path.endsWith(`/previews/${previewId}/confirm`) && init?.method === 'POST') { confirmations++; return Response.json({ message: '预览已被其他请求确认' }, { status: 409 }); }
+      return new Response('{}', { status: 404 });
+    }));
+    let mounted = renderHistory();
+    let preview = await screen.findByLabelText('操作预览');
+    await user.click(await within(preview).findByRole('button', { name: '确认并登记' }));
+    expect(await within(preview).findByText(/预览已被其他请求确认/)).toBeInTheDocument();
+    expect(within(preview).getByRole('button', { name: '重查预览状态' })).toBeEnabled();
+    expect(within(preview).queryByRole('button', { name: '重试确认' })).not.toBeInTheDocument();
+    mounted.unmount();
+    mounted = renderHistory();
+    preview = await screen.findByLabelText('操作预览');
+    await user.click(await within(preview).findByRole('button', { name: '重查预览状态' }));
+    expect(await within(preview).findByRole('button', { name: '重查预览状态' })).toBeEnabled();
+    expect(within(preview).queryByRole('button', { name: /确认并登记|确认执行|重试确认/ })).not.toBeInTheDocument();
+    expect(confirmations).toBe(1);
+    executed = true;
+    await user.click(within(preview).getByRole('button', { name: '重查预览状态' }));
+    expect(await within(preview).findByText('31.00')).toBeInTheDocument();
+    expect(confirmations).toBe(1);
+    mounted.unmount();
+  });
+  it('keeps an uncertain confirmation read-only after a pending recheck and refresh, then restores its receipt', async () => {
+    const user = (await import('@testing-library/user-event')).userEvent.setup();
+    let executed = false;
+    let confirmations = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return Response.json({ id: 'user-current', username: 'owner', role: 'OWNER' });
+      if (path === `/api/assistant/tasks/${threadId}`) return Response.json(task());
+      if (path === `/api/assistant/previews/${previewId}`) return Response.json({ ...previewBlock, status: executed ? 'EXECUTED' : 'PENDING', receipt: executed ? { paymentId: 'recovered-payment', amount: '32.00' } : null, display: { title: '当前收款确认' } });
+      if (path.endsWith(`/previews/${previewId}/confirm`) && init?.method === 'POST') { confirmations++; throw new TypeError('network disconnected'); }
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    let mounted = renderHistory();
+    let preview = await screen.findByLabelText('操作预览');
+    await user.click(await within(preview).findByRole('button', { name: '确认并登记' }));
+    await user.click(await within(preview).findByRole('button', { name: '重查预览状态' }));
+    expect(await within(preview).findByRole('button', { name: '重查预览状态' })).toBeEnabled();
+    expect(within(preview).queryByRole('button', { name: '确认并登记' })).not.toBeInTheDocument();
+    mounted.unmount();
+    mounted = renderHistory();
+    preview = await screen.findByLabelText('操作预览');
+    expect(await within(preview).findByRole('button', { name: '重查预览状态' })).toBeEnabled();
+    executed = true;
+    await user.click(within(preview).getByRole('button', { name: '重查预览状态' }));
+    expect(await within(preview).findByText('32.00')).toBeInTheDocument();
+    expect(confirmations).toBe(1);
+    mounted.unmount();
+  });
   it('跨标签通知仅在服务端确认隐藏后清除相同账号和任务的会话及详情', async () => {
     TestBroadcastChannel.instances = [];
     vi.stubGlobal('BroadcastChannel', TestBroadcastChannel);
@@ -340,7 +400,7 @@ describe('cross-session task recovery', () => {
           riskLevel: first ? 'L2' : 'L1',
           status: first ? 'EXECUTED' : secondStatus,
           expiresAt: '2099-10-28T00:00:00.000Z',
-          receipt: first ? { paymentId: 'first-step-real-receipt' } : null,
+          receipt: first ? { paymentId: 'first-step-real-receipt', amount: '81.00' } : null,
           display: { title: first ? '当前第一步确认' : '当前第二步确认', studentName: first ? '当前学生甲' : '当前学生乙', amount: first ? '80.00' : '120.00' },
         }));
       }
@@ -354,7 +414,7 @@ describe('cross-session task recovery', () => {
     const previews = await screen.findAllByLabelText('操作预览');
     expect(previews).toHaveLength(2);
     expect(await within(previews[0]!).findByText('当前第一步确认')).toBeInTheDocument();
-    expect(within(previews[0]!).getByText('first-step-real-receipt')).toBeInTheDocument();
+    expect(within(previews[0]!).getByText('81.00')).toBeInTheDocument();
     expect(within(previews[1]!).getByText('当前第二步确认')).toBeInTheDocument();
     expect(screen.queryByText(/PRIVATE OLD STUDENT|PRIVATE OLD LESSON|旧金额 ¥80\.00|PRIVATE LATEST STEP SNAPSHOT/)).not.toBeInTheDocument();
     expect(previewReads).toEqual([firstPreviewId, secondPreviewId]);
@@ -366,7 +426,7 @@ describe('cross-session task recovery', () => {
     previewReads.length = 0;
     mounted = renderHistory();
     const refreshed = await screen.findAllByLabelText('操作预览');
-    expect(await within(refreshed[0]!).findByText('first-step-real-receipt')).toBeInTheDocument();
+    expect(await within(refreshed[0]!).findByText('81.00')).toBeInTheDocument();
     expect(previewReads).toEqual([firstPreviewId, secondPreviewId]);
     expect(confirmations).toBe(0);
     mounted.unmount();
@@ -425,7 +485,7 @@ describe('cross-session task recovery', () => {
       if (path === `/api/assistant/previews/${oldPreviewId}`) {
         oldPreviewReads += 1;
         if (oldPreviewReads === 1) return new Response('{}', { status: 503 });
-        return new Response(JSON.stringify({ ...oldReference, status: 'EXECUTED', expiresAt: '2099-10-28T00:00:00.000Z', receipt: { paymentId: 'old-step-current-receipt' }, display: { title: '系统当前旧步骤' } }));
+        return new Response(JSON.stringify({ ...oldReference, status: 'EXECUTED', expiresAt: '2099-10-28T00:00:00.000Z', receipt: { paymentId: 'old-step-current-receipt', amount: '33.00' }, display: { title: '系统当前旧步骤' } }));
       }
       if (path === `/api/assistant/previews/${currentPreviewId}`) return new Response(JSON.stringify({ ...currentReference, status: 'PENDING', expiresAt: '2099-10-28T00:00:00.000Z', receipt: null, display: { title: '系统当前最新步骤' } }));
       if (path.endsWith('/confirm') && init?.method === 'POST') return new Response('{}');
@@ -438,7 +498,7 @@ describe('cross-session task recovery', () => {
     const previews = await screen.findAllByLabelText('操作预览');
     expect(await within(previews[0]!).findByRole('button', { name: '重查预览状态' })).toBeEnabled();
     await user.click(within(previews[0]!).getByRole('button', { name: '重查预览状态' }));
-    expect(await within(previews[0]!).findByText('old-step-current-receipt')).toBeInTheDocument();
+    expect(await within(previews[0]!).findByText('33.00')).toBeInTheDocument();
     expect(within(previews[0]!).queryByRole('button', { name: /确认/ })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([path, request]) => String(path).endsWith(`/previews/${oldPreviewId}/confirm`) && request?.method === 'POST')).toBe(false);
   });
@@ -558,7 +618,8 @@ describe('cross-session task recovery', () => {
 
     const preview = await screen.findByLabelText('操作预览');
     expect(await within(preview).findByText('已确认并执行。')).toBeInTheDocument();
-    expect(within(preview).getByText('payment-real-42')).toBeInTheDocument();
+    expect(within(preview).getByText('120.00')).toBeInTheDocument();
+    expect(within(preview).queryByText('payment-real-42')).not.toBeInTheDocument();
     expect(within(preview).queryByRole('button', { name: /确认并登记|确认执行/ })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([path, init]) => String(path).endsWith(`/previews/${previewId}/confirm`) && init?.method === 'POST')).toBe(false);
     const read = fetchMock.mock.calls.find(([path]) => String(path) === `/api/assistant/previews/${previewId}`);
@@ -576,7 +637,7 @@ describe('cross-session task recovery', () => {
     expect(confirm).toBeEnabled();
     expect(fetchMock.mock.calls.some(([path, init]) => String(path).endsWith(`/previews/${previewId}/confirm`) && init?.method === 'POST')).toBe(false);
     await user.click(confirm);
-    expect(await within(preview).findByText('should-not-confirm-again')).toBeInTheDocument();
+    expect(await within(preview).findByText('121.00')).toBeInTheDocument();
   });
 
   it('invalidates home queries after historical confirmation and re-reads executed state when continuing the task', async () => {
@@ -607,7 +668,7 @@ describe('cross-session task recovery', () => {
 
     const preview = await screen.findByLabelText('操作预览');
     await user.click(await within(preview).findByRole('button', { name: '确认并登记' }));
-    expect(await within(preview).findByText('payment-after-confirm')).toBeInTheDocument();
+    expect(await within(await within(preview).findByLabelText('执行回执')).findByText('120.00')).toBeInTheDocument();
     await waitFor(() => {
       expect(invalidate).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['home-overview'] }));
       expect(invalidate).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['assistant-tasks'] }));
@@ -615,7 +676,7 @@ describe('cross-session task recovery', () => {
 
     await user.click(screen.getByRole('button', { name: '继续此任务' }));
     const resumedPreview = await screen.findByLabelText('操作预览');
-    expect(await within(resumedPreview).findByText('payment-after-confirm')).toBeInTheDocument();
+    expect(await within(await within(resumedPreview).findByLabelText('执行回执')).findByText('120.00')).toBeInTheDocument();
     expect(previewReads).toBeGreaterThanOrEqual(2);
     expect(confirmations).toBe(1);
   });

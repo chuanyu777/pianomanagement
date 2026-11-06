@@ -30,7 +30,7 @@ const HIDDEN_KEYS = new Set([
   'id', 'previewId', 'requestId', 'runId', 'threadId', 'actorUserId', 'userId', 'jti', 'nonce',
   'idempotencyKey', 'auditEventId', 'schemaVersion', 'resourceVersion', 'resourceVersions',
   'version', 'accountVersion', 'payrollVersion', 'resourceId', 'resourceType', 'eventId', 'operationId',
-  'traceId', 'correlationId', 'createdBy', 'updatedBy', 'capability', 'permissions', 'authorization', 'token', 'actionType',
+  'traceId', 'correlationId', 'createdBy', 'updatedBy', 'capability', 'permissions', 'authorization', 'token', 'actionType', 'expiresAt', 'riskLevel',
 ]);
 
 const ENUMS: Record<string, string> = {

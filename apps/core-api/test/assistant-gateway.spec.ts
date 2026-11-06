@@ -96,6 +96,15 @@ describe('AssistantGatewayService', () => {
     );
   });
 
+  it('binds a client-supplied run identity to the current actor capability', async () => {
+    const start = vi.fn(async (input) => ({ runId: input.runId, threadId: input.threadId, status: 'queued' as const }));
+    const service = createService({ start, resume: vi.fn(), openEvents: vi.fn() });
+    const result = await service.startRun({ userId, role: 'OWNER', threadId, runId, message: '恢复请求', clientRequestId: 'same-request' });
+    expect(result.runId).toBe(runId);
+    const payload = JSON.parse(Buffer.from(start.mock.calls[0]![0].capability.split('.')[1]!, 'base64url').toString('utf8'));
+    expect(payload).toMatchObject({ sub: userId, threadId, runId });
+  });
+
   it('lists and reads only tasks bound to the current actor capability', async () => {
     const listThreads = vi.fn().mockResolvedValue([{ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed' }]);
     const getThread = vi.fn().mockResolvedValue({ threadId, title: '查看今日排课', lastActivityAt: '2026-10-26T02:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews: [] });
@@ -399,6 +408,30 @@ describe('HttpAgentRuntimeClient', () => {
 });
 
 describe('Core Gateway ↔ Agent Runtime contract', () => {
+  it('reuses the actor-bound run identity across Core and Agent on a retry', async () => {
+    const repository = createTestRepository();
+    const runtime = buildServer({
+      config: { AGENT_PORT: 3100, AI_ENABLED: false, AI_PROVIDER: '', AI_MODEL: '', AI_API_KEY: '', AGENT_DATABASE_URL: 'postgresql://unused', CORE_INTERNAL_API_URL: 'http://core.test', INTERNAL_SERVICE_SECRET: serviceSecret, AI_REQUEST_TIMEOUT_MS: 1_000, AI_RUN_TIMEOUT_MS: 5_000, AI_MAX_STEPS: 8, AI_MAX_TOOL_CALLS: 6, AI_MAX_OUTPUT_TOKENS: 1_200, AI_TRACING_ENABLED: false },
+      checkpointer: new MemorySaver(), repository, requireActorBinding: true,
+    });
+    const fetchImpl = async (url: string, init?: RequestInit) => {
+      const target = new URL(url);
+      const injected = await runtime.inject({ method: 'POST', url: target.pathname, headers: Object.fromEntries(new Headers(init?.headers).entries()), payload: String(init?.body) });
+      return new Response(injected.body, { status: injected.statusCode, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const client = new HttpAgentRuntimeClient({ baseUrl: 'http://agent-runtime.test', serviceSecret, timeoutMs: 1_000, fetchImpl });
+      const controller = new AssistantGatewayController(new AssistantGatewayService(client, createTokens()));
+      const request = { actor: { id: userId, role: 'OWNER' } } as Parameters<typeof controller.start>[1];
+      const body = { runId, threadId, clientRequestId: 'same-request', message: '恢复查询' };
+      await expect(controller.start(body, request)).resolves.toMatchObject({ runId, threadId });
+      repository.hasActiveRun = async () => true;
+      await expect(controller.start(body, request)).resolves.toMatchObject({ runId, threadId });
+      const otherActor = { actor: { id: 'another-user', role: 'OWNER' } } as Parameters<typeof controller.start>[1];
+      await expect(controller.start(body, otherActor)).rejects.toMatchObject({ status: 403 });
+    } finally { await runtime.close(); }
+  });
+
   it('passes a signed confirmation page request through the runtime route', async () => {
     const getThread = vi.fn().mockResolvedValue({ threadId, title: '任务', lastActivityAt: '2026-10-28T00:00:00.000Z', latestStatus: 'completed', messages: [], workspace: null, historicalPreviews: [], nextPreviewAfter: null });
     const runtime = buildServer({

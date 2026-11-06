@@ -3,12 +3,13 @@ import { AIMessage, HumanMessage, SystemMessage, type BaseMessage } from '@langc
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
 // These are orchestration capabilities, not copies of Core domain enums/entities.
-export const operationSchema = z.enum(['lessons.read', 'accounts.read', 'ledger.read', 'overview.read', 'report.monthly', 'payroll.read', 'directory.read', 'arrears.read', 'consumption.read', 'period.preclose.read', 'student.create', 'student.update', 'teacher.create', 'teacher.compensation.update', 'course.create', 'course.update', 'course-account.open', 'course-account.price', 'payment.preview', 'gift.preview', 'ledger-entry.reversal', 'lesson.schedule', 'lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal', 'lesson.complete.correction', 'refund.preview', 'payroll.generate', 'payroll.adjust', 'payroll.pay', 'payroll.cancel-payment', 'manual-transaction.create', 'period.close', 'period.reopen', 'unsupported']);
+export const operationSchema = z.enum(['receipt.read', 'lessons.read', 'accounts.read', 'ledger.read', 'overview.read', 'report.monthly', 'payroll.read', 'directory.read', 'arrears.read', 'consumption.read', 'period.preclose.read', 'student.create', 'student.update', 'teacher.create', 'teacher.compensation.update', 'course.create', 'course.update', 'course-account.open', 'course-account.price', 'payment.preview', 'gift.preview', 'ledger-entry.reversal', 'lesson.schedule', 'lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal', 'lesson.complete.correction', 'refund.preview', 'payroll.generate', 'payroll.adjust', 'payroll.pay', 'payroll.cancel-payment', 'manual-transaction.create', 'period.close', 'period.reopen', 'unsupported']);
 export const fieldNames = ['studentName', 'courseName', 'teacherName', 'dateFrom', 'dateTo', 'date', 'startsAt', 'targetStartsAt', 'amount', 'correctedUnitPrice', 'channel', 'occurredAt', 'paidAt', 'note', 'feeAmount', 'period', 'basis', 'groupBy', 'kind', 'category', 'baseSalary', 'commissionRate', 'bonusAmount', 'bonusNote', 'deductionAmount', 'deductionNote', 'reason', 'weeks', 'status', 'selectionId', 'name', 'phone', 'notes', 'defaultUnitPrice', 'defaultDurationMinutes', 'isActive', 'currentUnitPrice'] as const;
 type IntentField = typeof fieldNames[number];
 type DialogueOperation = z.infer<typeof operationSchema>;
 
 export const operationFields: Record<DialogueOperation, readonly IntentField[]> = {
+  'receipt.read': [],
   'lessons.read': ['dateFrom', 'dateTo', 'date', 'studentName', 'courseName', 'teacherName', 'status', 'selectionId'],
   'accounts.read': ['studentName', 'courseName', 'selectionId'],
   'ledger.read': ['studentName', 'courseName', 'dateFrom', 'dateTo', 'selectionId'],
@@ -27,14 +28,14 @@ export const operationFields: Record<DialogueOperation, readonly IntentField[]> 
   'course.update': ['courseName', 'name', 'defaultUnitPrice', 'defaultDurationMinutes', 'isActive'],
   'course-account.open': ['studentName', 'courseName', 'currentUnitPrice'],
   'course-account.price': ['studentName', 'courseName', 'currentUnitPrice'],
-  'payment.preview': ['studentName', 'courseName', 'amount', 'channel', 'occurredAt', 'note', 'selectionId'],
+  'payment.preview': ['studentName', 'courseName', 'amount', 'channel', 'occurredAt', 'note', 'selectionId', 'currentUnitPrice'],
   'gift.preview': ['studentName', 'courseName', 'amount', 'occurredAt', 'note', 'selectionId'],
   'ledger-entry.reversal': ['studentName', 'courseName', 'amount', 'kind', 'date', 'dateFrom', 'dateTo', 'reason', 'note', 'selectionId'],
   'lesson.schedule': ['studentName', 'courseName', 'teacherName', 'startsAt', 'weeks', 'note', 'selectionId'],
-  'lesson.reschedule': ['studentName', 'courseName', 'date', 'dateFrom', 'targetStartsAt', 'reason', 'note', 'status', 'selectionId'],
-  'lesson.cancel': ['studentName', 'courseName', 'date', 'dateFrom', 'reason', 'note', 'status', 'selectionId'],
-  'lesson.complete': ['studentName', 'courseName', 'date', 'dateFrom', 'reason', 'note', 'selectionId'],
-  'lesson.complete.reversal': ['studentName', 'courseName', 'date', 'dateFrom', 'reason', 'note', 'selectionId'],
+  'lesson.reschedule': ['studentName', 'courseName', 'date', 'dateFrom', 'startsAt', 'targetStartsAt', 'reason', 'note', 'status', 'selectionId'],
+  'lesson.cancel': ['studentName', 'courseName', 'date', 'dateFrom', 'startsAt', 'reason', 'note', 'status', 'selectionId'],
+  'lesson.complete': ['studentName', 'courseName', 'date', 'dateFrom', 'startsAt', 'reason', 'note', 'selectionId'],
+  'lesson.complete.reversal': ['studentName', 'courseName', 'date', 'dateFrom', 'startsAt', 'reason', 'note', 'selectionId'],
   'lesson.complete.correction': ['studentName', 'courseName', 'date', 'dateFrom', 'dateTo', 'correctedUnitPrice', 'reason', 'note', 'selectionId'],
   'refund.preview': ['studentName', 'feeAmount', 'channel', 'occurredAt', 'note', 'selectionId'],
   'payroll.generate': ['teacherName', 'period', 'selectionId'],
@@ -72,7 +73,7 @@ export const DialogueIntentSchema = z.object({
 });
 export type DialogueIntent = z.infer<typeof DialogueIntentSchema>;
 
-export type IntentContext = { businessDate: string; task: unknown; userMessage: string };
+export type IntentContext = { businessDate: string; task: unknown; userMessage: string; history?: Array<{role:'user'|'assistant';content:string}> };
 export type UnderstandIntent = (context: IntentContext, signal?: AbortSignal) => Promise<DialogueIntent>;
 
 const manualCategories = [
@@ -190,9 +191,10 @@ export function deterministicIntent(context: IntentContext): DialogueIntent | nu
   const scheduleCue = /排课|课表|有哪些课|什么课|上了哪些课/u;
   const scheduleWriteCue = /(?:给|为).*(?:排|安排)|新增|创建|开始排|排\s*\d+\s*周|每周.*(?:排|上课)|请假|取消|调课|调整|改到|确认上课|撤销/u;
   if (dateCue.test(message) && scheduleCue.test(message) && !scheduleWriteCue.test(message)) return { mode:'new',operation:'lessons.read',fields:{},question:null };
-  const simpleStudent = /^查一下([\p{Script=Han}A-Za-z0-9_-]{1,30})(?:同学|学生)?[。.]?$/u.exec(message);
-  if (simpleStudent && !/余额|流水|课表|工资|收入|支出/u.test(message)) return { mode:'new',operation:'directory.read',fields:{studentName:simpleStudent[1]!},question:null };
+  const simpleStudent = /^查一下([\p{Script=Han}A-Za-z0-9_-]{1,30}?)(?:同学|学生)?[。.]?$/u.exec(message);
+  if (simpleStudent && !/余额|流水|课表|工资|收入|支出|资料/u.test(message)) return { mode:'new',operation:'directory.read',fields:{studentName:simpleStudent[1]!},question:null };
   const category = manualCategories.find(item => message.includes(item)) ?? (message.includes('合作') ? '外部合作' : undefined);
+  if (category && /查|看看|看一下|多少|哪些|如何|怎么样/u.test(message)) return null;
   if (category && /记|登记|收到|支付|付|支出|收入/u.test(message)) {
     const amount = /(?:^|\D)(\d+(?:\.\d{1,2})?)(?:元|，|,|\s|$)/u.exec(message)?.[1];
     const channel = ['现金','微信','支付宝','银行卡','其他'].find(item => message.includes(item));
@@ -225,8 +227,9 @@ lessons.read=查询课程安排/课表，不是余额；accounts.read=查询学�
 directory.read=查询基础资料目录；arrears.read=查询课程欠费及冻结学生；consumption.read=查询指定月份课消分组；period.preclose.read=查询指定月份关账预检；student.create=新增学生；student.update=修改学生；teacher.create=新增教师资料（不创建登录账号）；teacher.compensation.update=修改教师默认基本工资和提成比例；course.create=新增课程；course.update=修改课程；course-account.open=开通学生课程账户；course-account.price=修改课程账户单价；
 payment.preview=登记学生交费/收款；gift.preview=赠送课程账户金额；ledger-entry.reversal=冲正交费或赠送流水；lesson.schedule=新排课；lesson.reschedule=调整已排课程时间；lesson.cancel=请假/取消课程；lesson.complete=确认已结束课程上完；lesson.complete.reversal=撤销上课确认；lesson.complete.correction=纠正历史已完成课程的课消金额，不是交费；
 refund.preview=登记线下最终退学退款；payroll.generate=生成工资；payroll.adjust=调整已生成工资的当月基本工资、提成比例、奖金或代扣；payroll.pay=登记工资已支付；payroll.cancel-payment=撤销工资支付登记；manual-transaction.create=登记固定分类的其他经营收入或经营支出；period.close=关账；period.reopen=撤销最近关账；unsupported=尚未接通的能力。
-字段契约：lessons.read可用dateFrom,dateTo,date,studentName,courseName,teacherName,status,selectionId；accounts.read可用studentName,courseName,selectionId；ledger.read可用studentName,courseName,dateFrom,dateTo,selectionId；overview.read不带字段；report.monthly可用period,basis（basis只能表达现金、经营或对比）；payroll.read可用teacherName,period,selectionId；directory.read和arrears.read不带字段；consumption.read可用period,groupBy（course/teacher/student）；period.preclose.read可用period；student.create可用name,notes；student.update可用studentName,name,notes；teacher.create可用name,baseSalary,commissionRate；teacher.compensation.update可用teacherName,baseSalary,commissionRate,selectionId；course.create可用name,defaultUnitPrice,defaultDurationMinutes；course.update可用courseName,name,defaultUnitPrice,defaultDurationMinutes,isActive（只能true/false）；course-account.open和course-account.price可用studentName,courseName,currentUnitPrice；payment.preview可用studentName,courseName,amount,channel,occurredAt,note,selectionId；gift.preview可用studentName,courseName,amount,occurredAt,note,selectionId；ledger-entry.reversal可用studentName,courseName,amount,kind,date,dateFrom,dateTo,reason,note,selectionId；lesson.schedule可用studentName,courseName,teacherName,startsAt,weeks,note,selectionId；lesson.reschedule可用studentName,courseName,date,dateFrom,targetStartsAt,reason,note,status,selectionId；lesson.cancel可用studentName,courseName,date,dateFrom,reason,note,status,selectionId；lesson.complete、lesson.complete.reversal可用studentName,courseName,date,dateFrom,reason,note,selectionId；lesson.complete.correction可用studentName,courseName,date,dateFrom,dateTo,correctedUnitPrice,reason,note,selectionId；refund.preview可用studentName,feeAmount,channel,occurredAt,note,selectionId；payroll.generate可用teacherName,period,selectionId；payroll.adjust可用teacherName,period,baseSalary,commissionRate,bonusAmount,bonusNote,deductionAmount,deductionNote,selectionId；payroll.pay可用teacherName,period,channel,paidAt,note,selectionId；payroll.cancel-payment可用teacherName,period,reason,note,selectionId；manual-transaction.create可用kind（收入或支出）,category,amount,channel,occurredAt,note；period.close可用period,selectionId；period.reopen可用period,reason,selectionId。operation为null时仅用于澄清，可从上述已知字段中提取；unsupported可使用已知字段。严禁输出未知字段或该operation不支持的字段。所有ID均由候选查询取得，禁止输出或猜测ID。
+字段契约：lessons.read可用dateFrom,dateTo,date,studentName,courseName,teacherName,status,selectionId；accounts.read可用studentName,courseName,selectionId；ledger.read可用studentName,courseName,dateFrom,dateTo,selectionId；overview.read不带字段；report.monthly可用period,basis（basis只能表达现金、经营或对比）；payroll.read可用teacherName,period,selectionId；directory.read和arrears.read不带字段；consumption.read可用period,groupBy（course/teacher/student）；period.preclose.read可用period；student.create可用name,notes；student.update可用studentName,name,notes；teacher.create可用name,baseSalary,commissionRate；teacher.compensation.update可用teacherName,baseSalary,commissionRate,selectionId；course.create可用name,defaultUnitPrice,defaultDurationMinutes；course.update可用courseName,name,defaultUnitPrice,defaultDurationMinutes,isActive（只能true/false）；course-account.open和course-account.price可用studentName,courseName,currentUnitPrice；payment.preview可用studentName,courseName,amount,channel,occurredAt,note,selectionId,currentUnitPrice；gift.preview可用studentName,courseName,amount,occurredAt,note,selectionId；ledger-entry.reversal可用studentName,courseName,amount,kind,date,dateFrom,dateTo,reason,note,selectionId；lesson.schedule可用studentName,courseName,teacherName,startsAt,weeks,note,selectionId；lesson.reschedule可用studentName,courseName,date,dateFrom,targetStartsAt,reason,note,status,selectionId；lesson.cancel可用studentName,courseName,date,dateFrom,reason,note,status,selectionId；lesson.complete、lesson.complete.reversal可用studentName,courseName,date,dateFrom,reason,note,selectionId；lesson.complete.correction可用studentName,courseName,date,dateFrom,dateTo,correctedUnitPrice,reason,note,selectionId；refund.preview可用studentName,feeAmount,channel,occurredAt,note,selectionId；payroll.generate可用teacherName,period,selectionId；payroll.adjust可用teacherName,period,baseSalary,commissionRate,bonusAmount,bonusNote,deductionAmount,deductionNote,selectionId；payroll.pay可用teacherName,period,channel,paidAt,note,selectionId；payroll.cancel-payment可用teacherName,period,reason,note,selectionId；manual-transaction.create可用kind（收入或支出）,category,amount,channel,occurredAt,note；period.close可用period,selectionId；period.reopen可用period,reason,selectionId。operation为null时仅用于澄清，可从上述已知字段中提取；unsupported可使用已知字段。严禁输出未知字段或该operation不支持的字段。所有ID均由候选查询取得，禁止输出或猜测ID。
 日期按提供的businessDate和Asia/Shanghai理解，YYYY-MM-DD；时刻为带+08:00偏移的ISO字符串；月份YYYY-MM；金额必须原样十进制字符串，不能计算；channel保留用户中文渠道名，由Core校验。昨天/明天/日期范围都属于lessons.read，不是排课。
+结合整句话理解同义词、口语、不同语序和业务词的明显错别字；含义不确定时澄清。不得纠正或猜测人名、课程名称、金额或日期，也不得把查询误作登记。
 学生/老师/课程名称应保留用户输入的完整名称，包含字母、数字、编号或前缀，不得自行简化。例如“学员A102林悦”不能变成“林悦”。你完全没有访问过数据库，不知道任何姓名是否存在；不能输出“未找到”、余额或成功等业务事实。只提取名称交给后续Core查询。例如“查学员A102林悦主课余额”必须是mode=new,operation=accounts.read,fields={studentName:学员A102林悦,courseName:主课}，不能因为名称陌生而澄清。
 mode=new是独立业务，应仅填本句明确参数；continue仅补充同一任务，correct只更正明确字段；取消办理用cancel。请求切换查询时mode=new，绝不能继承前笔金额或渠道。
 对“那明天呢”“只看某老师”应保留前一查询意图，提供变更字段；对“支付宝”仅在已有待补渠道任务时继续。“不是1000，是100”只保留100；不得将多个金额相加。多个业务动作当前使用mode=clarify、operation=null，请先澄清要先办哪一步，不能偷偷丢掉后半句。可确定业务类型但缺参数时仍给出operation和已有fields，不用clarify，后续节点会补问。

@@ -210,7 +210,16 @@ export function buildServer(input: {
       const owner = await input.repository.getThreadOwner(body.threadId);
       if (owner !== null && owner !== actorKey) return reply.code(403).send({ message: '无权访问该任务' });
     }
+    const existingRun = await input.repository.findRun(body.runId);
+    if (existingRun) {
+      if (existingRun.threadId !== body.threadId || existingRun.userMessage !== body.userMessage || existingRun.clientRequestId !== body.clientRequestId) {
+        return reply.code(409).send({ message: '幂等请求内容不一致' });
+      }
+      return reply.send(AssistantRunSchema.parse(existingRun));
+    }
     if (input.repository.hasActiveRun && (await input.repository.hasActiveRun(body.threadId))) {
+      const concurrentRun = await input.repository.findRun(body.runId);
+      if (concurrentRun && concurrentRun.threadId === body.threadId && concurrentRun.userMessage === body.userMessage && concurrentRun.clientRequestId === body.clientRequestId) return reply.send(AssistantRunSchema.parse(concurrentRun));
       return reply.code(409).send({ message: '上一条消息还在处理中，请稍候再发' });
     }
     const persisted = await input.repository.createRun({ ...body, capability, ...(actorKey ? { actorKey } : {}) });

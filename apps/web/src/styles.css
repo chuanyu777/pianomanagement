@@ -179,12 +179,13 @@ button { cursor: pointer; }
 .source-row span { color: #555d70; font-size: 11px; }
 .recovery-action { padding: 7px 10px; border: 1px solid #e3e6ed; border-radius: 8px; color: #626a7d; background: #fff; text-align: left; font-size: 10px; }
 .preview-card > strong { display: block; }
+.preview-card { padding: 20px 22px; border-radius: 12px; }
+.preview-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.preview-card-heading strong { font-size: 15px; }
+.preview-status { display: inline-flex; align-items: center; padding: 4px 9px; border-radius: 999px; color: #3458a9; background: #edf2ff; font-size: 12px; font-weight: 600; }
+.preview-status.is-complete { color: #287247; background: #eaf7ee; }
+.preview-card > .ant-btn { margin-top: 16px; }
 .preview-guidance { color: #555d70 !important; }
-.preview-expiry { color: #8c6c2f !important; }
-.preview-technical-details { margin-top: 13px; border-top: 1px solid #edf0f4; color: #858c9c; font-size: 10px; }
-.preview-technical-details summary { width: fit-content; padding-top: 11px; cursor: pointer; color: #7a8294; list-style-position: inside; }
-.preview-technical-details summary:hover { color: #9f7b35; }
-.preview-technical-details dl { margin: 6px 0 0; }
 .workspace-table-wrap { width: 100%; overflow-x: auto; border: 1px solid #dfe3eb; border-radius: 4px; background: #fff; }
 .workspace-table { width: 100%; min-width: 540px; border-collapse: collapse; text-align: left; font-size: 12px; }
 .workspace-table th, .workspace-table td { padding: 12px 14px; border-bottom: 1px solid #e8ebf1; white-space: nowrap; }
@@ -595,7 +596,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, a:focus-visib
 .conversation-message .chat-avatar { width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center; border-radius: 7px; color: var(--v2-lime); background: var(--v2-nav); font-size: 9px; font-weight: 850; }
 .conversation-message-user .chat-avatar { color: #fff; background: var(--v2-blue); }
 .conversation-message strong { font-size: 10px; }
-.conversation-message p { margin-top: 4px; color: inherit; font-size: 12px; line-height: 1.65; }
+.conversation-message p { margin: 0; color: inherit; font-size: 12px; line-height: 1.65; }
 .suggestion-row { order: 1; margin-top: auto; padding-top: 10px; border: 0; }
 .suggestion-button { padding: 6px 10px; border-color: var(--v2-line); border-radius: 15px; background: #fff; }
 .suggestion-button:hover:not(:disabled) { border-color: #aebaff; color: var(--v2-blue); background: var(--v2-blue-soft); }

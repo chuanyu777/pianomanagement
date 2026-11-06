@@ -7,6 +7,15 @@ import {
 import { verifySignedInternalRequest } from '@piano/assistant-protocol/internal-auth';
 import { CoreDialogueError, DialogueReadClient } from '../src/tools/dialogue-tools.js';
 
+describe('关账错误提示', () => {
+  it('将 Core 的实际关账原因和安全操作提示传递给对话', async () => {
+    const response = Response.json({message:'该业务月份已关账，不能修改资金或课消记录',code:'PERIOD_CLOSED',guidance:'仅最近一次关账的月份可填写原因后重新打开。'}, {status:409});
+    const error = await CoreDialogueError.fromResponse(response);
+    expect(error.message).toContain('最近一次关账');
+    expect(error.message).toContain('填写原因');
+  });
+});
+
 const secret = 'unit-test-secret-012345678901234567890123';
 const baseUrl = 'http://core.test/api/internal';
 

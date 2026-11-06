@@ -235,6 +235,35 @@ describe('agent runtime Fastify server', () => {
     await app.close();
   });
 
+  it('returns the same active run on a retry with the same run identity', async () => {
+    const repository = createTestRepository();
+    const body = { runId, threadId, userMessage: '原始消息', clientRequestId: 'request-1' };
+    await repository.createRun(body);
+    repository.hasActiveRun = async () => true;
+    const app = buildServer({ config, checkpointer: new MemorySaver(), repository });
+    const path = '/internal/assistant/runs/start';
+    const retry = await app.inject({ method: 'POST', url: path, headers: signedHeaders('POST', path, body), payload: body });
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toMatchObject({ runId, threadId });
+    await app.close();
+  });
+
+  it('does not let another actor replay an existing run', async () => {
+    const repository = createTestRepository();
+    const app = createServer({ config, checkpointer: new MemorySaver(), repository, requireActorBinding: true });
+    const path = '/internal/assistant/runs/start';
+    const body = { runId, threadId, userMessage: '身份隔离', clientRequestId: 'request-1' };
+    const token = (sub: string) => `header.${Buffer.from(JSON.stringify({ sub, role: 'OWNER', threadId, runId, exp: Math.floor(Date.now() / 1000) + 300 })).toString('base64url')}.signature`;
+    const send = (sub: string) => {
+      const securityHeaders = { 'x-assistant-capability': token(sub) };
+      return app.inject({ method: 'POST', url: path, headers: signedHeaders('POST', path, body, securityHeaders), payload: body });
+    };
+    expect((await send('owner-a')).statusCode).toBe(200);
+    expect((await send('owner-a')).statusCode).toBe(200);
+    expect((await send('owner-b')).statusCode).toBe(403);
+    await app.close();
+  });
+
   it('rejects an idempotent retry whose request content changed', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(dashboardResponse));
     const app = buildServer({ config, checkpointer: new MemorySaver(), repository: createTestRepository() });

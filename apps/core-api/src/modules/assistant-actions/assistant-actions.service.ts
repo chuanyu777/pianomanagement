@@ -552,9 +552,63 @@ export class AssistantActionsService {
 
   async createPaymentPreview(input: {
     actorUserId: string; runId: string; requestId: string; idempotencyKey: string;
-    accountId: string; amount: string; channel: PaymentChannel; occurredAt: Date; note?: string | undefined;
+    accountId?: string | undefined; studentId?: string | undefined; courseId?: string | undefined; currentUnitPrice?: string | undefined;
+    amount: string; channel: PaymentChannel; occurredAt: Date; note?: string | undefined;
   }) {
-    return this.createMoneyPreview({ ...input, action: 'PAYMENT' });
+    if (input.studentId && input.courseId && !input.accountId) return this.createCombinedPaymentPreview({ ...input, studentId:input.studentId, courseId:input.courseId });
+    if (!input.accountId || input.studentId || input.courseId || input.currentUnitPrice !== undefined) throw new BadRequestException('交费对象参数不合法');
+    return this.createMoneyPreview({ ...input, accountId:input.accountId, action: 'PAYMENT' });
+  }
+
+  private async createCombinedPaymentPreview(input: {
+    actorUserId:string;runId:string;requestId:string;idempotencyKey:string;studentId:string;courseId:string;
+    amount:string;channel:PaymentChannel;occurredAt:Date;note?:string|undefined;currentUnitPrice?:string|undefined;
+  }) {
+    const actor = await this.loadActor(requireText(input.actorUserId, 'actorUserId'));
+    if (actor.role !== 'OWNER') throw new ForbiddenException('仅店主可预览资金操作');
+    if (!input.channel || (input.channel === 'OTHER' && !input.note?.trim())) throw new BadRequestException('请提供有效收款渠道及必要备注');
+    const amount = new Prisma.Decimal(input.amount);
+    if (!amount.isFinite() || !amount.gt(0) || !/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(input.amount) || amount.toFixed(2) !== input.amount) throw new BadRequestException('金额必须是大于零且不超过 999999999999.99 的两位小数字符串');
+    if (this.periods) await this.periods.assertWritableForDate(input.occurredAt);
+    const actionType='course-account.payment';
+    const commandId=requireText(input.idempotencyKey,'idempotencyKey');
+    const requestId=requireText(input.requestId,'requestId');
+    const runId=requireText(input.runId,'runId');
+    const expiresAt=new Date(Date.now()+5*60*1000);
+    try {
+      const result=await this.prisma.$transaction(async tx => {
+        const [student,course,account]=await Promise.all([
+          tx.student.findUnique({where:{id:input.studentId},select:{id:true,name:true,updatedAt:true,withdrawnAt:true}}),
+          tx.course.findUnique({where:{id:input.courseId},select:{id:true,name:true,updatedAt:true,defaultUnitPrice:true,isActive:true}}),
+          tx.studentCourseAccount.findUnique({where:{studentId_courseId:{studentId:input.studentId,courseId:input.courseId}},select:{id:true,version:true,currentUnitPrice:true}}),
+        ]);
+        if(!student) throw new NotFoundException('学生不存在');
+        if(student.withdrawnAt) throw new ConflictException('学生已退学，无法交费');
+        if(!course) throw new NotFoundException('课程不存在');
+        if(!course.isActive) throw new ConflictException('课程已停用，无法交费');
+        const snapshot=account?await this.ledger.getPreviewSnapshotInTransaction(tx,account.id):null;
+        const lockedAccount=account?await tx.studentCourseAccount.findUnique({where:{id:account.id},select:{currentUnitPrice:true}}):null;
+        if(account&&!lockedAccount) throw new ConflictException('课程账户已变化，请重新预览');
+        const currentPrice=new Prisma.Decimal(lockedAccount?.currentUnitPrice ?? course.defaultUnitPrice);
+        const targetPrice=new Prisma.Decimal(input.currentUnitPrice ?? currentPrice);
+        if(!targetPrice.isFinite()||!targetPrice.gt(0)||targetPrice.decimalPlaces()>2||(input.currentUnitPrice!==undefined&&targetPrice.toFixed(2)!==input.currentUnitPrice)) throw new BadRequestException('课程单价必须是大于零的两位小数');
+        const before=snapshot?toDisplayBalance(snapshot):{paidBalance:'0.00',giftBalance:'0.00',totalBalance:'0.00'};
+        const after=snapshot?toDisplayBalance(this.ledger.projectBalance(snapshot,'PAYMENT',amount).after):{paidBalance:amount.toFixed(2),giftBalance:'0.00',totalBalance:amount.toFixed(2)};
+        const command={studentId:input.studentId,courseId:input.courseId,amount:amount.toFixed(2),channel:input.channel,occurredAt:input.occurredAt.toISOString(),note:input.note?.trim()||null,currentUnitPrice:targetPrice.toFixed(2),priceExplicit:input.currentUnitPrice!==undefined} satisfies Prisma.InputJsonObject;
+        const versions={studentUpdatedAt:student.updatedAt.toISOString(),courseUpdatedAt:course.updatedAt.toISOString(),accountId:account?.id??null,accountVersion:snapshot?.version??null};
+        const preview=await tx.actionPreview.create({data:{actorUserId:actor.id,actionType,schemaVersion:`${actionType}.v1`,riskLevel:PreviewRiskLevel.L2,normalizedCommandJson:command,displayJson:{title:'课程交费',summary:`交费 ¥${amount.toFixed(2)}`,studentName:student.name,courseName:course.name,amount:amount.toFixed(2),channel:input.channel,priceBefore:account?currentPrice.toFixed(2):null,priceAfter:targetPrice.toFixed(2),beforeBalance:before,afterBalance:after},resourceVersionsJson:versions,idempotencyKey:commandId,status:PreviewStatus.PENDING,expiresAt}});
+        const audit=await tx.businessAuditEvent.create({data:{actorUserId:actor.id,runId,previewId:preview.id,eventType:'assistant.preview.created',requestId,resourceType:'student',resourceId:student.id,detailJson:{actionType}}});
+        return {preview,auditEvent:audit} satisfies CreatedPreview;
+      });
+      return this.toMoneyPreviewResponse(result);
+    } catch(error) {
+      if(!isUniqueConstraintError(error)) throw error;
+      const original=await this.findByIdempotencyKey(commandId);
+      if(!original||original.preview.actorUserId!==actor.id||original.preview.actionType!==actionType) throw new ConflictException('幂等键已被其他请求使用');
+      const command=original.preview.normalizedCommandJson as Record<string,unknown>;
+      if(command.studentId!==input.studentId||command.courseId!==input.courseId||command.amount!==input.amount||command.channel!==input.channel||command.occurredAt!==input.occurredAt.toISOString()||command.note!==(input.note?.trim()||null)||command.priceExplicit!==(input.currentUnitPrice!==undefined)||(input.currentUnitPrice!==undefined&&command.currentUnitPrice!==input.currentUnitPrice)) throw new ConflictException('幂等键已用于不同的资金预览请求');
+      return this.toMoneyPreviewResponse(original);
+    }
   }
 
   async createGiftPreview(input: {
@@ -573,7 +627,7 @@ export class AssistantActionsService {
     const runId = requireText(input.runId, 'runId');
     const requestId = requireText(input.requestId, 'requestId');
     const amount = new Prisma.Decimal(input.amount);
-    if (!amount.isFinite() || !amount.gt(0) || amount.toFixed(2) !== input.amount) {
+    if (!amount.isFinite() || !amount.gt(0) || !/^(?:0|[1-9]\d{0,11})\.\d{2}$/.test(input.amount) || amount.toFixed(2) !== input.amount) {
       throw new BadRequestException('金额必须是大于零的两位小数字符串');
     }
     const actor = await this.loadActor(actorUserId);
@@ -585,9 +639,9 @@ export class AssistantActionsService {
     const expiresAt = new Date(now.getTime() + 5 * 60 * 1000);
     try {
       const result = await this.prisma.$transaction(async (tx) => {
-        const account = await tx.studentCourseAccount.findUnique({ where: { id: input.accountId }, select: { id: true } });
-        if (!account) throw new NotFoundException('学生课程账户不存在');
         const snapshot = await this.ledger.getPreviewSnapshotInTransaction(tx, input.accountId);
+        const account = await tx.studentCourseAccount.findUnique({ where: { id: input.accountId }, select: { id:true,currentUnitPrice:true,student:{select:{name:true}},course:{select:{name:true}} } });
+        if (!account) throw new NotFoundException('学生课程账户不存在');
         const projected = this.ledger.projectBalance(snapshot, input.action, amount);
         const command = {
           accountId: input.accountId,
@@ -605,6 +659,7 @@ export class AssistantActionsService {
           displayJson: {
             title: input.action === 'PAYMENT' ? '课程交费' : '课程赠送',
             summary: input.action === 'PAYMENT' ? `交费 ¥${amount.toFixed(2)}` : `赠送 ¥${amount.toFixed(2)}`,
+            ...(input.action === 'PAYMENT' ? {currentUnitPrice:account.currentUnitPrice.toFixed(2),studentName:account.student.name,courseName:account.course.name} : {}),
             beforeBalance: toDisplayBalance(projected.before),
             afterBalance: toDisplayBalance(projected.after),
           } as unknown as Prisma.InputJsonObject,
@@ -675,17 +730,46 @@ export class AssistantActionsService {
       if (preview.status !== PreviewStatus.PENDING) throw new ConflictException('资金预览已不能确认');
       const now = new Date();
       if (preview.expiresAt <= now) throw new ConflictException('资金预览已过期，请重新预览');
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`piano.ledger.command:${idempotencyKey}`}, 0))`;
       const command = preview.normalizedCommandJson as unknown as {
-        accountId: string; amount: string; channel?: PaymentChannel; occurredAt: string; note: string | null;
+        accountId?: string; studentId?: string; courseId?: string; currentUnitPrice?: string; priceExplicit?: boolean;
+        amount: string; channel?: PaymentChannel; occurredAt: string; note: string | null;
       };
-      const versions = preview.resourceVersionsJson as unknown as { accountId: string; accountVersion: number };
-      if (command.accountId !== versions.accountId) throw new ConflictException('资金预览账户快照无效');
-      const current = await this.ledger.getPreviewSnapshotInTransaction(tx, command.accountId);
-      if (current.version !== versions.accountVersion) throw new ConflictException('课程账户余额已变化，请重新预览');
+      await this.periods?.assertWritableForDate(new Date(command.occurredAt), tx);
+      const versions = preview.resourceVersionsJson as unknown as { accountId: string | null; accountVersion: number | null; studentUpdatedAt?:string; courseUpdatedAt?:string };
+      let accountId=command.accountId;
+      if(command.studentId && command.courseId && !command.accountId) {
+        if(!this.studentCourseAccounts || !command.currentUnitPrice || !versions.studentUpdatedAt || !versions.courseUpdatedAt) throw new ConflictException('交费预览信息不完整，请重新预览');
+        const existingCommand=await tx.ledgerEntry.findUnique({where:{commandId:idempotencyKey},select:{id:true}});
+        if(existingCommand) throw new ConflictException('确认标识已用于其他业务');
+        await tx.$queryRaw`SELECT "id" FROM "Student" WHERE "id" = ${command.studentId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "Course" WHERE "id" = ${command.courseId} FOR UPDATE`;
+        const [student,course,account]=await Promise.all([
+          tx.student.findUnique({where:{id:command.studentId},select:{updatedAt:true,withdrawnAt:true}}),
+          tx.course.findUnique({where:{id:command.courseId},select:{updatedAt:true,isActive:true}}),
+          tx.studentCourseAccount.findUnique({where:{studentId_courseId:{studentId:command.studentId,courseId:command.courseId}},select:{id:true,currentUnitPrice:true}}),
+        ]);
+        if(!student||student.withdrawnAt||!course||!course.isActive||student.updatedAt.toISOString()!==versions.studentUpdatedAt||course.updatedAt.toISOString()!==versions.courseUpdatedAt) throw new ConflictException('学生或课程资料已变化，请重新预览');
+        if((account?.id??null)!==versions.accountId) throw new ConflictException('课程账户已变化，请重新预览');
+        if(!account) {
+          const opened=await this.studentCourseAccounts.openInTransaction(tx,command.studentId,{courseId:command.courseId,currentUnitPrice:new Prisma.Decimal(command.currentUnitPrice)},{studentUpdatedAt:new Date(versions.studentUpdatedAt),courseUpdatedAt:new Date(versions.courseUpdatedAt)});
+          accountId=opened.id;
+        } else {
+          accountId=account.id;
+          const current=await this.ledger.getPreviewSnapshotInTransaction(tx,accountId);
+          if(current.version!==versions.accountVersion) throw new ConflictException('课程账户余额已变化，请重新预览');
+          if(command.priceExplicit && new Prisma.Decimal(account.currentUnitPrice).toFixed(2)!==command.currentUnitPrice) await this.studentCourseAccounts.updatePriceInTransaction(tx,accountId,{currentUnitPrice:new Prisma.Decimal(command.currentUnitPrice)},current.version);
+        }
+      } else {
+        if (!accountId || accountId !== versions.accountId) throw new ConflictException('资金预览账户快照无效');
+        const current = await this.ledger.getPreviewSnapshotInTransaction(tx, accountId);
+        if (current.version !== versions.accountVersion) throw new ConflictException('课程账户余额已变化，请重新预览');
+      }
+      if(!accountId) throw new ConflictException('课程账户不可用，请重新预览');
       const amount = new Prisma.Decimal(command.amount);
       const happenedAt = new Date(command.occurredAt);
       const ledgerInput = {
-        accountId: command.accountId,
+        accountId,
         amount,
         occurredAt: happenedAt,
         ...(command.note ? { note: command.note } : {}),
@@ -702,7 +786,7 @@ export class AssistantActionsService {
         actionType: preview.actionType,
         ledgerEntryId: entry.id,
         idempotencyKey,
-        accountId: command.accountId,
+        accountId,
         amount: command.amount,
         occurredAt: happenedAt.toISOString(),
         balanceAfter: after,

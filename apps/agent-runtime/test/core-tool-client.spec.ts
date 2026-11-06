@@ -8,6 +8,21 @@ import {
 import { verifySignedInternalRequest } from '@piano/assistant-protocol/internal-auth';
 import { CoreToolClient } from '../src/tools/core-tool-client.js';
 
+describe('CoreToolClient course account identity', () => {
+  it('requires the Core-generated student association and rejects extra or missing fields', async () => {
+    const candidate = { accountId:'49fbcf47-c616-468a-a058-cdca1ee66025', studentId:'71726279-43f1-4fe6-9aa1-b12988812b5d', studentName:'林悦', courseName:'主课' };
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ candidates:[candidate] })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ candidates:[{ ...candidate, studentId:undefined }] })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ candidates:[{ ...candidate, balance:'100.00' }] })));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new CoreToolClient('http://core.test/api/internal', 1_000, 'unit-test-secret-012345678901234567890123');
+    await expect(client.getCourseAccountCandidates('cap', { studentName:'林悦' })).resolves.toEqual({ candidates:[candidate] });
+    await expect(client.getCourseAccountCandidates('cap', { studentName:'林悦' })).rejects.toThrow();
+    await expect(client.getCourseAccountCandidates('cap', { studentName:'林悦' })).rejects.toThrow();
+  });
+});
+
 describe('CoreToolClient dashboard summary', () => {
   it('calls the read-only summary endpoint with the capability and a valid HMAC signature', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
@@ -241,6 +256,15 @@ describe('CoreToolClient course account Preview', () => {
     expiresAt: '2026-11-02T01:05:00.000Z',
     auditEventId: '428b354a-6f3f-4eb8-8d09-2c6c450f9ec8',
   };
+
+  it('按学生和课程发送合并缴费预览，不要求尚不存在的账户编号', async () => {
+    const {accountId: _accountId,...common}=commonRequest;
+    const request={...common,studentId:'11111111-1111-4111-8111-111111111111',courseId:'22222222-2222-4222-8222-222222222222',currentUnitPrice:'200.00',channel:'WECHAT' as const};
+    const response={...paymentPreview,command:{studentId:request.studentId,courseId:request.courseId,amount:request.amount,channel:request.channel,occurredAt:'2026-11-02T01:00:00.000Z',note:request.note,currentUnitPrice:'200.00',priceExplicit:true},display:{title:'课程交费',summary:'交费 ¥1250.50',studentName:'小明',courseName:'主课',amount:request.amount,channel:request.channel,priceBefore:null,priceAfter:'200.00',beforeBalance:{paidBalance:'0.00',giftBalance:'0.00',totalBalance:'0.00'},afterBalance:{paidBalance:request.amount,giftBalance:'0.00',totalBalance:request.amount}}};
+    vi.stubGlobal('fetch',vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(response),{status:201})));
+    const client=new CoreToolClient('http://core.test/api/internal',1000,secret);
+    await expect(client.createPaymentPreview('short-lived-capability',request)).resolves.toEqual(response);
+  });
 
   it.each([
     {

@@ -5,12 +5,13 @@ import { Alert, Button, Card, Input, Tag, Typography } from 'antd';
 import { HistoricalPreviewReferenceSchema, WorkspaceDocumentSchema, type HistoricalPreviewReference } from '@piano/assistant-protocol';
 import type { components } from '@piano/generated-core-client/generated/core-api';
 import { Link, Outlet, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
-import { AUTH_EXPIRED_EVENT, confirmAssistantPreview, createAssistantIds, getAssistantPreview, isTerminalAssistantEvent, notifyAuthExpired, startAssistantRun, streamAssistantEvents, UnknownConfirmationError, type AssistantRunStatus, type AssistantUiEvent, type WorkspaceBlock, type WorkspaceDocument } from './assistant-client.js';
+import { AUTH_EXPIRED_EVENT, confirmAssistantPreview, createAssistantIds, getAssistantPreview, parseAssistantRun, isTerminalAssistantEvent, notifyAuthExpired, startAssistantRun, streamAssistantEvents, UnknownConfirmationError, type AssistantRunStatus, type AssistantUiEvent, type WorkspaceBlock, type WorkspaceDocument } from './assistant-client.js';
 import { clearSession, getAccessToken, getRefreshToken, refreshSession, revokeSession, ServiceUnavailableError, SessionExpiredError, storeSession } from './auth-session.js';
 import { PreviewFacts } from './preview-facts.js';
 import { StructuredWorkbench } from './structured-workbench.js';
 import { amountTone } from './amount-tone.js';
 import { ResizableWorkspace } from './resizable-workspace.js';
+import { recoveryDestination } from './recovery-destination.js';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -46,6 +47,7 @@ type RecoveryActionHandler = (action: RecoveryAction) => void;
 
 const ACTOR_SESSION_KEY = 'pianomanager.assistant.actor';
 const ASSISTANT_SESSION_PREFIX = 'pianomanager.assistant.session.v1:';
+const ASSISTANT_RUN_PREFIX = 'pianomanager.assistant.pending-run.v1:';
 const PREVIEW_IDEMPOTENCY_KEY_PREFIX = 'pianomanager.preview.idempotency.v1:';
 const HIDDEN_TASK_CHANNEL = 'pianomanager.assistant.hidden.v1';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -81,6 +83,56 @@ function getToken(): string | null {
 function assistantSessionKey(actor: Pick<AuthUser, 'id' | 'role' | 'teacherId'>): string {
   const scope = [actor.id, actor.role, actor.teacherId ?? ''].join(':');
   return `${ASSISTANT_SESSION_PREFIX}${encodeURIComponent(scope)}`;
+}
+
+function pendingRunKey(actor: AuthUser): string {
+  return `${ASSISTANT_RUN_PREFIX}${encodeURIComponent([actor.id, actor.role, actor.teacherId ?? ''].join(':'))}`;
+}
+
+type PendingRunRequest = { runId: string; threadId: string; clientRequestId: string; message: string };
+
+function startPersistedRun(actor: AuthUser, request: PendingRunRequest): ReturnType<typeof startAssistantRun> {
+  const promise = startAssistantRun({ token: getToken(), ...request });
+  void promise.then((run) => {
+    try {
+      const raw = window.sessionStorage.getItem(pendingRunKey(actor));
+      const stored: unknown = raw ? JSON.parse(raw) : null;
+      if (isRecord(stored) && isRecord(stored.request) && stored.request.runId === request.runId) {
+        window.sessionStorage.setItem(pendingRunKey(actor), JSON.stringify({ run }));
+      }
+    } catch { /* Storage is optional. */ }
+  }, () => {});
+  return promise;
+}
+
+function restorePendingRun(actor: AuthUser | null): PendingPageRun | null {
+  if (!actor) return null;
+  try {
+    const raw = window.sessionStorage.getItem(pendingRunKey(actor));
+    const stored: unknown = raw ? JSON.parse(raw) : null;
+    if (!isRecord(stored)) return null;
+    const run = parseAssistantRun(stored.run);
+    if (run && readAssistantSession(actor)?.threadId === run.threadId) return { threadId: run.threadId, start: () => Promise.resolve(run) };
+    const request = stored.request;
+    if (!isRecord(request) || typeof request.runId !== 'string' || !UUID_PATTERN.test(request.runId) || typeof request.threadId !== 'string' || !UUID_PATTERN.test(request.threadId) || typeof request.clientRequestId !== 'string' || !UUID_PATTERN.test(request.clientRequestId) || typeof request.message !== 'string' || !request.message.trim() || request.message.length > 4000 || readAssistantSession(actor)?.threadId !== request.threadId) return null;
+    const validRequest = { runId: request.runId, threadId: request.threadId, clientRequestId: request.clientRequestId, message: request.message };
+    return { threadId: validRequest.threadId, start: () => startPersistedRun(actor, validRequest) };
+  } catch { return null; }
+}
+
+function clearPendingRun(actor: AuthUser | null, ref: PendingPageRunRef, pending?: PendingPageRun): void {
+  if (pending && ref.current !== pending) return;
+  ref.current = null;
+  if (actor) try { window.sessionStorage.removeItem(pendingRunKey(actor)); } catch { /* Storage is optional. */ }
+}
+
+function createPendingRun(actor: AuthUser | null, ref: PendingPageRunRef, threadId: string, message: string): PendingPageRun {
+  const { clientRequestId, threadId: runId } = createAssistantIds();
+  const request = { threadId, message, clientRequestId, runId };
+  if (actor) try { window.sessionStorage.setItem(pendingRunKey(actor), JSON.stringify({ request })); } catch { /* Storage is optional. */ }
+  const pending: PendingPageRun = { threadId, start: () => actor ? startPersistedRun(actor, request) : startAssistantRun({ token: getToken(), ...request }) };
+  ref.current = pending;
+  return pending;
 }
 
 type HiddenTaskNotice = { type: 'task-hidden'; actor: { id: string; role: string; teacherId: string | null }; threadId: string };
@@ -260,7 +312,7 @@ export function App() {
   const queryClient = useQueryClient();
   const [token, setToken] = useState(() => getToken());
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [authChecking, setAuthChecking] = useState(() => Boolean(getToken()));
+  const [authChecking, setAuthChecking] = useState(() => Boolean(getToken() || getRefreshToken()));
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const clearUserQueryCache = () => {
     void queryClient.cancelQueries();
@@ -269,7 +321,10 @@ export function App() {
   const onLogin = (accessToken: string, refreshToken: string, loggedInUser: AuthUser) => {
     clearUserQueryCache();
     const previousActor = readStoredActor();
-    if (previousActor) window.sessionStorage.removeItem(assistantSessionKey(previousActor));
+    if (previousActor) { window.sessionStorage.removeItem(assistantSessionKey(previousActor)); window.sessionStorage.removeItem(pendingRunKey(previousActor)); }
+    window.sessionStorage.removeItem(assistantSessionKey(loggedInUser));
+    window.sessionStorage.removeItem(pendingRunKey(loggedInUser));
+    clearSession();
     storeSession(accessToken, refreshToken);
     window.sessionStorage.setItem(ACTOR_SESSION_KEY, JSON.stringify(loggedInUser));
     setAuthNotice(null);
@@ -282,7 +337,7 @@ export function App() {
     const actor = user ?? readStoredActor();
     revokeSession();
     clearSession();
-    if (actor) window.sessionStorage.removeItem(assistantSessionKey(actor));
+    if (actor) { window.sessionStorage.removeItem(assistantSessionKey(actor)); window.sessionStorage.removeItem(pendingRunKey(actor)); }
     window.sessionStorage.removeItem(ACTOR_SESSION_KEY);
     setAuthNotice(null);
     setToken(null);
@@ -302,6 +357,7 @@ export function App() {
       .then((currentActor) => {
         if (!active) return;
         window.sessionStorage.setItem(ACTOR_SESSION_KEY, JSON.stringify(currentActor));
+        setToken(getToken());
         setAuthNotice(null);
         setUser(currentActor);
         setAuthChecking(false);
@@ -330,8 +386,8 @@ export function App() {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
   });
 
-  if (!token) return <LoginPage notice={authNotice} onLogin={onLogin} />;
   if (authChecking) return <main className="login-screen"><p role="status">正在验证登录状态…</p></main>;
+  if (!token) return <LoginPage notice={authNotice} onLogin={onLogin} />;
   if (!user) return <main className="login-screen"><p role="status">{authNotice ?? '正在验证登录状态…'}</p><Button onClick={() => window.location.reload()}>重新加载</Button></main>;
   return (
     <Routes>
@@ -415,19 +471,25 @@ function TaskHistoryPage() {
         {task.data && (previewCursors.length > 0 || task.data.nextPreviewAfter) && <nav aria-label="历史确认单分页"><Button disabled={!previewCursors.length} onClick={() => setPreviewCursors((current) => current.slice(0, -1))}>上一页确认单</Button><Button disabled={!task.data.nextPreviewAfter} onClick={() => { if (task.data?.nextPreviewAfter) setPreviewCursors((current) => [...current, task.data!.nextPreviewAfter!]); }}>更多确认单</Button></nav>}
       </section>
       {workspace && workspace.sources.length > 0 && <section aria-label="数据来源" className="workspace-summary workspace-sources"><strong>数据来源</strong>{workspace.sources.map((source) => <SourceLink key={`${source.type}-${source.id}`} source={source} />)}</section>}
-      {task.data && <div className="task-transcript">{task.data.messages.map((message) => <article className={`task-message ${message.role}`} key={message.id}><header><strong>{message.role === 'user' ? '你' : 'AI 助手'}</strong><time>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(message.createdAt))}</time></header><p>{formatAssistantReply(message.content)}</p></article>)}</div>}
+      {task.data && <div className="task-transcript">{task.data.messages.map((message) => <article aria-label={message.role === 'user' ? '你的消息' : 'AI 助手的消息'} className={`task-message ${message.role}`} key={message.id}><header><time>{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(message.createdAt))}</time></header><p>{formatAssistantReply(message.content)}</p></article>)}</div>}
       {task.data && (pageCursors.length > 0 || task.data.nextBefore) && <nav aria-label="历史消息分页"><Button disabled={!pageCursors.length} onClick={() => setPageCursors((current) => current.slice(0, -1))}>较新消息</Button><Button disabled={!task.data.nextBefore} onClick={() => { if (task.data?.nextBefore) setPageCursors((current) => [...current, task.data!.nextBefore!]); }}>更早消息</Button></nav>}
     </>}
   </section>;
 }
 
+type PendingPageRun = { threadId: string; promise?: ReturnType<typeof startAssistantRun>; start: () => ReturnType<typeof startAssistantRun> };
+function pendingRunPromise(pending: PendingPageRun): ReturnType<typeof startAssistantRun> {
+  return pending.promise ??= pending.start();
+}
+type PendingPageRunRef = { current: PendingPageRun | null };
+
 function StructuredBusinessPage({ section }: { section: 'students' | 'schedule' | 'finance' | 'settings' }) {
-  const { assistantState, user, hiddenTask, hiddenThreads } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string> }>();
+  const { assistantState, user, hiddenTask, hiddenThreads, pendingPageRun } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; pendingPageRun: PendingPageRunRef }>();
   const [resultTarget, setResultTarget] = useState<HTMLDivElement | null>(null);
   const [showResult, setShowResult] = useState(false);
   const [assistantDraft, setAssistantDraft] = useState<{ text: string; revision: number } | null>(null);
   return <ResizableWorkspace className={`business-page-${section}`}>
-    <AssistantCompanion assistantState={assistantState} section={section} user={user} hiddenTask={hiddenTask} hiddenThreads={hiddenThreads} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} onHideResult={() => setShowResult(false)} draft={assistantDraft} />
+    <AssistantCompanion assistantState={assistantState} section={section} user={user} hiddenTask={hiddenTask} hiddenThreads={hiddenThreads} pendingPageRun={pendingPageRun} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} onHideResult={() => setShowResult(false)} draft={assistantDraft} />
     <div aria-label="业务工作区" className="business-workspace panel-surface"><div hidden={showResult}><StructuredWorkbench section={section} role={user?.role ?? ''} onAskAssistant={(text) => setAssistantDraft((current) => ({ text, revision: (current?.revision ?? 0) + 1 }))} /></div><div hidden={!showResult} ref={setResultTarget} /><div hidden={!showResult} className="business-result-actions"><Button onClick={() => setShowResult(false)}>返回业务功能</Button></div></div>
   </ResizableWorkspace>;
 }
@@ -439,7 +501,7 @@ const pageAssistantCopy = {
   settings: { title: '教师与课程', welcome: '在这里维护教师资料、默认薪酬和课程信息，也可以告诉我你想要办理的事项。', suggestions: ['查看教师', '查看课程', '新增课程'] },
 } as const;
 
-function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenThreads, resultTarget, onShowResult, onHideResult, draft }: { assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; resultTarget: HTMLDivElement | null; onShowResult: () => void; onHideResult: () => void; draft: { text: string; revision: number } | null }) {
+function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenThreads, pendingPageRun, resultTarget, onShowResult, onHideResult, draft }: { pendingPageRun: PendingPageRunRef; assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; resultTarget: HTMLDivElement | null; onShowResult: () => void; onHideResult: () => void; draft: { text: string; revision: number } | null }) {
   const copy = pageAssistantCopy[section];
   const queryClient = useQueryClient();
   const initialRef = useRef<PersistedAssistantSession | null>(null);
@@ -448,9 +510,11 @@ function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenT
   const [messages, setMessages] = useState<ConversationMessage[]>(() => initialRef.current?.messages ?? []);
   const [prompt, setPrompt] = useState('');
   const [reply, setReply] = useState('');
-  const [status, setStatus] = useState<'idle' | 'running' | 'waiting' | 'done' | 'failed'>('idle');
+  const [status, setStatus] = useState<'idle' | 'running' | 'waiting' | 'done' | 'failed'>(() => pendingPageRun.current?.threadId === initialRef.current?.threadId ? 'running' : 'idle');
   const [workspace, setWorkspace] = useState<WorkspaceDocument | undefined>(() => initialRef.current?.workspace);
   const [workspaceThreadId, setWorkspaceThreadId] = useState(() => initialRef.current?.workspaceThreadId ?? threadId);
+  const [requireCorePreviewDisplay, setRequireCorePreviewDisplay] = useState(() => initialRef.current?.requireCorePreviewDisplay === true);
+  const [confirmedPreviewIds, setConfirmedPreviewIds] = useState<Set<string>>(() => new Set(initialRef.current?.confirmedPreviewIds ?? []));
   const [previewRecheckVersion, setPreviewRecheckVersion] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
 
@@ -464,13 +528,16 @@ function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenT
 
   useEffect(() => {
     if (hiddenThreads.has(threadId)) return;
-    writeAssistantSession(user, { threadId, messages, ...(workspace ? { workspace, workspaceThreadId } : {}) });
-  }, [hiddenThreads, messages, threadId, user, workspace, workspaceThreadId]);
+    writeAssistantSession(user, { threadId, messages, ...(workspace ? { workspace, workspaceThreadId } : {}), ...(requireCorePreviewDisplay ? { requireCorePreviewDisplay: true } : {}), ...(confirmedPreviewIds.size ? { confirmedPreviewIds: [...confirmedPreviewIds] } : {}) });
+  }, [confirmedPreviewIds, hiddenThreads, messages, requireCorePreviewDisplay, threadId, user, workspace, workspaceThreadId]);
   useEffect(() => () => controllerRef.current?.abort(), []);
   useEffect(() => {
     if (hiddenTask?.threadId !== threadId) return;
+    controllerRef.current?.abort();
+    if (pendingPageRun.current?.threadId === threadId) clearPendingRun(user, pendingPageRun);
     const nextThreadId = createAssistantIds().threadId;
     setThreadId(nextThreadId); setMessages([]);
+    setRequireCorePreviewDisplay(false); setConfirmedPreviewIds(new Set());
     if (workspaceThreadId === threadId) { setWorkspace(undefined); setWorkspaceThreadId(nextThreadId); onHideResult(); }
     setReply(''); setPrompt(''); setStatus('idle');
   }, [hiddenTask, threadId]);
@@ -480,47 +547,65 @@ function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenT
     if (!trimmed) return;
     setMessages((current) => [...current, { id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`, role, text: trimmed }]);
   };
-  const send = async (text: string) => {
+  const attachRun = async (pending: PendingPageRun, controller: AbortController) => {
+    let streamedReply = '';
+    let terminal = false;
+    try {
+      const run = await pendingRunPromise(pending);
+      if (controller.signal.aborted || hiddenThreads.has(pending.threadId) || pendingPageRun.current !== pending) return;
+      await streamAssistantEvents({ token: getToken(), run, signal: controller.signal, onEvent: (event) => {
+        if (controller.signal.aborted || hiddenThreads.has(pending.threadId) || pendingPageRun.current !== pending) return true;
+        if (event.type === 'assistant.delta') { streamedReply += event.text; setReply(streamedReply); }
+        if (event.type === 'assistant.message') { streamedReply = event.markdown; setReply(streamedReply); }
+        if (event.type === 'workspace.replace') { setWorkspace(event.document); setWorkspaceThreadId(pending.threadId); onShowResult(); }
+        if (event.type === 'clarification.requested') { append('assistant', event.question); streamedReply = ''; setReply(''); setStatus('waiting'); terminal = true; return true; }
+        if (event.type === 'run.failed') { append('assistant', event.message); streamedReply = ''; setReply(''); setStatus('failed'); terminal = true; return true; }
+        if (event.type === 'run.completed') { if (streamedReply) append('assistant', streamedReply); streamedReply = ''; setReply(''); setStatus('done'); terminal = true; return true; }
+        return false;
+      } });
+      if (!terminal && !controller.signal.aborted) throw new Error('事件连接已结束，但运行没有返回完成状态。请稍后重试。');
+      if (terminal) clearPendingRun(user, pendingPageRun, pending);
+    } catch (error) {
+      if (!controller.signal.aborted && !hiddenThreads.has(pending.threadId) && pendingPageRun.current === pending) {
+        append('assistant', `${error instanceof Error ? error.message : '暂时无法连接助手。'} 请刷新页面恢复当前回复。`); setStatus('failed'); setPreviewRecheckVersion((current) => current + 1);
+      }
+    }
+  };
+  useEffect(() => {
+    const pending = pendingPageRun.current;
+    if (!pending || pending.threadId !== threadId || hiddenThreads.has(threadId)) return;
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setStatus('running');
+    void attachRun(pending, controller);
+    return () => controller.abort();
+  }, []);
+  const send = (text: string) => {
     const message = text.trim();
-    if (!message || status === 'running') return;
+    if (!message || status === 'running' || pendingPageRun.current) return;
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
     append('user', message);
     setPrompt(''); setReply(''); setStatus('running');
-    let streamedReply = '';
-    try {
-      const { clientRequestId } = createAssistantIds();
-      const run = await startAssistantRun({ token: getToken(), message, threadId, clientRequestId });
-      if (hiddenThreads.has(threadId)) return;
-      await streamAssistantEvents({ token: getToken(), run, signal: controller.signal, onEvent: (event) => {
-        if (hiddenThreads.has(threadId)) return true;
-        if (event.type === 'assistant.delta') { streamedReply += event.text; setReply(streamedReply); }
-        if (event.type === 'assistant.message') { streamedReply = event.markdown; setReply(streamedReply); }
-        if (event.type === 'workspace.replace') { setWorkspace(event.document); setWorkspaceThreadId(threadId); onShowResult(); }
-        if (event.type === 'clarification.requested') { append('assistant', event.question); streamedReply = ''; setReply(''); setStatus('waiting'); return true; }
-        if (event.type === 'run.failed') { append('assistant', event.message); streamedReply = ''; setReply(''); setStatus('failed'); return true; }
-        if (event.type === 'run.completed') { if (streamedReply) append('assistant', streamedReply); streamedReply = ''; setReply(''); setStatus('done'); return true; }
-        return false;
-      } });
-    } catch (error) {
-      if (!controller.signal.aborted && !hiddenThreads.has(threadId)) { append('assistant', error instanceof Error ? error.message : '暂时无法连接助手。'); setStatus('failed'); setPreviewRecheckVersion((current) => current + 1); }
-    }
+    const pending = createPendingRun(user, pendingPageRun, threadId, message);
+    void attachRun(pending, controller);
   };
+  const isPending = status === 'running' || pendingPageRun.current?.threadId === threadId;
   const selectCandidate = (candidateId: string, taskVersion?: number) => {
-    if (status === 'running' || workspaceThreadId !== threadId || !workspace?.blocks.some((block) => block.type === 'entity-picker' && block.candidates.some((candidate) => candidate.id === candidateId))) return;
+    if (isPending || workspaceThreadId !== threadId || !workspace?.blocks.some((block) => block.type === 'entity-picker' && block.candidates.some((candidate) => candidate.id === candidateId))) return;
     void send(`选择候选:${candidateId}${typeof taskVersion === 'number' ? `:${taskVersion}` : ''}`);
   };
   const recoverWorkspace = (action: RecoveryAction) => {
-    if (status !== 'running') void send(action === 'refresh' ? '刷新当前结果' : '重新生成预览');
+    if (!isPending) void send(action === 'refresh' ? '刷新当前结果' : '重新生成预览');
   };
   const visibleMessages = messages.slice(-8);
   return <section aria-label={`${copy.title}经营助手`} className="page-assistant panel-surface">
     <div className="page-assistant-head"><div><span className="eyebrow">AI OPERATING ASSISTANT</span><Title level={2}>{copy.title}</Title></div><span className={`assistant-availability ${assistantState.data?.available ? 'is-online' : ''}`}>{assistantState.data?.available ? '在线' : '暂不可用'}</span></div>
-    <div className="page-chat-stream"><div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{copy.welcome}</p></div>{visibleMessages.map((message) => <div className={`chat-message ${message.role}`} key={message.id}><span className="chat-avatar">{message.role === 'user' ? (user?.username.slice(0, 1).toUpperCase() || '你') : 'AI'}</span><p>{formatAssistantReply(message.text)}</p></div>)}{reply && <div className="chat-message assistant"><span className="chat-avatar">AI</span><p>{formatAssistantReply(reply)}</p></div>}</div>
+    <div className="page-chat-stream"><div aria-label="AI 助手的消息" className="chat-message assistant" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><p>{copy.welcome}</p></div>{visibleMessages.map((message) => <div aria-label={message.role === 'user' ? '你的消息' : 'AI 助手的消息'} className={`chat-message ${message.role}`} key={message.id} role="group">{message.role === 'assistant' && <span aria-hidden="true" className="chat-avatar">AI</span>}<p>{formatAssistantReply(message.text)}</p></div>)}{reply && <div aria-label="AI 助手的消息" className="chat-message assistant" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><p>{formatAssistantReply(reply)}</p></div>}</div>
     {workspace && <button className="workspace-result-link" onClick={onShowResult} type="button">查看本次对话结果 →</button>}
-    {workspace && resultTarget && createPortal(<section aria-label="AI 工作区结果" className="business-ai-workspace"><div className="context-heading"><div><span className="eyebrow">CURRENT TASK</span><Title level={3}>本次对话结果</Title></div></div><WorkspaceContent document={workspace} interactionDisabled={status === 'running' || workspaceThreadId !== threadId} isCurrentWorkspace={workspaceThreadId === threadId} onCandidateSelect={selectCandidate} onPreviewConfirmed={() => { void queryClient.invalidateQueries(); }} onRecoveryAction={recoverWorkspace} previewRecheckVersion={previewRecheckVersion} /></section>, resultTarget)}
-    <div className="page-chat-composer"><div className="page-quick-prompts">{copy.suggestions.map((item) => <button disabled={status === 'running'} key={item} onClick={() => setPrompt(item)} type="button">{item}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void send(prompt); }}><TextArea aria-label={`${copy.title}经营问题`} autoSize={{ minRows: 2, maxRows: 4 }} disabled={status === 'running'} onChange={(event) => setPrompt(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(prompt); } }} placeholder="直接描述你想查询或办理的事情…" value={prompt} /><Button disabled={!prompt.trim() || status === 'running'} htmlType="submit" type="primary">{status === 'running' ? '处理中…' : '发送 ↑'}</Button></form></div>
+    {workspace && resultTarget && createPortal(<section aria-label="AI 工作区结果" className="business-ai-workspace"><div className="context-heading"><div><span className="eyebrow">CURRENT TASK</span><Title level={3}>本次对话结果</Title></div></div><WorkspaceContent document={workspace} interactionDisabled={isPending || workspaceThreadId !== threadId} isCurrentWorkspace={workspaceThreadId === threadId} onCandidateSelect={selectCandidate} onPreviewConfirmed={(previewId) => { setConfirmedPreviewIds((current) => new Set(current).add(previewId)); void queryClient.invalidateQueries(); }} onRecoveryAction={recoverWorkspace} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCorePreviewDisplay} /></section>, resultTarget)}
+    <div className="page-chat-composer"><div className="page-quick-prompts">{copy.suggestions.map((item) => <button disabled={isPending} key={item} onClick={() => setPrompt(item)} type="button">{item}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void send(prompt); }}><TextArea aria-label={`${copy.title}经营问题`} autoSize={{ minRows: 2, maxRows: 4 }} disabled={isPending} onChange={(event) => setPrompt(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(prompt); } }} placeholder="直接描述你想查询或办理的事情…" value={prompt} /><Button disabled={!prompt.trim() || isPending} htmlType="submit" type="primary">{isPending ? '处理中…' : '发送 ↑'}</Button></form></div>
   </section>;
 }
 
@@ -584,6 +669,7 @@ function LoginPage({ onLogin, notice }: { onLogin: (token: string, refreshToken:
 function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthUser | null }) {
   const queryClient = useQueryClient();
   const hiddenThreads = useRef(new Set<string>());
+  const [pendingPageRun] = useState<PendingPageRunRef>(() => ({ current: restorePendingRun(user) }));
   const [hiddenTask, setHiddenTask] = useState<HiddenTaskUpdate>(null);
   const [workspace, setWorkspaceState] = useState<WorkspaceState | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -614,6 +700,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
           const response = await sendAuthorized(`/api/assistant/tasks/${encodeURIComponent(threadId)}`);
           if (!active || !token || token !== getToken() || response.status !== 404) return;
           hiddenThreads.current.add(threadId);
+          if (pendingPageRun.current?.threadId === threadId) clearPendingRun(user, pendingPageRun);
           setHiddenTask({ threadId, hiddenThreads: hiddenThreads.current });
           setWorkspaceState(current => current?.threadId === threadId ? null : current);
           try {
@@ -681,7 +768,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
             <Button aria-label="退出登录" ghost onClick={onLogout} size="small">退出</Button>
           </div>
         </aside>
-        <main className="main-column"><Outlet context={{ assistantState, onLogout, user, hiddenTask, hiddenThreads: hiddenThreads.current, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction }} /></main>
+        <main className="main-column"><Outlet context={{ assistantState, onLogout, user, hiddenTask, hiddenThreads: hiddenThreads.current, pendingPageRun, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction }} /></main>
         {isAssistantWorkspace && <aside aria-label="经营工作区" className="context-panel panel-surface"><ContextPanel
           activeThreadId={activeThreadId}
           interactionDisabled={workspaceInteractionDisabled}
@@ -713,12 +800,13 @@ function WorkspaceHome() {
   const [reply, setReply] = useState('');
   const [clarification, setClarification] = useState('');
   const [runError, setRunError] = useState('');
-  const { assistantState, onLogout, user, hiddenTask, hiddenThreads, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction } = useOutletContext<{
+  const { assistantState, onLogout, user, hiddenTask, hiddenThreads, pendingPageRun, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction } = useOutletContext<{
     assistantState: ReturnType<typeof useAssistantState>;
     onLogout: () => void;
     user: AuthUser | null;
     hiddenTask: HiddenTaskUpdate;
     hiddenThreads: Set<string>;
+    pendingPageRun: PendingPageRunRef;
     setWorkspace: (workspace: WorkspaceDocument | null, threadId?: string, requireCoreDisplay?: boolean) => void;
     setActiveThreadId: (threadId: string | null) => void;
     setWorkspaceInteractionDisabled: (disabled: boolean) => void;
@@ -740,7 +828,7 @@ function WorkspaceHome() {
   const replyRef = useRef('');
   const clearingRef = useRef(false);
   const isUnavailable = assistantState.isError || !assistantState.data?.available;
-  const isBusy = runStatus === 'connecting' || runStatus === 'queued' || runStatus === 'running';
+  const isBusy = runStatus === 'connecting' || runStatus === 'queued' || runStatus === 'running' || pendingPageRun.current?.threadId === threadId;
   useEffect(() => {
     setWorkspaceInteractionDisabled(isBusy);
     return () => setWorkspaceInteractionDisabled(false);
@@ -817,56 +905,62 @@ function WorkspaceHome() {
     return false;
   };
 
-  const submitMessage = async (message: string, force = false): Promise<boolean> => {
-    const normalizedMessage = message.trim();
-    if (!normalizedMessage || (!force && isBusy)) return false;
-    controllerRef.current?.abort();
-    const controller = new AbortController();
-    controllerRef.current = controller;
-    appendMessage('user', normalizedMessage);
-    setPrompt('');
-    setRunStatus('connecting');
-    setRunId('');
-    updateReply('');
-    setClarification('');
-    setRunError('');
+  const attachRun = async (pending: PendingPageRun, controller: AbortController): Promise<boolean> => {
     try {
-      const { clientRequestId } = createAssistantIds();
-      const run = await startAssistantRun({ token: getToken(), message: normalizedMessage, threadId, clientRequestId });
-      if (hiddenThreads.has(threadId)) return false;
+      const run = await pendingRunPromise(pending);
+      if (controller.signal.aborted || hiddenThreads.has(pending.threadId) || pendingPageRun.current !== pending) return false;
       setRunId(run.runId);
-      setRunStatus(run.status);
-      if (run.status === 'completed' || run.status === 'failed') setRunStatus('running');
+      setRunStatus(run.status === 'completed' || run.status === 'failed' ? 'running' : run.status);
       let receivedFinalEvent = false;
       let hasErrorRecovery = false;
       let completedSuccessfully = false;
       await streamAssistantEvents({
-        token: getToken(),
-        run,
-        signal: controller.signal,
+        token: getToken(), run, signal: controller.signal,
         onEvent: (assistantEvent) => {
-          if (hiddenThreads.has(threadId)) return true;
+          if (controller.signal.aborted || hiddenThreads.has(pending.threadId) || pendingPageRun.current !== pending) return true;
           if (isTerminalAssistantEvent(assistantEvent) || assistantEvent.type === 'clarification.requested') receivedFinalEvent = true;
           if (assistantEvent.type === 'workspace.replace' && assistantEvent.document.blocks.some((block) => block.type === 'error-recovery')) hasErrorRecovery = true;
           if (assistantEvent.type === 'run.completed') completedSuccessfully = true;
           return handleEvent(assistantEvent);
         },
       });
-      if (hiddenThreads.has(threadId)) return false;
-      if (!receivedFinalEvent && !controller.signal.aborted) {
+      if (controller.signal.aborted || hiddenThreads.has(pending.threadId) || pendingPageRun.current !== pending) return false;
+      if (!receivedFinalEvent) {
         setRunStatus('connection_failed');
-        setRunError('事件连接已结束，但运行没有返回完成状态。可以稍后重试。');
+        setRunError('事件连接已结束，但运行没有返回完成状态。请刷新页面恢复当前回复。');
         setPreviewRecheckVersion((current) => current + 1);
         return false;
       }
+      clearPendingRun(user, pendingPageRun, pending);
       return completedSuccessfully && !hasErrorRecovery;
     } catch (cause) {
-      if (controller.signal.aborted || hiddenThreads.has(threadId)) return false;
+      if (controller.signal.aborted || hiddenThreads.has(pending.threadId) || pendingPageRun.current !== pending) return false;
       setRunStatus('connection_failed');
-      setRunError(cause instanceof Error ? cause.message : '无法连接 AI 助手，请检查网络后重试。');
+      setRunError(`${cause instanceof Error ? cause.message : '无法连接 AI 助手。'} 请刷新页面恢复当前回复。`);
       setPreviewRecheckVersion((current) => current + 1);
       return false;
     }
+  };
+  useEffect(() => {
+    const pending = pendingPageRun.current;
+    if (!pending || pending.threadId !== threadId || hiddenThreads.has(threadId)) return;
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setRunStatus('connecting');
+    void attachRun(pending, controller);
+    return () => controller.abort();
+  }, []);
+
+  const submitMessage = async (message: string, force = false): Promise<boolean> => {
+    const normalizedMessage = message.trim();
+    if (!normalizedMessage || (!force && isBusy)) return false;
+    controllerRef.current?.abort();
+    if (force && pendingPageRun.current) clearPendingRun(user, pendingPageRun);
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    appendMessage('user', normalizedMessage);
+    setPrompt(''); setRunStatus('connecting'); setRunId(''); updateReply(''); setClarification(''); setRunError('');
+    return attachRun(createPendingRun(user, pendingPageRun, threadId, normalizedMessage), controller);
   };
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -897,6 +991,7 @@ function WorkspaceHome() {
   }), [isBusy, registerRecoveryAction, submitMessage]);
 
   const resetConversation = () => {
+    clearPendingRun(user, pendingPageRun);
     const newThreadId = createAssistantIds().threadId;
     setThreadId(newThreadId);
     setMessages([]);
@@ -917,6 +1012,7 @@ function WorkspaceHome() {
 
   useEffect(() => {
     if (hiddenTask?.threadId !== threadId) return;
+    if (pendingPageRun.current?.threadId === threadId) clearPendingRun(user, pendingPageRun);
     const nextThreadId = createAssistantIds().threadId;
     setThreadId(nextThreadId);
     setMessages([]);
@@ -957,11 +1053,11 @@ function WorkspaceHome() {
       <Card className="prompt-card" variant="borderless">
         <div className="card-heading"><div><span className="eyebrow">OPERATING THREAD</span><Title level={3}>今天先处理什么？</Title></div><span className={`assistant-availability ${isUnavailable ? '' : 'is-online'}`}>{isUnavailable ? '暂不可用' : '在线'}</span></div>
         <section aria-label="对话历史" className="conversation-history home-conversation">
-          {messages.length === 0 && <div className="conversation-message conversation-message-assistant welcome-message"><span className="chat-avatar">AI</span><div><strong>AI 助手</strong><p>{user?.role === 'TEACHER' ? '早上好。你可以查看自己的课表，办理调课、请假或确认上课。' : '早上好。你可以直接查询今天的排课、本月经营情况，或办理学生账户和日常经营事项。'}</p></div></div>}
-          {messages.map((message) => <div className={`conversation-message conversation-message-${message.role}`} key={message.id}>
-            <span className="chat-avatar">{message.role === 'user' ? (user?.username.slice(0, 1).toUpperCase() || '你') : 'AI'}</span><div><strong>{message.role === 'user' ? '你' : 'AI 助手'}</strong><p>{formatAssistantReply(message.text)}</p></div>
+          {messages.length === 0 && <div aria-label="AI 助手的消息" className="conversation-message conversation-message-assistant welcome-message" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><div><p>{user?.role === 'TEACHER' ? '早上好。你可以查看自己的课表，办理调课、请假或确认上课。' : '早上好。你可以直接查询今天的排课、本月经营情况，或办理学生账户和日常经营事项。'}</p></div></div>}
+          {messages.map((message) => <div aria-label={message.role === 'user' ? '你的消息' : 'AI 助手的消息'} className={`conversation-message conversation-message-${message.role}`} key={message.id} role="group">
+            {message.role === 'assistant' && <span aria-hidden="true" className="chat-avatar">AI</span>}<div><p>{formatAssistantReply(message.text)}</p></div>
           </div>)}
-          {reply && <div className="conversation-message conversation-message-assistant"><span className="chat-avatar">AI</span><div><strong>AI 助手</strong><p aria-live="polite">{formatAssistantReply(reply)}</p></div></div>}
+          {reply && <div aria-label="AI 助手的消息" className="conversation-message conversation-message-assistant" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><div><p aria-live="polite">{formatAssistantReply(reply)}</p></div></div>}
         </section>
         <div className="suggestion-row" aria-label="示例入口"><span className="suggestion-label">可以从这里开始</span>{(user?.role === 'TEACHER' ? ['查看今日排课', '查看明天排课', '查看我的课程业绩'] : suggestions).map((suggestion) => <button className="suggestion-button" disabled={isBusy} key={suggestion} onClick={() => setPrompt(suggestion)} type="button">{suggestion}</button>)}</div>
         <form onSubmit={submit}>
@@ -1054,15 +1150,21 @@ function WorkspaceContent({ document, interactionDisabled, isCurrentWorkspace, o
   requireCoreDisplay?: boolean;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const taskVersion = typeof (document as WorkspaceWithTaskVersion).taskVersion === 'number' && Number.isInteger((document as WorkspaceWithTaskVersion).taskVersion)
     ? (document as WorkspaceWithTaskVersion).taskVersion
     : undefined;
+  const hasPreview = document.blocks.some((block) => block.type === 'action-preview');
+  const recoveryPath=recoveryDestination(location.pathname,document.blocks.flatMap(block=>block.type==='action-preview'?[block.actionType]:[]));
   return <div aria-label="工作区内容" className="live-workspace">
       <Title className="live-workspace-title" level={5}>{document.title}</Title>
       {document.blocks.map((block, index) => {
-        if (block.type === 'summary') return <section className="workspace-summary" key={`summary-${index}`}><strong>{block.title}</strong><p>{block.text}</p></section>;
+        if (block.type === 'summary') {
+          if (hasPreview && block.title === document.title && block.text === '请核对对象与变更，确认后才生效。') return null;
+          return <section className="workspace-summary" key={`summary-${index}`}><strong>{block.title}</strong><p>{block.text}</p></section>;
+        }
         if (block.type === 'entity-picker') return <section aria-label="候选实体" className="workspace-summary entity-picker" key={`entity-picker-${index}`}><strong>{block.title}</strong><div className="entity-candidates">{block.candidates.map((candidate) => <button aria-label={`选择候选：${candidate.label}`} className="entity-candidate" disabled={!isCurrentWorkspace || interactionDisabled} key={candidate.id} onClick={() => { if (!interactionDisabled) onCandidateSelect(candidate.id, taskVersion); }} type="button"><span>{candidate.label}</span>{candidate.description && <small>{candidate.description}</small>}</button>)}</div></section>;
-        if (block.type === 'data-table') return <div className="workspace-table-wrap" key={`table-${index}`}><table aria-label="查询结果" className="workspace-table"><thead><tr>{block.columns.map((column) => <th key={column.key} scope="col">{column.label}</th>)}</tr></thead><tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{block.columns.map((column) => <td key={column.key}>{String(row[column.key] ?? '—')}</td>)}</tr>)}</tbody></table></div>;
+        if (block.type === 'data-table') return hasPreview && block.rows.length === 0 ? null : <div className="workspace-table-wrap" key={`table-${index}`}><table aria-label="查询结果" className="workspace-table"><thead><tr>{block.columns.map((column) => <th key={column.key} scope="col">{column.label}</th>)}</tr></thead><tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{block.columns.map((column) => <td key={column.key}>{String(row[column.key] ?? '—')}</td>)}</tr>)}</tbody></table></div>;
         if (block.type === 'calendar') return <section aria-label="排课日历" className="workspace-summary workspace-calendar" key={`calendar-${index}`}><strong>排课日历</strong><p>{formatDateTime(block.rangeStart)} 至 {formatDateTime(block.rangeEnd)}</p><div className="calendar-events">{block.events.map((event) => <div className="calendar-event" key={event.id}><strong>{event.title}</strong><span>{formatDateTime(event.start)} — {formatDateTime(event.end)}</span></div>)}</div></section>;
         if (block.type === 'alert-list') return <div aria-label="经营提醒" className="workspace-alerts" key={`alerts-${index}`}>
           {block.alerts.map((alert, alertIndex) => <Alert key={`${alert.title}-${alertIndex}`} message={alert.title} description={alert.detail} showIcon type={alert.severity} />)}
@@ -1073,8 +1175,8 @@ function WorkspaceContent({ document, interactionDisabled, isCurrentWorkspace, o
         if (block.type === 'ledger-detail') return <section aria-label="流水明细" className="workspace-summary ledger-detail" key={`ledger-${index}`}><strong>流水明细</strong><p>账户：{block.accountId}</p>{block.entries.map((entry) => <div className="ledger-entry" key={entry.id}><div><strong>{entry.description}</strong><span>{formatDateTime(entry.occurredAt)}</span></div><span>实收 {entry.paidDelta} · 赠送 {entry.giftDelta}</span></div>)}</section>;
         if (block.type === 'calculation-breakdown') return <section aria-label="金额计算" className="workspace-summary" key={`calculation-${index}`}><strong>{block.title}</strong>{block.lines.map((line) => <p key={line.label}>{line.label}：¥{line.amount}</p>)}<p><strong>合计：¥{block.total}</strong></p></section>;
         if (block.type === 'receipt') return <ReceiptBlockView block={block} key={`receipt-${index}`} />;
-        if (block.type === 'action-preview') return <PreviewConfirmationCard interactionDisabled={interactionDisabled} key={block.previewId} onConfirmed={onPreviewConfirmed} preview={block} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCoreDisplay} />;
-        if (block.type === 'error-recovery') return <section aria-label="错误恢复" className="workspace-summary error-recovery" key={`error-${index}`}><Alert message={block.message} showIcon type="error" /><div className="recovery-actions">{block.actions.map((action) => <button className="recovery-action" disabled={interactionDisabled} key={action} onClick={() => { if (action === 'open-structured-page') navigate('/finance'); else onRecoveryAction(action); }} type="button">{action === 'refresh' ? '刷新结果' : action === 'repreview' ? '重新生成预览' : '打开结构化页面'}</button>)}</div></section>;
+        if (block.type === 'action-preview') return <PreviewConfirmationCard interactionDisabled={interactionDisabled} key={block.previewId} onConfirmed={onPreviewConfirmed} preview={block} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCoreDisplay} workspaceTitle={document.title} />;
+        if (block.type === 'error-recovery') return <section aria-label="错误恢复" className="workspace-summary error-recovery" key={`error-${index}`}><Alert message={block.message} showIcon type="error" /><div className="recovery-actions">{block.actions.filter(action=>action!=='open-structured-page'||recoveryPath).map((action) => <button className="recovery-action" disabled={interactionDisabled} key={action} onClick={() => { if (action === 'open-structured-page' && recoveryPath) navigate(recoveryPath); else onRecoveryAction(action); }} type="button">{action === 'refresh' ? '刷新结果' : action === 'repreview' ? '重新生成预览' : '打开业务页面'}</button>)}</div></section>;
         return null;
       })}
       {document.sources.length > 0 && <section aria-label="数据来源" className="workspace-summary workspace-sources"><strong>数据来源</strong>{document.sources.map((source) => <SourceLink key={`${source.type}-${source.id}`} source={source} />)}</section>}
@@ -1097,7 +1199,18 @@ function SourceLink({ source }: { source: WorkspaceDocument['sources'][number] }
 
 type PreviewCardData = Pick<Extract<WorkspaceBlock, { type: 'action-preview' }>, 'type' | 'previewId' | 'actionType' | 'schemaVersion' | 'riskLevel' | 'title'> & { expiresAt?: string };
 
-function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, onConfirmed, preview, previewRecheckVersion, requireCoreDisplay }: { confirmAllowed?: boolean; interactionDisabled: boolean; onConfirmed: PreviewConfirmationHandler; preview: PreviewCardData; previewRecheckVersion: number; requireCoreDisplay: boolean }) {
+function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, onConfirmed, preview, previewRecheckVersion, requireCoreDisplay, workspaceTitle }: { confirmAllowed?: boolean; interactionDisabled: boolean; onConfirmed: PreviewConfirmationHandler; preview: PreviewCardData; previewRecheckVersion: number; requireCoreDisplay: boolean; workspaceTitle?: string }) {
+  const uncertaintyKey = `pianomanager.assistant.confirmation-unknown.v1:${preview.previewId}`;
+  const uncertainRef = useRef(false);
+  const setUncertain = (value: boolean) => {
+    uncertainRef.current = value;
+    try {
+      if (value) window.sessionStorage.setItem(uncertaintyKey, '1');
+      else window.sessionStorage.removeItem(uncertaintyKey);
+    } catch {
+      // Keep the current card read-only even when browser storage is unavailable.
+    }
+  };
   const [status, setStatus] = useState<'unknown' | 'loading' | 'pending' | 'confirming' | 'executed' | 'cancelled' | 'stale' | 'expired' | 'failed' | 'mismatch'>('unknown');
   const [message, setMessage] = useState('');
   const [receipt, setReceipt] = useState<Record<string, unknown> | null>(null);
@@ -1117,11 +1230,13 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
     setCoreActionType(current.actionType);
     setCoreExpiresAt(current.expiresAt);
     if (current.status === 'EXECUTED') {
+      setUncertain(false);
       setStatus('executed');
       setMessage('已确认并执行。');
       onConfirmedRef.current(current.previewId);
       return;
     }
+    if (current.status !== 'PENDING') setUncertain(false);
     const metadataMismatch = current.actionType !== preview.actionType || current.schemaVersion !== preview.schemaVersion || current.riskLevel !== preview.riskLevel;
     if (current.status === 'PENDING' && metadataMismatch) {
       setStatus('mismatch');
@@ -1133,6 +1248,11 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
       setMessage('系统未提供当前确认内容，已禁止确认。请重新生成确认单。');
       return;
     }
+    if (current.status === 'PENDING' && uncertainRef.current) {
+      setStatus('unknown');
+      setMessage('确认结果仍未知，当前只能继续重查状态。');
+      return;
+    }
     const locallyExpired = current.status === 'PENDING' && Date.parse(current.expiresAt) <= Date.now();
     setStatus(locallyExpired ? 'expired' : current.status.toLowerCase() as 'pending' | 'cancelled' | 'expired' | 'stale');
     setMessage(current.status === 'PENDING' && !confirmAllowed ? '历史待确认步骤仅供查看，不能直接执行。' : '');
@@ -1140,6 +1260,7 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
 
   useEffect(() => {
     let active = true;
+    try { uncertainRef.current ||= window.sessionStorage.getItem(uncertaintyKey) === '1'; } catch { /* Retain the in-memory state. */ }
     setStatus('loading');
     setMessage('');
     setReceipt(null);
@@ -1180,10 +1301,12 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
       return;
     }
     confirmingRef.current = true;
+    setUncertain(true);
     setStatus('confirming');
     setMessage('');
     try {
       const result = await confirmAssistantPreview({ token: getToken(), previewId: preview.previewId, idempotencyKey });
+      setUncertain(false);
       setReceipt(result.receipt);
       setStatus('executed');
       setMessage('已确认并执行。');
@@ -1194,6 +1317,7 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
         setMessage(cause.message);
         return;
       }
+      setUncertain(false);
       setStatus('failed');
       setMessage(cause instanceof Error ? cause.message : '确认失败，请稍后重试。');
     } finally {
@@ -1202,25 +1326,15 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
   };
   const statusMessage = status === 'mismatch' ? message : status === 'pending' && !confirmAllowed ? message : status === 'cancelled' ? '预览已取消，未执行任何操作。' : status === 'stale' ? '预览已失效，未执行任何操作。请重新生成预览。' : status === 'expired' ? '预览已过期，未执行任何操作。请重新生成预览。' : undefined;
   const canShowDetails = !requireCoreDisplay || corePreviewRead;
-  const currentExpiresAt = coreExpiresAt ?? (!requireCoreDisplay ? preview.expiresAt ?? null : null);
+  const displayTitle = typeof coreDisplay?.title === 'string' ? coreDisplay.title : preview.title;
   return <section aria-label="操作预览" className="workspace-summary preview-card">
     {canShowDetails ? <>
-      <strong>{typeof coreDisplay?.title === 'string' ? coreDisplay.title : preview.title}</strong>
-      <p className="preview-guidance">确认前请核对预览内容；确认后才会写入真实业务数据。</p>
+      <div className="preview-card-heading">{displayTitle !== workspaceTitle && <strong>{displayTitle}</strong>}<span className={`preview-status ${status === 'executed' ? 'is-complete' : ''}`}>{status === 'executed' ? '已完成' : '操作确认'}</span></div>
+      {status !== 'executed' && <p className="preview-guidance">请核对以下信息，确认后生效。</p>}
       {coreDisplay && <section aria-label="当前确认单内容" className="preview-core-display">
         {typeof coreDisplay.summary === 'string' && <p>{coreDisplay.summary}</p>}
         <PreviewFacts value={coreDisplay} actionType={coreActionType ?? preview.actionType} />
       </section>}
-      {currentExpiresAt && <p className="preview-expiry">有效期至 {formatDateTime(currentExpiresAt)}</p>}
-      <details className="preview-technical-details">
-        <summary>查看技术详情</summary>
-        <dl>
-          <div className="receipt-row"><dt>动作类型</dt><dd>{preview.actionType}</dd></div>
-          <div className="receipt-row"><dt>数据版本</dt><dd>{preview.schemaVersion}</dd></div>
-          <div className="receipt-row"><dt>风险代码</dt><dd>{preview.riskLevel}</dd></div>
-          <div className="receipt-row"><dt>预览编号</dt><dd>{preview.previewId}</dd></div>
-        </dl>
-      </details>
       {status === 'loading' && <Alert className="preview-alert" message="正在核对系统当前确认单…" showIcon type="info" />}
       {status === 'unknown' && <Alert className="preview-alert" message={message || '无法读取预览当前状态，尚未确认。'} showIcon type="warning" />}
     </> : <Alert className="preview-alert" message={status === 'loading' ? '正在核对系统当前确认单…' : message || '暂时无法读取当前确认单，请稍后重查。'} showIcon type={status === 'loading' ? 'info' : 'warning'} />}
@@ -1242,7 +1356,7 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
           setStatus('unknown');
           setMessage(cause instanceof Error ? cause.message : '无法读取预览当前状态，请稍后重查。');
         });
-      }} type="default">重查预览状态</Button> : (status === 'pending' || status === 'failed' || status === 'confirming') && confirmAllowed && <Button danger={preview.riskLevel === 'L2'} disabled={interactionDisabled || status === 'confirming'} loading={status === 'confirming'} onClick={confirm} type="primary">
+      }} type="default">重查预览状态</Button> : (status === 'pending' || status === 'failed' || status === 'confirming') && confirmAllowed && <Button danger={/refund|reversal|cancel|reopen/u.test(preview.actionType)} disabled={interactionDisabled || status === 'confirming'} loading={status === 'confirming'} onClick={confirm} type="primary">
         {status === 'failed' ? '重试确认' : preview.riskLevel === 'L2' ? '确认并登记' : '确认执行'}
       </Button>}
       {status === 'mismatch' && <Button disabled type="default">确认单信息不一致</Button>}
@@ -1256,20 +1370,8 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
 function ReceiptBlockView({ block }: { block: Extract<WorkspaceBlock, { type: 'receipt' }> }) {
   return <section aria-label="业务回执" className="workspace-summary receipt-block">
     <strong>{block.title}</strong>
-    <p>回执编号：{block.receiptId}</p>
     <p>状态：{block.status === 'succeeded' ? '成功' : '失败'} · 时间：{formatDateTime(block.occurredAt)}</p>
   </section>;
-}
-
-function receiptValue(value: unknown): string {
-  if (value === null) return 'null';
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
-  try {
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? String(value) : serialized;
-  } catch {
-    return '[无法展示]';
-  }
 }
 
 function ReceiptResult({ receipt }: { receipt: Record<string, unknown> | null }) {
@@ -1289,7 +1391,6 @@ function ReceiptResult({ receipt }: { receipt: Record<string, unknown> | null })
     <strong>执行回执</strong>
     {entries.length === 0 ? <p>操作返回了空执行回执。</p> : <>
       {visible.length ? <dl>{visible.map(({label,value}) => <div className="receipt-row" key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : <p>登记已完成，可到对应业务页面查看记录。</p>}
-      <details className="preview-technical-details"><summary>查看回执技术详情</summary><dl>{entries.filter(([key]) => !labels[key] && key !== 'balanceAfter').map(([key,value]) => <div className="receipt-row" key={key}><dt>{key}</dt><dd>{receiptValue(value)}</dd></div>)}</dl></details>
     </>}
   </section>;
 }

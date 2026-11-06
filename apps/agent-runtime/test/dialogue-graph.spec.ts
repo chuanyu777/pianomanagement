@@ -4,12 +4,13 @@ import { createDialogueGraph, type DialogueResult } from '../src/graph/dialogue-
 import { CoreDialogueError } from '../src/tools/dialogue-tools.js';
 import type { DialogueIntent } from '../src/graph/dialogue-intent.js';
 import type { DialogueMultiStepPlan } from '../src/graph/dialogue-multi-step.js';
+import { createIntentParser } from '../src/graph/intent-parser.js';
 
 const accountId = '49fbcf47-c616-468a-a058-cdca1ee66025';
 const lessonId = 'f77d8168-5d57-4e81-9c32-11e22e42b81c';
 const teacherId = 'd301e0d7-c44a-463d-b124-8fbdf2ac0d90';
 function intent(operation: DialogueIntent['operation'], fields: Record<string, string | null>, mode: DialogueIntent['mode'] = 'new'): DialogueIntent { return { mode, operation, fields, question: null }; }
-function setup(intents: DialogueIntent[], multiStep?: DialogueMultiStepPlan | null) {
+function setup(intents: DialogueIntent[], multiStep?: DialogueMultiStepPlan | null, initial?: unknown, intentParser?: ReturnType<typeof createIntentParser>) {
   const tools = {
     checkActionAccess: vi.fn().mockResolvedValue({ allowed: true }),
     getDashboardSummary: vi.fn().mockResolvedValue({ businessDate:'2026-10-21', highlights:['今日正常'] }),
@@ -22,7 +23,7 @@ function setup(intents: DialogueIntent[], multiStep?: DialogueMultiStepPlan | nu
     readArrearsAndFrozen: vi.fn().mockResolvedValue({ arrears:[{ studentId:'student-core-1',studentName:'林悦',courseId:'course-core-1',courseName:'主课',paidBalance:'-20.00' }], frozenStudents:[{ studentId:'student-core-2',name:'陈晨',reason:'连续31天未完成课程' }] }),
     readMonthlyConsumption: vi.fn().mockResolvedValue({ period:'2026-10',totalAmount:'300.00',courses:[{ id:'course-core-1',name:'主课',amount:'300.00' }],teachers:[{ id:teacherId,name:'王老师',amount:'300.00' }],students:[{ id:'student-core-1',name:'林悦',amount:'300.00' }] }),
     readPeriodPreclose: vi.fn().mockResolvedValue({ period:'2026-10',closed:false,pendingLessons:[{ lessonId,studentName:'林悦',courseName:'主课',teacherName:'王老师',endsAt:'2026-10-21T03:00:00Z' }],refundAnomalies:[],missingPayrollTeachers:[],ledgerAnomalies:[],reminders:[{ code:'REVIEW',message:'请人工检查',requiresHumanJudgment:true }] }),
-    getCourseAccountCandidates: vi.fn().mockResolvedValue({ candidates: [{ accountId, studentName: '林悦', courseName: '主课' }] }),
+    getCourseAccountCandidates: vi.fn().mockResolvedValue({ candidates: [{ accountId, studentId:'student-core-1', studentName: '林悦', courseName: '主课' }] }),
     getStudentCandidates: vi.fn().mockResolvedValue({ candidates:[{ studentId:'student-core-1',name:'林悦' }] }),
     getTeacherCandidates: vi.fn().mockResolvedValue({ candidates:[{ teacherId,name:'王老师' }] }),
     getPayrollCandidates: vi.fn().mockResolvedValue({ candidates:[{ payrollId:'49fbcf47-c616-468a-a058-cdca1ee66026',teacherId,teacherName:'王老师',period:'2026-10',status:'UNPAID' }] }),
@@ -35,9 +36,9 @@ function setup(intents: DialogueIntent[], multiStep?: DialogueMultiStepPlan | nu
     getLessonCandidates: vi.fn().mockResolvedValue({ candidates: [{ lessonId, studentName: '林悦', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-20T01:00:00Z', status: 'SCHEDULED' }] }),
   };
   const understand = vi.fn(); for (const item of intents) understand.mockResolvedValueOnce(item);
-  const createGraph = () => createDialogueGraph({ capability: 'cap', tools: tools as unknown as Parameters<typeof createDialogueGraph>[0]['tools'], understand, ...(multiStep !== undefined ? { understandMultiStep: vi.fn().mockResolvedValue(multiStep) } : {}), now: () => new Date('2026-10-21T03:00:00Z') });
+  const createGraph = () => createDialogueGraph({ capability: 'cap', tools: tools as unknown as Parameters<typeof createDialogueGraph>[0]['tools'], understand, ...(intentParser ? {intentParser} : {}), ...(multiStep !== undefined ? { understandMultiStep: multiStep === null ? vi.fn().mockRejectedValue(new Error('AI_MULTI_STEP_INVALID')) : vi.fn().mockResolvedValue(multiStep) } : {}), now: () => new Date('2026-10-21T03:00:00Z') });
   let graph = createGraph();
-  let state: unknown = {};
+  let state: unknown = initial ?? {};
   const run = async (message: string, runId = crypto.randomUUID()): Promise<DialogueResult> => {
     const { result } = await graph.invoke({ turn: { runId, threadId: 'task', message, previous: state } }); state = result.task; return result;
   };
@@ -45,6 +46,424 @@ function setup(intents: DialogueIntent[], multiStep?: DialogueMultiStepPlan | nu
   return { tools, understand, run, restart };
 }
 describe('模型驱动的持续业务任务', () => {
+  it('多步确认后可查询刚执行的回执，不重复生成预览', async () => {
+    const previous={status:'awaiting_confirmation',operation:'payment.preview',previewId:'first',multiStep:{currentStep:0,completedPreviewIds:[],steps:[
+      {operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}},
+      {operation:'receipt.read',fields:{}},
+    ]}};
+    const flow=setup([],undefined,previous);
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED',display:{title:'交费',summary:'100.00'}});
+    const result=await flow.run('继续');
+    expect(result.answer).toContain('100.00');
+    expect(result.task.multiStep?.currentStep).toBe(2);
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('前一步确认后，下一步的口语补参由模型理解', async () => {
+    const previous={status:'awaiting_confirmation',operation:'gift.preview',previewId:'first',multiStep:{currentStep:0,completedPreviewIds:[],steps:[
+      {operation:'gift.preview',fields:{studentName:'林悦',courseName:'主课',amount:'20'}},
+      {operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100'}},
+    ]}};
+    const flow=setup([intent('payment.preview',{channel:'现金'},'continue')],undefined,previous);
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    await flow.run('用现钞');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({amount:'100.00',channel:'CASH'}));
+  });
+  it('工资纠错的相对年份由模型结合业务日期理解，不被字面年份规则拒绝', async () => {
+    const flow=setup([], {steps:[{operation:'payroll.cancel-payment',fields:{teacherName:'王老师',period:'2025-12',reason:'登记错误'}},{operation:'payroll.pay',fields:{teacherName:'王老师',period:'2025-12',paidAt:'2026-01-05',channel:'微信'}}]});
+    const result=await flow.run('去年十二月的工资支付登记错了，撤销后改成今年一月五日微信');
+    expect(result.task.multiStep?.steps).toHaveLength(2);
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it('排课查询采用模型结合上下文解析的日期，不让关键词重新覆盖', async () => {
+    const flow = setup([intent('lessons.read',{dateFrom:'2026-10-21',dateTo:'2026-10-21'})]);
+    await flow.run('不是昨天，查今天的排课');
+    expect(flow.tools.readLessons).toHaveBeenCalledWith('cap',expect.objectContaining({dateFrom:'2026-10-21',dateTo:'2026-10-21'}));
+  });
+  it('模型对学生指代提出澄清时直接展示问题，不查询或生成预览', async () => {
+    const flow = setup([{mode:'clarify',operation:'payment.preview',fields:{amount:'100',channel:'微信'},question:'无法确定是哪位学生，请说姓名。'}]);
+    const result = await flow.run('给他缴费100元微信');
+    expect(result.answer).toContain('无法确定');
+    expect(flow.tools.getStudentCandidates).not.toHaveBeenCalled();
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('用户否定自动通知并要求查询时，不能被关键词直接判为不支持', async () => {
+    const flow = setup([intent('overview.read',{})]);
+    const result = await flow.run('不要永久自动通知，只查当前经营概况');
+    expect(result.workspace.resultKind).toBe('query');
+    expect(flow.tools.getDashboardSummary).toHaveBeenCalled();
+  });
+  it('计划中间的开户和同一课程缴费合并，保留前后步骤', async () => {
+    const person = {studentName:'林悦',courseName:'主课'};
+    const flow = setup([], {steps:[{operation:'student.create',fields:{name:'林悦'}},{operation:'course-account.open',fields:{...person,currentUnitPrice:'180'}},{operation:'payment.preview',fields:{...person,amount:'100',channel:'微信'}},{operation:'gift.preview',fields:{...person,amount:'20'}}]});
+    const result = await flow.run('先建档再开户然后缴费接着赠送');
+    expect(result.task.multiStep?.steps).toEqual([
+      {operation:'student.create',fields:{name:'林悦'}},
+      {operation:'payment.preview',fields:{...person,currentUnitPrice:'180',amount:'100',channel:'微信'}},
+      {operation:'gift.preview',fields:{...person,amount:'20'}},
+    ]);
+  });
+  it.each(['student.create','student.update','teacher.create','teacher.compensation.update','course.create','course.update','course-account.price','payment.preview','gift.preview','ledger-entry.reversal','lesson.schedule','lesson.reschedule','lesson.cancel','lesson.complete','lesson.complete.reversal','lesson.complete.correction','refund.preview','payroll.generate','payroll.adjust','payroll.pay','payroll.cancel-payment','manual-transaction.create','period.close','period.reopen'])('%s 的确认单只有 EXECUTED 才推进', async operation => {
+    const steps = [{operation,fields:{}},{operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}}];
+    const flow = setup([], undefined, {status:'awaiting_confirmation',operation,previewId:'first',multiStep:{steps,currentStep:0,completedPreviewIds:[]}});
+    for (const status of ['PENDING','CONFIRMING','UNKNOWN']) {
+      flow.tools.readPreview.mockResolvedValueOnce({status});
+      const result = await flow.run('继续');
+      expect(result.task.multiStep?.currentStep).toBe(0);
+      expect(result.task.multiStep?.completedPreviewIds).toEqual([]);
+      expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    }
+    flow.tools.readPreview.mockResolvedValueOnce({status:'EXECUTED'});
+    const result = await flow.run('继续');
+    expect(result.task.multiStep?.completedPreviewIds).toEqual(['first']);
+    expect(result.task.status).toBe('awaiting_confirmation');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledTimes(1);
+  });
+  it('查询完成后保留查询结果，继续才生成写入预览，未确认不推进', async () => {
+    const flow = setup([], {steps:[{operation:'accounts.read',fields:{studentName:'林悦',courseName:'主课'}},{operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}},{operation:'overview.read',fields:{}}]} as never);
+    await flow.run('先查询林悦主课余额再缴费100元微信然后查看概况');
+    const query = await flow.run('开始第一步');
+    expect(query.workspace.resultKind).toBe('query');
+    expect(query.answer).toContain('500.00');
+    expect(query.task.multiStep?.currentStep).toBe(1);
+    expect(query.task.multiStep?.completedPreviewIds).toEqual([]);
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    flow.restart();
+    const payment = await flow.run('继续');
+    expect(payment.task.status).toBe('awaiting_confirmation');
+    await flow.run('继续');
+    expect(flow.tools.getDashboardSummary).not.toHaveBeenCalled();
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    const final = await flow.run('继续');
+    expect(final.task.status).toBe('completed');
+    expect(final.task.multiStep?.completedPreviewIds).toEqual([payment.task.previewId]);
+    expect(final.answer).not.toContain('均已分别在Core确认执行');
+  });
+  it('查询失败不推进、不创建后续预览', async () => {
+    const flow = setup([], {steps:[{operation:'overview.read',fields:{}},{operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}}]} as never);
+    flow.tools.getDashboardSummary.mockRejectedValueOnce(new Error('unavailable'));
+    await flow.run('先查概况再缴费');
+    const failed = await flow.run('开始第一步');
+    expect(failed.task.multiStep?.currentStep).toBe(0);
+    expect(failed.workspace.resultKind).toBe('error');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('开户合并后使用原步骤核查工资纠错年份并可重启继续', async () => {
+    const person = {studentName:'林悦',courseName:'主课'};
+    const flow = setup([], {steps:[{operation:'course-account.open',fields:person},{operation:'payment.preview',fields:{...person,amount:'100',channel:'微信'}},{operation:'payroll.cancel-payment',fields:{teacherName:'王老师',period:'2025-12',reason:'纠错'}},{operation:'payroll.pay',fields:{teacherName:'王老师',period:'2025-12',paidAt:'2026-01-05',channel:'银行卡'}}]});
+    await flow.run('先给林悦主课开户，再缴费100元微信，然后撤销王老师2025年12月工资支付，再登记2026年1月5日银行卡工资支付');
+    flow.restart();
+    const first = await flow.run('开始第一步');
+    expect(first.task.status).toBe('awaiting_confirmation');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledTimes(1);
+  });
+  it('建档和缴费各自确认后才推进，计划名称与实际操作一致', async () => {
+    const flow = setup([], {steps:[{operation:'student.create',fields:{name:'林悦'}},{operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}}]} as never);
+    const planned = await flow.run('先给林悦建档再给林悦主课缴费100元微信');
+    expect(planned.answer).toContain('建档');
+    expect(planned.answer).not.toContain('登记工资支付');
+    const first = await flow.run('开始第一步');
+    expect(first.task.status).toBe('awaiting_confirmation');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    await flow.run('继续');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    const second = await flow.run('继续');
+    expect(second.task.multiStep?.completedPreviewIds).toEqual([first.task.previewId]);
+    expect(second.task.status).toBe('awaiting_confirmation');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledTimes(1);
+    const completed = await flow.run('继续');
+    expect(completed.task.status).toBe('completed');
+    expect(completed.task.multiStep?.completedPreviewIds).toEqual([first.task.previewId,second.task.previewId]);
+  });
+  it('模型判断为新任务时短回答不继承原学生', async () => {
+    const flow = setup([intent('payment.preview',{studentName:'林悦'}), intent('payment.preview',{courseName:'陪练',amount:'300'},'new')]);
+    await flow.run('给林悦交费');
+    const result = await flow.run('陪练，300');
+    expect(result.task.fields.studentName).toBeUndefined();
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('模型从历史解析出未确认建档学生时不得查询或预览', async () => {
+    const flow = setup([intent('student.create',{name:'林悦'}), intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'})]);
+    await flow.run('给林悦建档');
+    const result = await flow.run('给她主课交100元微信');
+    expect(result.answer).toContain('建档尚未确认');
+    expect(flow.tools.getStudentCandidates).not.toHaveBeenCalled();
+    expect(flow.tools.getCourseAccountCandidates).not.toHaveBeenCalled();
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('合并开户缴费时保留后续所有步骤并正确展示第四步', async () => {
+    const person = {studentName:'林悦',courseName:'主课'};
+    const flow = setup([], {steps:[
+      {operation:'course-account.open',fields:person},
+      {operation:'payment.preview',fields:{...person,amount:'100',channel:'微信'}},
+      {operation:'gift.preview',fields:{...person,amount:'20'}},
+      {operation:'lesson.schedule',fields:person},
+      {operation:'payroll.generate',fields:{teacherName:'王老师',period:'2026-10'}},
+    ]});
+    const result = await flow.run('先给林悦主课开户再缴费然后赠送接着排课再生成工资');
+    expect(result.task.multiStep?.steps.map(step => step.operation)).toEqual(['payment.preview','gift.preview','lesson.schedule','payroll.generate']);
+    expect(result.answer).toContain('第4步');
+    expect(result.answer).not.toContain('undefined');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('下一轮理解时能够读取本会话的上一轮对话', async () => {
+    const {run,understand} = setup([intent('student.create',{name:'林悦'}),intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'})]);
+    await run('给林悦建档');
+    await run('给林悦主课交100元微信');
+    expect(understand.mock.calls[1]?.[0].history).toEqual(expect.arrayContaining([
+      expect.objectContaining({role:'user',content:'给林悦建档'}),
+      expect.objectContaining({role:'assistant',content:expect.stringContaining('预览')}),
+    ]));
+  });
+  it('独立开户引导缴费，不生成开户预览', async () => {
+    const flow = setup([intent('course-account.open',{studentName:'林悦',courseName:'主课'})]);
+    const result = await flow.run('给林悦开主课账户');
+    expect(result.answer).toContain('缴费');
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it('提出开通后补充金额和渠道，可继续生成同一学生课程的缴费预览', async () => {
+    const flow = setup([intent('course-account.open',{studentName:'林悦',courseName:'主课'}),intent(null,{amount:'1000',channel:'微信'},'continue')]);
+    flow.tools.getCourseAccountCandidates.mockResolvedValue({candidates:[]});
+    await flow.run('给林悦开主课账户');
+    const result = await flow.run('1000元，微信');
+    expect(result.workspace.resultKind).toBe('preview');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({studentId:'student-core-1',courseId:'course-core-1',amount:'1000.00',channel:'WECHAT'}));
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it('同一学生课程的开户和缴费合并，保留单价', async () => {
+    const flow = setup([], {steps:[{operation:'course-account.open',fields:{studentName:'林悦',courseName:'主课',currentUnitPrice:'180'}},{operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信'}}]});
+    const result = await flow.run('先给林悦主课开户单价180再缴费1000元微信');
+    expect(result.task.operation).toBe('payment.preview');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({studentId:'student-core-1',courseId:'course-core-1',amount:'1000.00',currentUnitPrice:'180.00'}));
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it.each(['studentName','courseName','currentUnitPrice'])('开户与缴费的%s冲突时澄清', async (field) => {
+    const first = {studentName:'林悦',courseName:'主课',currentUnitPrice:'180'};
+    const second = {...first,amount:'1000',channel:'微信',[field]:field==='studentName'?'张三':field==='courseName'?'陪练':'200'};
+    const flow = setup([], {steps:[{operation:'course-account.open',fields:first},{operation:'payment.preview',fields:second}]});
+    const result = await flow.run('先开户再缴费');
+    expect(result.workspace.resultKind).toBe('clarification');
+    expect(result.answer).toContain('无法确认一致');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it.each(['gift.preview','lesson.schedule'] as const)('%s 缺账户时指引缴费后重新发起原请求', async operation => {
+    const flow = setup([intent(operation,operation==='gift.preview' ? {studentName:'林悦',courseName:'主课',amount:'20'} : {studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T09:00:00+08:00'})]);
+    flow.tools.getCourseAccountCandidates.mockResolvedValue({candidates:[]});
+    const result = await flow.run('办理业务');
+    expect(result.answer).toContain('缴费');
+    expect(result.answer).toContain('金额');
+    expect(result.answer).toContain(operation==='gift.preview'?'赠送':'排课');
+    expect(result.answer).toContain('重新');
+    expect(result.task.status).not.toBe('completed');
+  });
+  it('无账户但课程不存在时不声称先缴费即可', async () => {
+    const flow = setup([intent('gift.preview',{studentName:'林悦',courseName:'不存在',amount:'20'})]);
+    flow.tools.getCourseAccountCandidates.mockResolvedValue({candidates:[]});
+    const result = await flow.run('赠送');
+    expect(result.answer).toContain('没有找到课程');
+    expect(result.answer).not.toContain('尚无课程记录');
+  });
+  it.each(['gift.preview','lesson.schedule'] as const)('%s 简称先核实完整课程再找到已有账户', async operation => {
+    const fields = operation==='gift.preview' ? {studentName:'林悦',courseName:'钢琴',amount:'20'} : {studentName:'林悦',courseName:'钢琴',teacherName:'王老师',startsAt:'2026-10-22T09:00:00+08:00'};
+    const flow = setup([intent(operation,fields)]);
+    flow.tools.readDirectory.mockResolvedValue({students:[],teachers:[],courses:[{courseId:'course-core-1',name:'钢琴主课',defaultUnitPrice:'200.00',defaultDurationMinutes:60,isActive:true}]});
+    flow.tools.getCourseAccountCandidates.mockResolvedValueOnce({candidates:[]}).mockResolvedValueOnce({candidates:[{accountId,studentId:'student-core-1',studentName:'林悦',courseName:'钢琴主课'}]});
+    const result = await flow.run('办理业务');
+    expect(flow.tools.getCourseAccountCandidates).toHaveBeenLastCalledWith('cap',{studentName:'林悦',courseName:'钢琴主课',match:'search'});
+    expect(result.workspace.resultKind).toBe('preview');
+    expect(operation==='gift.preview' ? flow.tools.createGiftPreview : flow.tools.createSingleLessonPreview).toHaveBeenCalledWith('cap',expect.objectContaining({accountId}));
+  });
+  it('简称重查时不会使用同名学生的账户', async () => {
+    const flow = setup([intent('gift.preview',{studentName:'林悦',courseName:'钢琴',amount:'20'})]);
+    flow.tools.readDirectory.mockResolvedValue({students:[],teachers:[],courses:[{courseId:'course-core-1',name:'钢琴主课',defaultUnitPrice:'200.00',defaultDurationMinutes:60,isActive:true}]});
+    flow.tools.getCourseAccountCandidates.mockResolvedValueOnce({candidates:[]}).mockResolvedValueOnce({candidates:[{accountId,studentId:'other-student',studentName:'林悦',courseName:'钢琴主课'}]});
+    const result = await flow.run('赠送');
+    expect(result.answer).toContain('尚无课程记录');
+    expect(flow.tools.createGiftPreview).not.toHaveBeenCalled();
+  });
+  it.each(['payroll.adjust','payroll.pay','payroll.cancel-payment'] as const)('%s 无工资候选时给出对应提示', async operation => {
+    const fields = {teacherName:'王老师',period:'2026-10',...(operation==='payroll.adjust'?{baseSalary:'2000'}:{}),...(operation==='payroll.pay'?{channel:'微信'}:{}),...(operation==='payroll.cancel-payment'?{reason:'纠错'}:{})};
+    const flow = setup([intent(operation,fields)]);
+    flow.tools.getPayrollCandidates.mockResolvedValue({candidates:[]});
+    const result = await flow.run('办理工资');
+    expect(result.answer).toContain(operation==='payroll.cancel-payment'?'没有已支付工资':'先生成工资');
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it.each([403,500])('查询课程失败（%s）时不误报无账户', async status => {
+    const flow = setup([intent('gift.preview',{studentName:'林悦',courseName:'主课',amount:'20'})]);
+    flow.tools.getCourseAccountCandidates.mockResolvedValue({candidates:[]});
+    flow.tools.readDirectory.mockRejectedValue(new CoreDialogueError(status));
+    const result = await flow.run('赠送');
+    expect(result.answer).not.toContain('尚无课程记录');
+    expect(result.answer).not.toContain('先提供学生');
+    expect(flow.tools.createGiftPreview).not.toHaveBeenCalled();
+  });
+  it.each([403,500])('查询账户失败（%s）时不误报无账户', async status => {
+    const flow = setup([intent('lesson.schedule',{studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T09:00:00+08:00'})]);
+    flow.tools.getCourseAccountCandidates.mockRejectedValue(new CoreDialogueError(status));
+    const result = await flow.run('排课');
+    expect(result.answer).not.toContain('尚无课程记录');
+    expect(flow.tools.createSingleLessonPreview).not.toHaveBeenCalled();
+  });
+  it('开户缴费排课合并为缴费和排课两步，缴费确认前不排课', async () => {
+    const flow = setup([], {steps:[{operation:'course-account.open',fields:{studentName:'林悦',courseName:'主课'}},{operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}},{operation:'lesson.schedule',fields:{studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T09:00:00+08:00'}}]});
+    const plan = await flow.run('先给林悦开主课账户，再交费100元微信，然后排王老师明天9点主课');
+    expect(plan.task.multiStep?.steps.map(step=>step.operation)).toEqual(['payment.preview','lesson.schedule']);
+    await flow.run('开始第一步');
+    await flow.run('继续');
+    expect(flow.tools.createSingleLessonPreview).not.toHaveBeenCalled();
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    await flow.run('继续');
+    expect(flow.tools.createSingleLessonPreview).toHaveBeenCalledTimes(1);
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it('旧的未生成开户预览计划不能新建开户预览', async () => {
+    const steps = [{operation:'course-account.open',fields:{studentName:'林悦',courseName:'主课'}},{operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}}] as DialogueMultiStepPlan['steps'];
+    const flow = setup([],undefined,{status:'ready',operation:'course-account.open',multiStep:{steps,currentStep:0,completedPreviewIds:[]}});
+    const result = await flow.run('开始第一步');
+    expect(result.answer).toContain('缴费');
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('学生存在但没有课程记录时，余额查询不误导用户核对姓名，也不写入数据', async () => {
+    const {run,tools} = setup([intent('accounts.read',{studentName:'林悦'})]);
+    tools.getCourseAccountCandidates.mockResolvedValue({candidates:[]});
+    const result = await run('查林悦的余额');
+    expect(result.answer).toContain('尚无课程记录');
+    expect(result.answer).not.toContain('核对学生姓名');
+    expect(tools.readAccount).not.toHaveBeenCalled();
+    expect(tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('找不到学生时提示核对或先建档，而不是创建虚构对象', async () => {
+    const flow = setup([intent('payment.preview',{studentName:'不存在',courseName:'主课',amount:'100',channel:'微信'})]);
+    flow.tools.getStudentCandidates.mockResolvedValue({candidates:[]});
+    const result = await flow.run('给不存在主课交100元微信');
+    expect(result.answer).toContain('新建学生');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it('已确认建档后的代词通过真实学生候选消歧，保留交费参数', async () => {
+    const {run,tools} = setup([intent('student.create',{name:'林悦'}), intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'})]);
+    await run('给林悦建档');
+    tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    const result = await run('给她主课交100元微信');
+    expect(tools.getStudentCandidates).toHaveBeenCalledWith('cap',{studentName:'林悦',match:'search'});
+    expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({accountId,amount:'100.00'}));
+    expect(result.task.fields.studentName).toBe('林悦');
+  });
+  it('模型结合上下文解析学生和主课后经 Core 核实缴费', async () => {
+    const {run,tools}=setup([intent('student.create',{name:'林悦'}),intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'2000',channel:'微信'})]);
+    tools.getStudentCandidates.mockResolvedValue({candidates:[{studentId:'student-core-1',name:'林悦'}]});
+    tools.readDirectory.mockResolvedValue({students:[],teachers:[],courses:[{courseId:'course-core-1',name:'主课',defaultUnitPrice:'200.00',defaultDurationMinutes:60,isActive:true}]});
+    tools.getCourseAccountCandidates.mockResolvedValue({candidates:[]});
+    await run('给林悦建档');
+    tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    await run('他主课缴费2000元，微信');
+    expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({studentId:'student-core-1',courseId:'course-core-1',amount:'2000.00'}));
+  });
+  it('模型未能确定代词指向时不擅自选择学生', async () => {
+    const invoke = vi.fn().mockResolvedValueOnce({content:JSON.stringify(intent('student.create',{name:'林悦'}))})
+      .mockResolvedValueOnce({content:JSON.stringify(intent('payment.preview',{studentName:'王小明',courseName:'主课',amount:'2000',channel:'微信'}))})
+      .mockResolvedValueOnce({content:JSON.stringify({actionSupported:false,unsupportedFields:[]})});
+    const {run,tools}=setup([],undefined,undefined,createIntentParser({invoke} as never));
+    tools.getStudentCandidates.mockResolvedValue({candidates:[{studentId:'other-student',name:'王小明'}]});
+    await run('给林悦建档');
+    tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    const result=await run('他主课缴费2000元，微信');
+    expect(result.answer).toContain('无法确定');
+    expect(tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('没有确定学生时不把代词当姓名，保留业务参数以便补充', async () => {
+    const invoke = vi.fn().mockResolvedValueOnce({content:JSON.stringify(intent('payment.preview',{studentName:'他',courseName:'主课',amount:'100',channel:'微信'}))})
+      .mockResolvedValueOnce({content:JSON.stringify({actionSupported:true,unsupportedFields:['studentName']})});
+    const {run,tools} = setup([],undefined,undefined,createIntentParser({invoke} as never));
+    const result = await run('给他主课交100元微信');
+    expect(result.answer).toContain('学生');
+    expect(result.task.fields).toMatchObject({courseName:'主课',amount:'100',channel:'微信'});
+    expect(result.task.fields.studentName).toBeUndefined();
+    expect(tools.getStudentCandidates).not.toHaveBeenCalled();
+  });
+  it('学生没有课程账户时直接生成包含学生课程的缴费预览', async () => {
+    const {run,tools} = setup([intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'})]);
+    tools.getCourseAccountCandidates.mockResolvedValue({candidates:[]});
+    const result = await run('给林悦主课交100元微信');
+    expect(result.answer).toContain('预览');
+    expect(result.task.fields).toMatchObject({studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'});
+    expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({studentId:'student-core-1',courseId:'course-core-1',amount:'100.00',channel:'WECHAT'}));
+  });
+  it('缴费中明确给出单节价格时将价格和金额分别送入同一预览', async () => {
+    const {run,tools}=setup([intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信',currentUnitPrice:'180'})]);
+    const result=await run('林悦主课交1000元微信，每节180元');
+    expect(result.answer).toContain('预览');
+    expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({studentId:'student-core-1',courseId:'course-core-1',amount:'1000.00',currentUnitPrice:'180.00',channel:'WECHAT'}));
+  });
+  it('从余额查询继续缴费并改价时仍绑定学生身份', async () => {
+    const {run,tools}=setup([intent('accounts.read',{studentName:'林悦',courseName:'主课'}),intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信',currentUnitPrice:'180'})]);
+    await run('查林悦主课余额');
+    await run('林悦主课交1000元微信，每节180元');
+    expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({studentId:'student-core-1',courseId:'course-core-1',currentUnitPrice:'180.00'}));
+  });
+  it('建档预览未执行时不将学生视作已创建或查询其账户', async () => {
+    const {run,tools} = setup([intent('student.create',{name:'林悦'}),intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'})]);
+    await run('给林悦建档');
+    const result = await run('给她主课交100元微信');
+    expect(result.answer).toContain('尚未');
+    expect(tools.getStudentCandidates).not.toHaveBeenCalled();
+    expect(tools.createPaymentPreview).not.toHaveBeenCalled();
+    tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    await run('继续');
+    expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({accountId,amount:'100.00'}));
+  });
+  it.each([true, false])('同名学生先选择身份，再仅使用所选学生的账户（有账户：%s）', async (hasAccount) => {
+    const firstStudent = '3a9a42f5-7775-45ef-98f7-3f2839625551';
+    const secondStudent = '3a9a42f5-7775-45ef-98f7-3f2839625552';
+    const { run, tools, restart } = setup([intent('accounts.read', { studentName:'林悦', courseName:'主课' })]);
+    tools.getStudentCandidates.mockResolvedValue({ candidates:[{studentId:firstStudent,name:'林悦'},{studentId:secondStudent,name:'林悦'}] });
+    tools.getCourseAccountCandidates.mockResolvedValue({ candidates:[{accountId,studentId:firstStudent,studentName:'林悦',courseName:'主课'}] });
+    const selection = await run('查林悦主课余额');
+    expect(selection.workspace.resultKind).toBe('selection');
+    expect(tools.readAccount).not.toHaveBeenCalled();
+    restart();
+    const result = await run(`选择候选:${hasAccount ? firstStudent : secondStudent}:${selection.task.version}`);
+    if (hasAccount) expect(tools.readAccount).toHaveBeenCalledWith('cap', { accountId });
+    else { expect(tools.readAccount).not.toHaveBeenCalled(); expect(result.answer).toContain('没有找到'); }
+  });
+  it.each(['accounts.read', 'payment.preview'] as const)('%s 选择无账户的同名学生时不读取别人的账户', async (operation) => {
+    const firstStudent = '3a9a42f5-7775-45ef-98f7-3f2839625551';
+    const secondStudent = '3a9a42f5-7775-45ef-98f7-3f2839625552';
+    const fields = operation === 'accounts.read' ? { studentName:'林悦' } : { studentName:'林悦',courseName:'主课',amount:'100',channel:'微信' };
+    const {run,tools} = setup([intent(operation, fields)]);
+    tools.getStudentCandidates.mockResolvedValue({candidates:[{studentId:firstStudent,name:'林悦'},{studentId:secondStudent,name:'林悦'}]});
+    tools.getCourseAccountCandidates.mockResolvedValue({candidates:[{accountId,studentId:firstStudent,studentName:'林悦',courseName:'主课'}]});
+    const selection = await run('办理林悦的业务');
+    expect(selection.workspace.resultKind).toBe('selection');
+    expect(tools.getCourseAccountCandidates).not.toHaveBeenCalled();
+    const result = await run(`选择候选:${secondStudent}:${selection.task.version}`);
+    expect(tools.readAccount).not.toHaveBeenCalled();
+    if(operation==='accounts.read') { expect(result.answer).toContain('尚无课程记录'); expect(tools.createPaymentPreview).not.toHaveBeenCalled(); }
+    else { expect(result.answer).toContain('预览'); expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({studentId:secondStudent,courseId:'course-core-1',amount:'100.00'})); }
+  });
+  it('选择同名学生后，交费预览只针对该学生的课程账户', async () => {
+    const firstStudent = '3a9a42f5-7775-45ef-98f7-3f2839625551';
+    const secondStudent = '3a9a42f5-7775-45ef-98f7-3f2839625552';
+    const otherAccount = crypto.randomUUID();
+    const {run,tools} = setup([intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'})]);
+    tools.getStudentCandidates.mockResolvedValue({candidates:[{studentId:firstStudent,name:'林悦'},{studentId:secondStudent,name:'林悦'}]});
+    tools.getCourseAccountCandidates.mockResolvedValue({candidates:[{accountId,studentId:firstStudent,studentName:'林悦',courseName:'主课'},{accountId:otherAccount,studentId:secondStudent,studentName:'林悦',courseName:'主课'}]});
+    const selection = await run('给林悦主课交100元微信');
+    expect(tools.createPaymentPreview).not.toHaveBeenCalled();
+    await run(`选择候选:${secondStudent}:${selection.task.version}`);
+    expect(tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({accountId:otherAccount}));
+  });
+  it('拒绝修改已关账工资时不编造具体月份', async () => {
+    const {run,tools} = setup([{mode:'new',operation:'unsupported',fields:{reason:'已关账工资不可调整'},question:'已关账月份的工资不能直接修改；历史工资未修改。'}]);
+    const result = await run('修改2026年8月已关账工资');
+    expect(result.answer).toContain('已关账月份的工资不能直接修改');
+    expect(JSON.stringify(result.workspace)).not.toContain('9月');
+    expect(result.workspace.blocks).toContainEqual(expect.objectContaining({type:'summary',text:expect.stringContaining('历史工资未修改')}));
+    expect(tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
   it('历史工资纠错计划没有明确年份来源时不能继续生成预览', async () => {
     const tools = {getPayrollCandidates:vi.fn(),createStructuredActionPreview:vi.fn()};
     const graph = createDialogueGraph({capability:'cap',tools:tools as never});
@@ -58,7 +477,10 @@ describe('模型驱动的持续业务任务', () => {
     expect(tools.createStructuredActionPreview).not.toHaveBeenCalled();
   });
   it('跨年工资纠错保留两个明确日期，首步确认后才生成重登预览', async () => {
-    const flow = setup([]);
+    const flow = setup([], {steps:[
+      {operation:'payroll.cancel-payment',fields:{teacherName:'王老师',period:'2025-12',reason:'纠正错误工资支付登记'}},
+      {operation:'payroll.pay',fields:{teacherName:'王老师',period:'2025-12',paidAt:'2026-01-05',channel:'银行卡'}},
+    ]});
     const payrollId = '49fbcf47-c616-468a-a058-cdca1ee66026';
     flow.tools.getPayrollCandidates.mockResolvedValue({candidates:[{payrollId,teacherId,teacherName:'王老师',period:'2025-12',status:'PAID'}]});
     const plan = await flow.run('王老师2025年12月工资支付登记错了，取消那次，改成2026年1月5日银行卡。');
@@ -76,8 +498,11 @@ describe('模型驱动的持续业务任务', () => {
     expect(second.task.multiStep?.completedPreviewIds).toEqual([first.task.previewId]);
     expect(flow.tools.createStructuredActionPreview).toHaveBeenLastCalledWith('cap', expect.objectContaining({actionType:'payroll.pay',command:expect.objectContaining({payrollId,paidAt:'2026-01-05T00:00:00+08:00',channel:'BANK_CARD'})}));
   });
-  it('实收加赠送稳定拆成两步，不依赖模型分类结果', async () => {
-    const flow=setup([intent('unsupported',{})]);
+  it('模型识别实收加赠送后保留两步及排除的课程', async () => {
+    const flow=setup([intent('unsupported',{})], {steps:[
+      {operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信'}},
+      {operation:'gift.preview',fields:{studentName:'林悦',courseName:'主课',amount:'80'}},
+    ]});
     const result=await flow.run('林悦主课收1000，另外送80，不是收1080；陪练不动，两项登记渠道都选微信。');
     expect(result.answer).toContain('第一步交费（主课1000.00元，微信）');
     expect(result.answer).toContain('第二步赠送（主课80.00元）');
@@ -97,7 +522,7 @@ describe('模型驱动的持续业务任务', () => {
       {operation:'payment.preview',fields:{studentName:'林悦',courseName:'陪练',amount:'400',channel:'银行卡'}},
     ]});
     const result=await flow.run('这次收1000元，先给主课600，再给陪练400，银行卡，分两笔登记');
-    expect(result.answer).toContain('原请求总额1000.00元');
+    expect(result.answer).not.toContain('原请求总额');
     expect(result.answer).toContain('主课600.00元，银行卡');
     expect(result.answer).toContain('陪练400.00元，银行卡');
     expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
@@ -144,31 +569,23 @@ describe('模型驱动的持续业务任务', () => {
     expect(cancelled.answer).toContain('前 1 步已经确认');
     expect(flow.tools.createGiftPreview).not.toHaveBeenCalled();
   });
-  it('开户、交费、排课三步分别重查、确认，重启后保留已完成步骤', async () => {
-    const flow = setup([], {steps:[
+  it('历史开户预览确认后重启继续缴费排课，不重建开户预览', async () => {
+    const steps = [
       {operation:'course-account.open',fields:{studentName:'林悦',courseName:'主课'}},
       {operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}},
       {operation:'lesson.schedule',fields:{studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T09:00:00+08:00'}},
-    ]} as DialogueMultiStepPlan);
+    ] as DialogueMultiStepPlan['steps'];
+    const flow = setup([], undefined, {status:'awaiting_confirmation',operation:'course-account.open',previewId:'old-preview',multiStep:{steps,currentStep:0,completedPreviewIds:[]}});
     flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
-    const plan = await flow.run('先给林悦开主课账户，再交费100元微信，然后排王老师明天9点主课');
-    expect(plan.answer).toContain('第三步');
-    const first = await flow.run('开始第一步');
-    expect(flow.tools.checkActionAccess).toHaveBeenCalledWith('cap','course-account.open');
     flow.restart();
-    const second = await flow.run('继续');
-    expect(flow.tools.checkActionAccess).toHaveBeenCalledWith('cap','course-account.payment');
+    const payment = await flow.run('继续');
+    expect(flow.tools.readPreview).toHaveBeenCalledWith('cap','old-preview');
+    expect(payment.task.multiStep?.completedPreviewIds).toEqual(['old-preview']);
     expect(flow.tools.createPaymentPreview).toHaveBeenCalledTimes(1);
-    expect(flow.tools.createSingleLessonPreview).not.toHaveBeenCalled();
     flow.restart();
-    const third = await flow.run('继续');
-    expect(third.task.multiStep?.completedPreviewIds).toEqual([first.task.previewId,second.task.previewId]);
-    expect(flow.tools.checkActionAccess).toHaveBeenCalledWith('cap','lesson.schedule.single');
+    await flow.run('继续');
     expect(flow.tools.createSingleLessonPreview).toHaveBeenCalledTimes(1);
-    flow.restart();
-    const done = await flow.run('继续');
-    expect(done.task.status).toBe('completed');
-    expect(done.task.multiStep?.completedPreviewIds).toHaveLength(3);
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
   });
   it('多步识别失败时不得回退成其中一个单步操作', async () => {
     const flow = setup([intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'})], null);
@@ -177,6 +594,21 @@ describe('模型驱动的持续业务任务', () => {
     expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
     expect(flow.understand).not.toHaveBeenCalled();
   });
+  it.each([
+    ['未配置多步模型',undefined,'先开户，再交费，然后排课'],
+    ['模型无法审核空计划',null,'给林悦主课交100元微信，另外赠送20元'],
+    ['否定总额且没有模型',undefined,'林悦主课收1000，另外送80，不是收1080；陪练不动'],
+  ] as const)('%s时潜在多动作不能退化为单笔交费', async (_label,multiStep,message) => {
+    const invoke=vi.fn().mockResolvedValueOnce({content:JSON.stringify(intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}))})
+      .mockResolvedValueOnce({content:JSON.stringify({actionSupported:false,unsupportedFields:[]})});
+    const flow = setup([],multiStep,undefined,createIntentParser({invoke} as never));
+    const result = await flow.run(message);
+    expect(result.workspace.resultKind).toBe('clarification');
+    expect(flow.understand).not.toHaveBeenCalled();
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    expect(flow.tools.createGiftPreview).not.toHaveBeenCalled();
+    expect(flow.tools.createSingleLessonPreview).not.toHaveBeenCalled();
+  });
 
   it('同名账户跨步骤不得仅凭姓名复用首步对象', async () => {
     const another = crypto.randomUUID();
@@ -184,7 +616,7 @@ describe('模型驱动的持续业务任务', () => {
       {operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}},
       {operation:'gift.preview',fields:{studentName:'林悦',courseName:'主课',amount:'20'}},
     ]});
-    flow.tools.getCourseAccountCandidates.mockResolvedValueOnce({candidates:[{accountId,studentName:'林悦',courseName:'主课'}]}).mockResolvedValueOnce({candidates:[{accountId,studentName:'林悦',courseName:'主课'},{accountId:another,studentName:'林悦',courseName:'主课'}]});
+    flow.tools.getCourseAccountCandidates.mockResolvedValueOnce({candidates:[{accountId, studentId:'student-core-1',studentName:'林悦',courseName:'主课'}]}).mockResolvedValueOnce({candidates:[{accountId, studentId:'student-core-1',studentName:'林悦',courseName:'主课'},{accountId:another, studentId:'student-core-1',studentName:'林悦',courseName:'主课'}]});
     flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
     await flow.run('先交费再赠送');
     await flow.run('开始第一步');
@@ -192,50 +624,18 @@ describe('模型驱动的持续业务任务', () => {
     expect(selection.workspace.resultKind).toBe('selection');
     expect(flow.tools.createGiftPreview).not.toHaveBeenCalled();
   });
-  it('三步办理第三步权限失败后重启重试，不重复前两步', async () => {
-    const flow = setup([], {steps:[
-      {operation:'course-account.open',fields:{studentName:'林悦',courseName:'主课',currentUnitPrice:'200'}},
-      {operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}},
-      {operation:'lesson.schedule',fields:{studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T09:00:00+08:00'}},
-    ]});
-    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
-    flow.tools.checkActionAccess.mockImplementation(async (_cap, action) => {
-      if (action === 'lesson.schedule.single') throw new CoreDialogueError(403);
-      return {allowed:true};
-    });
-    const plan = await flow.run('先给林悦开主课账户单价200元，再交费100元微信，然后排王老师明天9点主课');
-    expect(plan.answer).toContain('单价200.00');
-    const first = await flow.run('开始第一步');
-    const second = await flow.run('继续');
-    const denied = await flow.run('继续');
-    expect(denied.answer).toContain('第2步已确认');
-    expect(denied.task.multiStep?.completedPreviewIds).toEqual([first.task.previewId,second.task.previewId]);
-    expect(flow.tools.createSingleLessonPreview).not.toHaveBeenCalled();
-    flow.restart();
-    flow.tools.checkActionAccess.mockResolvedValue({allowed:true});
-    const retried = await flow.run('重试当前任务');
-    expect(retried.task.status).toBe('awaiting_confirmation');
-    expect(flow.tools.createStructuredActionPreview).toHaveBeenCalledTimes(1);
-    expect(flow.tools.createPaymentPreview).toHaveBeenCalledTimes(1);
-    expect(flow.tools.createSingleLessonPreview).toHaveBeenCalledTimes(1);
-  });
-
-  it('状态查询失败时重启后仍只重查当前预览，不能提前生成下一步', async () => {
-    const flow = setup([], {steps:[
-      {operation:'course-account.open',fields:{studentName:'林悦',courseName:'主课'}},
-      {operation:'gift.preview',fields:{studentName:'林悦',courseName:'主课',amount:'20'}},
-    ]});
+  it('历史开户预览状态未知时重启后只重查，不生成后续步骤', async () => {
+    const steps = [{operation:'course-account.open',fields:{studentName:'林悦',courseName:'主课'}},{operation:'gift.preview',fields:{studentName:'林悦',courseName:'主课',amount:'20'}}] as DialogueMultiStepPlan['steps'];
+    const flow = setup([], undefined, {status:'awaiting_confirmation',operation:'course-account.open',previewId:'old-preview',multiStep:{steps,currentStep:0,completedPreviewIds:[]}});
     flow.tools.readPreview.mockRejectedValueOnce(new CoreDialogueError(500)).mockResolvedValue({status:'PENDING'});
-    await flow.run('先开户再赠送');
-    const first = await flow.run('开始第一步');
     const unknown = await flow.run('继续');
     expect(unknown.workspace.resultKind).toBe('error');
     flow.restart();
     const pending = await flow.run('重试当前任务');
-    expect(flow.tools.readPreview).toHaveBeenLastCalledWith('cap',first.task.previewId);
-    expect(pending.task.previewId).toBe(first.task.previewId);
+    expect(flow.tools.readPreview).toHaveBeenLastCalledWith('cap','old-preview');
+    expect(pending.task.previewId).toBe('old-preview');
     expect(flow.tools.createGiftPreview).not.toHaveBeenCalled();
-    expect(flow.tools.createStructuredActionPreview).toHaveBeenCalledTimes(1);
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
   });
   it('交费后排课与分账户交费只为当前一步生成独立预览', async () => {
     const lessonFlow = setup([], { steps:[
@@ -255,7 +655,7 @@ describe('模型驱动的持续业务任务', () => {
       { operation:'payment.preview', fields:{ studentName:'林悦',courseName:'主课',amount:'100',channel:'微信' } },
       { operation:'payment.preview', fields:{ studentName:'林悦',courseName:'陪练',amount:'200',channel:'支付宝' } },
     ] });
-    payments.tools.getCourseAccountCandidates.mockResolvedValueOnce({ candidates:[{ accountId,studentName:'林悦',courseName:'主课' }] }).mockResolvedValueOnce({ candidates:[{ accountId:secondAccountId,studentName:'林悦',courseName:'陪练' }] });
+    payments.tools.getCourseAccountCandidates.mockResolvedValueOnce({ candidates:[{ accountId, studentId:'student-core-1',studentName:'林悦',courseName:'主课' }] }).mockResolvedValueOnce({ candidates:[{ accountId:secondAccountId, studentId:'student-core-1',studentName:'林悦',courseName:'陪练' }] });
     payments.tools.readPreview.mockResolvedValue({ status:'EXECUTED' });
     await payments.run('先给主课交费，再给陪练交费');
     await payments.run('开始第一步');
@@ -263,10 +663,10 @@ describe('模型驱动的持续业务任务', () => {
     expect(payments.tools.createPaymentPreview).toHaveBeenNthCalledWith(2, 'cap', expect.objectContaining({ accountId:secondAccountId,amount:'200.00',channel:'ALIPAY' }));
     expect(secondPayment.task.selected.accountId).toBe(secondAccountId);
   });
-  it('两步计划中的相对排课时间在执行前统一转换为上海时区时间', async () => {
+  it('两步计划采用模型解析的上海时区排课时间', async () => {
     const flow = setup([], { steps:[
       { operation:'payment.preview', fields:{ studentName:'林悦',courseName:'主课',amount:'100',channel:'微信' } },
-      { operation:'lesson.schedule', fields:{ studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'明天下午三点' } },
+      { operation:'lesson.schedule', fields:{ studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T15:00:00+08:00' } },
     ] });
     flow.tools.readPreview.mockResolvedValue({ status:'EXECUTED' });
     await flow.run('交费后再排明天下午三点的课');
@@ -292,6 +692,16 @@ describe('模型驱动的持续业务任务', () => {
     expect(picker).toMatchObject({ type:'entity-picker', candidates:[expect.anything(), expect.anything()] });
     expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
   });
+  it('依据模型识别的原课程时间筛选候选，不重新从说法中提取时刻', async () => {
+    const otherId=crypto.randomUUID();
+    const flow=setup([intent('lesson.reschedule',{studentName:'林悦',date:'2026-10-22',startsAt:'2026-10-22T14:00:00+08:00',targetStartsAt:'2026-10-22T18:00:00+08:00'})]);
+    flow.tools.getLessonCandidates.mockResolvedValue({candidates:[
+      {lessonId,studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T06:00:00Z',status:'SCHEDULED'},
+      {lessonId:otherId,studentName:'林悦',courseName:'主课',teacherName:'王老师',startsAt:'2026-10-22T01:00:00Z',status:'SCHEDULED'},
+    ]});
+    await flow.run('把下午两点那节改到晚上六点');
+    expect(flow.tools.createStructuredActionPreview).toHaveBeenCalledWith('cap',expect.objectContaining({command:expect.objectContaining({lessonId,targetStartsAt:'2026-10-22T18:00:00+08:00'})}));
+  });
   it('明确说新日期时不沿用上一轮课表引用，宁可补问也不能操作错课', async () => {
     const flow = setup([
       intent('lessons.read', { dateFrom:'2026-10-21',dateTo:'2026-10-21' }),
@@ -299,6 +709,13 @@ describe('模型驱动的持续业务任务', () => {
     ]);
     await flow.run('我今天有哪些课');
     const result = await flow.run('把我明天9点的课改到18点');
+    expect(result.task.previewId).toBeUndefined();
+    expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
+  });
+  it('模型未明确选择候选课程时，不仅凭“这节”自动使用上一轮课程', async () => {
+    const flow=setup([intent('lessons.read',{dateFrom:'2026-10-21',dateTo:'2026-10-21'}),intent('lesson.reschedule',{targetStartsAt:'2026-10-22T18:00:00+08:00'})]);
+    await flow.run('查看今天排课');
+    const result=await flow.run('把这节课调到明天晚上六点');
     expect(result.task.previewId).toBeUndefined();
     expect(flow.tools.createStructuredActionPreview).not.toHaveBeenCalled();
   });
@@ -405,9 +822,9 @@ describe('模型驱动的持续业务任务', () => {
     expect(result.workspace.title).toContain('2026-10-22');
     expect(JSON.stringify(result.workspace)).not.toMatch(/经营收入|冻结|工资/);
   });
-  it('确定日期表达由业务日历归一化，覆盖模型错误日期并把中文状态交给Core解释', async () => {
+  it('采用模型解析的确定日期，并把中文状态交给Core解释', async () => {
     const { run, tools } = setup([intent('lessons.read', {
-      dateFrom: '2026-10-21', dateTo: '2026-10-21', teacherName: '王老师', courseName: '主课', status: '待上课',
+      dateFrom: '2026-10-22', dateTo: '2026-10-22', teacherName: '王老师', courseName: '主课', status: '待上课',
     })]);
     const result = await run('查明天王老师的主课，只看待上课');
     expect(tools.readLessons).toHaveBeenCalledWith('cap', {
@@ -418,7 +835,7 @@ describe('模型驱动的持续业务任务', () => {
   it('含糊日期只补具体范围，不调用Core查询', async () => {
     const { run, tools } = setup([intent('lessons.read', {})]);
     const result = await run('查最近几天的课');
-    expect(result.answer).toContain('开始日期和结束日期');
+    expect(result.answer).toMatch(/(?:开始|起始)日期.*结束日期/u);
     expect(result.workspace.resultKind).toBe('clarification');
     expect(tools.readLessons).not.toHaveBeenCalled();
   });
@@ -498,7 +915,7 @@ describe('模型驱动的持续业务任务', () => {
     const openAccount = setup([intent('course-account.open', { studentName:'林悦',courseName:'主课',currentUnitPrice:'200' })]);
     openAccount.tools.getStudentCandidates.mockResolvedValue({ candidates:[{ studentId:'student-core-1',name:'林悦' }] });
     await openAccount.run('给林悦开通主课，单价200');
-    expect(openAccount.tools.createStructuredActionPreview).toHaveBeenCalledWith('cap', expect.objectContaining({ actionType:'course-account.open',command:expect.objectContaining({ studentId:'student-core-1',courseId:'course-core-1',currentUnitPrice:'200.00' }) }));
+    expect(openAccount.tools.createStructuredActionPreview).not.toHaveBeenCalled();
 
     const price = setup([intent('course-account.price', { studentName:'林悦',courseName:'主课',currentUnitPrice:'220' })]);
     await price.run('把林悦主课单价调整为220');
@@ -516,7 +933,7 @@ describe('模型驱动的持续业务任务', () => {
     const open = setup([intent('course-account.open', { studentName:'林悦',courseName:'不存在的课程',currentUnitPrice:'200' })]);
     open.tools.readDirectory.mockResolvedValue({ students:[],teachers:[],courses:[] });
     const openResult = await open.run('给林悦开通不存在的课程');
-    expect(openResult.answer).toMatch(/没有找到|候选|无法安全/);
+    expect(openResult.answer).toContain('缴费');
     expect(open.tools.createStructuredActionPreview).not.toHaveBeenCalled();
   });
   it('生产读客户端尚未暴露的新方法时明确报告接线阻塞且不冒充已查询', async () => {
@@ -588,7 +1005,7 @@ describe('模型驱动的持续业务任务', () => {
   it('收集中任务把同操作短回答作为字段补丁，并可引用上一轮查询结果', async () => {
     const payment = setup([
       intent('payment.preview', { studentName:'林悦' }),
-      intent('payment.preview', { courseName:'陪练',amount:'300' }, 'new'),
+      intent('payment.preview', { courseName:'陪练',amount:'300' }, 'continue'),
       intent(null, { channel:'支付宝' }, 'continue'),
     ]);
     await payment.run('给林悦交个费');
@@ -628,7 +1045,7 @@ describe('模型驱动的持续业务任务', () => {
     expect(result.workspace.blocks).toContainEqual(expect.objectContaining({type:'action-preview',actionType:'lesson.complete.correction',riskLevel:'L2'}));
   });
   it('退款手续费不能绕成手工收入重复登记', async () => {
-    const { run, tools } = setup([intent('unsupported', {})]);
+    const { run, tools } = setup([{mode:'new',operation:'unsupported',fields:{},question:'退款手续费会自动计入，不能重复登记为手工收入。'}]);
     const result = await run('再把刚才退款手续费100记成手工收入。');
     expect(result.answer).toMatch(/退款手续费.*自动.*不能.*重复/u);
     expect(tools.createStructuredActionPreview).not.toHaveBeenCalled();
@@ -639,6 +1056,42 @@ describe('模型驱动的持续业务任务', () => {
     expect(tools.invalidatePreview).toHaveBeenCalledWith('cap', first.task.previewId, expect.any(String));
     expect(tools.createPaymentPreview).toHaveBeenLastCalledWith('cap', expect.objectContaining({ amount: '100.00', channel: 'ALIPAY' }));
     expect(second.task.previewId).not.toBe(first.task.previewId);
+  });
+  it('同名账户选定后更正金额，保留选中的账户并使原预览失效', async () => {
+    const otherId = crypto.randomUUID();
+    const {run,tools} = setup([intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信'}), intent(null,{amount:'100'},'correct')]);
+    tools.getCourseAccountCandidates.mockResolvedValue({candidates:[{accountId, studentId:'student-core-1',studentName:'林悦',courseName:'主课'},{accountId:otherId, studentId:'student-core-1',studentName:'林悦',courseName:'主课'}]});
+    const choices = await run('给林悦主课交1000元微信');
+    const original = await run(`选择候选:${otherId}:${choices.task.version}`);
+    const corrected = await run('金额改成100');
+    expect(tools.invalidatePreview).toHaveBeenCalledWith('cap',original.task.previewId,expect.any(String));
+    expect(tools.createPaymentPreview).toHaveBeenLastCalledWith('cap',expect.objectContaining({accountId:otherId,amount:'100.00'}));
+    expect(corrected.task.selected.accountId).toBe(otherId);
+  });
+  it('待确认时清除金额补参，即使无法生成新预览也先失效旧预览', async () => {
+    const {run,tools} = setup([intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信'}),intent(null,{amount:null},'continue')]);
+    const original = await run('给林悦主课交1000元微信');
+    const corrected = await run('金额还不确定');
+    expect(tools.invalidatePreview).toHaveBeenCalledWith('cap',original.task.previewId,expect.any(String));
+    expect(tools.createPaymentPreview).toHaveBeenCalledTimes(1);
+    expect(corrected.task.previewId).toBeUndefined();
+  });
+  it('收集参数时明确换另一名学生的同类业务，不继承原金额渠道', async () => {
+    const {run,tools} = setup([intent('payment.preview',{studentName:'林悦',amount:'1000',channel:'微信'}),intent('payment.preview',{studentName:'小雨',courseName:'陪练'},'new')]);
+    tools.getCourseAccountCandidates.mockResolvedValue({candidates:[{accountId, studentId:'student-core-1',studentName:'小雨',courseName:'陪练'}]});
+    await run('林悦交1000元微信');
+    const next = await run('另外给小雨陪练交费');
+    expect(next.task.fields).toEqual({studentName:'小雨',courseName:'陪练'});
+    expect(next.answer).toMatch(/金额.*渠道/);
+    expect(tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('收集参数时发起同一学生的另一笔收款，不继承原金额渠道', async () => {
+    const {run,tools} = setup([intent('payment.preview',{studentName:'林悦',amount:'1000',channel:'微信'}),intent('payment.preview',{studentName:'林悦',courseName:'主课'},'new')]);
+    await run('林悦交1000元微信');
+    const next = await run('另外给林悦主课交费');
+    expect(next.task.fields).toEqual({studentName:'林悦',courseName:'主课'});
+    expect(next.answer).toMatch(/金额.*渠道/);
+    expect(tools.createPaymentPreview).not.toHaveBeenCalled();
   });
   it('取消办理令服务端预览失效，并清掉金额渠道对象', async () => {
     const { run, tools } = setup([intent('payment.preview', { studentName: '林悦', courseName: '主课', amount: '1000', channel: '微信' })]);
@@ -693,7 +1146,7 @@ describe('模型驱动的持续业务任务', () => {
     expect(collecting.task.status).toBe('collecting');
 
     const choosing = setup([intent('accounts.read', { studentName:'林悦',courseName:'主课' })]);
-    choosing.tools.getCourseAccountCandidates.mockResolvedValue({ candidates:[{ accountId, studentName:'林悦', courseName:'主课' },{ accountId:crypto.randomUUID(), studentName:'林悦', courseName:'主课' }] });
+    choosing.tools.getCourseAccountCandidates.mockResolvedValue({ candidates:[{ accountId, studentId:'student-core-1', studentName:'林悦', courseName:'主课' },{ accountId:crypto.randomUUID(), studentId:'student-core-1', studentName:'林悦', courseName:'主课' }] });
     const selecting = await choosing.run('查余额');
     expect(selecting.task.status).toBe('selecting');
 
@@ -707,20 +1160,28 @@ describe('模型驱动的持续业务任务', () => {
   });
   it('同名选择有版本和真实ID绑定，不查询任意人的余额', async () => {
     const { run, tools } = setup([intent('accounts.read', { studentName: '林悦', courseName: '主课' })]);
-    const otherId = crypto.randomUUID(); tools.getCourseAccountCandidates.mockResolvedValue({ candidates: [{ accountId, studentName: '林悦', courseName: '主课' },{ accountId: otherId, studentName: '林悦', courseName: '主课' }] });
+    const otherId = crypto.randomUUID(); tools.getCourseAccountCandidates.mockResolvedValue({ candidates: [{ accountId, studentId:'student-core-1', studentName: '林悦', courseName: '主课' },{ accountId: otherId, studentId:'student-core-1', studentName: '林悦', courseName: '主课' }] });
     const first = await run('查林悦主课余额'); expect(tools.readAccount).not.toHaveBeenCalled(); expect(first.workspace.blocks.some(b => b.type === 'entity-picker')).toBe(true);
     await run(`选择候选:${otherId}:${first.task.version}`); expect(tools.readAccount).toHaveBeenCalledWith('cap', { accountId: otherId });
   });
+  it('同名学生仅一人有匹配课程账户时，也不能猜测用户所指并读取余额', async () => {
+    const {run,tools} = setup([intent('accounts.read',{studentName:'林悦',courseName:'主课'})]);
+    tools.getStudentCandidates.mockResolvedValue({candidates:[{studentId:'one',name:'林悦'},{studentId:'two',name:'林悦'}]});
+    const result = await run('查林悦主课余额');
+    expect(result.workspace.resultKind).toBe('selection');
+    expect(tools.readAccount).not.toHaveBeenCalled();
+    expect(tools.readAccountLedger).not.toHaveBeenCalled();
+  });
   it('拒绝旧版本选择卡和伪造候选ID', async () => {
     const { run, tools } = setup([intent('accounts.read', { studentName: '林悦', courseName: '主课' })]);
-    tools.getCourseAccountCandidates.mockResolvedValue({ candidates: [{ accountId, studentName: '林悦', courseName: '主课' },{ accountId: crypto.randomUUID(), studentName: '林悦', courseName: '主课' }] });
+    tools.getCourseAccountCandidates.mockResolvedValue({ candidates: [{ accountId, studentId:'student-core-1', studentName: '林悦', courseName: '主课' },{ accountId: crypto.randomUUID(), studentId:'student-core-1', studentName: '林悦', courseName: '主课' }] });
     await run('余额'); const old = await run(`选择候选:${accountId}:0`); expect(old.answer).toContain('失效'); expect(tools.readAccount).not.toHaveBeenCalled();
     const forged = await run(`选择候选:${crypto.randomUUID()}:${old.task.version}`); expect(forged.answer).toContain('授权候选'); expect(tools.readAccount).not.toHaveBeenCalled();
   });
   it('自然语言选择同名对象也只能选择当前候选真实ID', async () => {
     const otherId = crypto.randomUUID();
     const { run, tools } = setup([intent('accounts.read', { studentName: '林悦', courseName: '主课' }), intent(null, { selectionId: otherId }, 'continue')]);
-    tools.getCourseAccountCandidates.mockResolvedValue({ candidates: [{ accountId, studentName: '林悦', courseName: '主课' }, { accountId: otherId, studentName: '林悦', courseName: '主课' }] });
+    tools.getCourseAccountCandidates.mockResolvedValue({ candidates: [{ accountId, studentId:'student-core-1', studentName: '林悦', courseName: '主课' }, { accountId: otherId, studentId:'student-core-1', studentName: '林悦', courseName: '主课' }] });
     await run('查同名林悦'); await run('第二个'); expect(tools.readAccount).toHaveBeenCalledWith('cap', { accountId: otherId });
   });
   it('新业务不继承上一笔金额和渠道', async () => {
@@ -762,17 +1223,17 @@ describe('模型驱动的持续业务任务', () => {
   it('浏览器确认后先同步Core终态，询问这笔记录只展示原回执而不重复生成预览', async () => {
     const { run, tools } = setup([
       intent('payment.preview', { studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信' }),
-      intent('payment.preview', { studentName:'林悦',courseName:'主课',amount:'1000',channel:'微信' }),
+      intent('receipt.read' as DialogueIntent['operation'], {}),
     ]);
     const first = await run('给林悦主课交1000元，微信');
-    tools.readPreview.mockResolvedValueOnce({
+    tools.readPreview.mockResolvedValue({
       status: 'EXECUTED',
       actionType: 'course-account.payment',
       display: { title:'课程交费', summary:'交费 ¥1000.00' },
       receipt: { receiptId:'receipt-1', amount:'1000.00' },
     });
 
-    const reopened = await run('这笔记录还能打开吗？');
+    const reopened = await run('把刚办好的给我看看');
 
     expect(tools.readPreview).toHaveBeenCalledWith('cap', first.task.previewId);
     expect(reopened.answer).toMatch(/已执行.*1000\.00/);

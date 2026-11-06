@@ -30,6 +30,17 @@ class SystemStatusResponse {
   serverTime!: string;
 }
 
+class CourseAccountCandidateResponse {
+  @ApiProperty({ type: String, format: 'uuid' }) accountId!: string;
+  @ApiProperty({ type: String, format: 'uuid' }) studentId!: string;
+  @ApiProperty({ type: String }) studentName!: string;
+  @ApiProperty({ type: String }) courseName!: string;
+}
+
+class CourseAccountCandidatesResponse {
+  @ApiProperty({ type: [CourseAccountCandidateResponse] }) candidates!: CourseAccountCandidateResponse[];
+}
+
 const CourseAccountCandidatesQuerySchema = z.object({
   studentName: z.string().trim().min(1).max(100),
   courseName: z.string().trim().min(1).max(100).optional(),
@@ -121,7 +132,7 @@ export class InternalToolsController {
   }
 
   @Get('course-account-candidates')
-  @ApiOkResponse({ description: '精确匹配的课程账户候选，不含余额或金额' })
+  @ApiOkResponse({ type: CourseAccountCandidatesResponse, description: '精确匹配的课程账户候选，不含余额或金额' })
   @ApiQuery({ name: 'studentName', required: true, type: String, maxLength: 100 })
   @ApiQuery({ name: 'courseName', required: false, type: String, maxLength: 100 })
   @ApiQuery({ name: 'match', required: false, enum: ['search'], description: '启用不区分大小写的包含搜索；精确名称优先且不会替用户消除歧义' })

@@ -39,6 +39,7 @@ export class PeriodsService {
 
   async assertWritableForDate(occurredAt: Date, client: DatabaseClient = this.prisma): Promise<void> {
     const periodStart = businessMonthStart(occurredAt);
+    await this.lockBusinessMonth(client, periodStart);
     const closed = await client.closedPeriod.findFirst({
       where: { periodStart, reopenedAt: null },
       select: { id: true },
@@ -55,6 +56,7 @@ export class PeriodsService {
     periodStart: Date,
     actorId: string,
   ): Promise<ClosedPeriodSummary> {
+    await this.lockBusinessMonth(tx, periodStart);
     await this.assertCloseableInTransaction(tx, periodStart);
     const reclaimed = await tx.closedPeriod.updateMany({
       where: { periodStart, reopenedAt: { not: null } },
@@ -160,6 +162,7 @@ export class PeriodsService {
     reason: string,
     actorId: string,
   ): Promise<ClosedPeriodSummary> {
+    await this.lockBusinessMonth(tx, periodStart);
     const normalizedReason = reason.trim();
     if (!normalizedReason) throw new ConflictException('重开关账月份必须填写原因');
     const target = await this.getReopenableInTransaction(tx, periodStart);
@@ -168,6 +171,10 @@ export class PeriodsService {
       data: { reopenedAt: new Date(), reopenedById: actorId, reopenReason: normalizedReason },
       select: { periodStart: true, closedAt: true, reopenedAt: true, reopenReason: true },
     });
+  }
+
+  private async lockBusinessMonth(client: DatabaseClient, periodStart: Date): Promise<void> {
+    await client.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`piano.business-month:${periodStart.toISOString()}`}, 0))`;
   }
 
   async previewReopen(periodStart: Date): Promise<{ closedPeriodId: string; closedAt: Date }> {

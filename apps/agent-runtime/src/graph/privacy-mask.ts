@@ -88,7 +88,7 @@ export function buildNameMask(context: IntentContext): NameMask {
   };
 
   return {
-    maskedContext: { ...context, userMessage: maskText(context.userMessage), task: maskTask(context.task) },
+    maskedContext: { ...context, userMessage: maskText(context.userMessage), task: maskTask(context.task), ...(context.history ? {history:context.history.map(message => ({...message,content:maskText(message.content)}))} : {}) },
     restoreIntent: (intent) => ({
       ...intent,
       fields: Object.fromEntries(

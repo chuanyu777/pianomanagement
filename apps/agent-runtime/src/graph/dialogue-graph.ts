@@ -5,11 +5,11 @@ import { CoreDialogueError, type DialogueReadClient, type LessonReadQuery, type 
 import { DialogueIntentSchema, type DialogueIntent, type UnderstandIntent } from './dialogue-intent.js';
 import type { IntentParser } from './intent-parser.js';
 import { refusalGuidance } from './refusal-messages.js';
-import { resolveLessonDateRange } from './dialogue-calendar.js';
-import { deterministicMultiStep, DialogueMultiStepPlanSchema, hasExplicitPayrollCorrectionDates, hasRequiredStepOrder, type DialogueMultiStepPlan, type UnderstandMultiStep } from './dialogue-multi-step.js';
+import { DialogueMultiStepPlanSchema, isQueryOperation, type DialogueMultiStepPlan, type UnderstandMultiStep } from './dialogue-multi-step.js';
 
 const CandidateSchema = z.object({ id: z.string(), label: z.string(), description: z.string().optional(), field: z.enum(['accountId', 'teacherId', 'lessonId', 'studentId', 'courseId', 'payrollId', 'entryId']), values: z.record(z.string(), z.string()) });
 const TaskSchema = z.object({
+  history: z.array(z.object({role:z.enum(['user','assistant']),content:z.string()})).default([]),
   version: z.number().int().nonnegative().default(0),
   status: z.enum(['collecting', 'selecting', 'ready', 'awaiting_confirmation', 'completed', 'cancelled']).default('collecting'),
   operation: DialogueIntentSchema.shape.operation.default(null),
@@ -21,9 +21,10 @@ const TaskSchema = z.object({
   executedPreviewId: z.string().optional(),
   lastRunId: z.string().optional(),
   lastUserMessage: z.string().optional(),
+  pendingStudentIntent: DialogueIntentSchema.optional(),
   answer: z.string().optional(),
   workspace: WorkspaceDocumentSchema.optional(),
-  multiStep: z.object({ steps: DialogueMultiStepPlanSchema.shape.steps, currentStep: z.number().int().min(0).max(3), completedPreviewIds: z.array(z.string()), payrollCorrectionSource: z.string().optional() }).strict().optional(),
+  multiStep: z.object({ steps: DialogueMultiStepPlanSchema.shape.steps, currentStep: z.number().int().min(0), completedPreviewIds: z.array(z.string()), payrollCorrectionSource: z.string().optional(), payrollCorrectionSteps: DialogueMultiStepPlanSchema.shape.steps.optional(), payrollCorrectionReviewed:z.boolean().optional() }).strict().optional(),
 });
 export type DialogueTask = z.infer<typeof TaskSchema>;
 export type DialogueTurn = { runId: string; threadId: string; message: string; previous: unknown };
@@ -46,16 +47,6 @@ export function businessDate(now = new Date()): string {
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(value));
 }
-function sourceLessonTimeSuffix(message: string, operation: DialogueTask['operation']): string | null {
-  let source = message;
-  if (operation === 'lesson.reschedule') {
-    const targetMarker = source.search(/(?:改到|调整到|调到|改为|调整为)/u);
-    if (targetMarker >= 0) source = source.slice(0, targetMarker);
-  }
-  const matches = [...source.matchAll(/(\d{1,2})点(?:(\d{1,2})分?)?/gu)];
-  const stated = matches.at(-1);
-  return stated ? `${stated[1]!.padStart(2, '0')}:${(stated[2] ?? '00').padStart(2, '0')}` : null;
-}
 function moneyText(value: string): string {
   const match = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/u.exec(value);
   if (!match) throw new CoreDialogueError(400);
@@ -76,39 +67,6 @@ function dateTimeText(value: string | undefined, now: Date): string {
   if (!Number.isFinite(parsed.getTime())) throw new CoreDialogueError(400);
   return parsed.toISOString();
 }
-function chineseNumber(value: string): number | undefined {
-  if (/^\d+$/u.test(value)) return Number(value);
-  const digits: Record<string, number> = { 零:0, 一:1, 二:2, 两:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9 };
-  if (value === '十') return 10;
-  const parts = value.split('十');
-  if (parts.length === 2) {
-    const tens = parts[0] ? digits[parts[0]] : 1;
-    const ones = parts[1] ? digits[parts[1]] : 0;
-    if (tens !== undefined && ones !== undefined) return tens * 10 + ones;
-  }
-  return value.length === 1 ? digits[value] : undefined;
-}
-function normalizeRelativeLessonTime(value: string, calendarDate: string): string {
-  const match = /^(今天|明天|后天)?\s*(上午|中午|下午|晚上)?\s*([零一二三四五六七八九十两\d]{1,3})(?:点|时|:)(?:([零一二三四五六七八九十两\d]{1,3})分?)?$/u.exec(value.trim());
-  if (!match) return value;
-  let hour = chineseNumber(match[3]!);
-  const minute = match[4] ? chineseNumber(match[4]) : 0;
-  if (hour === undefined || minute === undefined || hour > 23 || minute > 59) return value;
-  if (['下午', '晚上'].includes(match[2] ?? '') && hour < 12) hour += 12;
-  if (match[2] === '中午' && hour < 11) hour += 12;
-  const [year, month, day] = calendarDate.split('-').map(Number);
-  const offset = match[1] === '明天' ? 1 : match[1] === '后天' ? 2 : 0;
-  const target = new Date(Date.UTC(year!, month! - 1, day! + offset));
-  const date = target.toISOString().slice(0, 10);
-  return `${date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+08:00`;
-}
-function normalizeMultiStepPlan(plan: DialogueMultiStepPlan, calendarDate: string): DialogueMultiStepPlan {
-  return DialogueMultiStepPlanSchema.parse({
-    steps: plan.steps.map(step => step.operation === 'lesson.schedule' && step.fields.startsAt
-      ? { ...step, fields: { ...step.fields, startsAt: normalizeRelativeLessonTime(step.fields.startsAt, calendarDate) } }
-      : step),
-  });
-}
 function document(title: string, text: string, blocks: WorkspaceDocument['blocks'] = [], resultKind: WorkspaceResultKind = 'query'): WorkspaceDocument {
   return WorkspaceDocumentSchema.parse({ protocolVersion, resultKind, title, blocks: [{ type: 'summary', title, text }, ...blocks], sources: [] });
 }
@@ -125,10 +83,26 @@ function ask(task: DialogueTask, runId: string, question: string): DialogueResul
 }
 function withCompletedSteps(task: DialogueTask, message: string): string {
   const completed = task.multiStep?.completedPreviewIds.length ?? 0;
-  return completed ? `第${completed}步已确认，未撤销；第${completed + 1}步${task.previewId ? '状态需重新查询' : '尚未生成可确认预览'}。${message}` : message;
+  if (!completed) return message;
+  if (task.multiStep?.steps.some(step => isQueryOperation(step.operation))) return `已有${completed}项写入经Core确认，未撤销；当前第${task.multiStep.currentStep + 1}步尚未完成。${message}`;
+  return `第${completed}步已确认，未撤销；第${completed + 1}步${task.previewId ? '状态需重新查询' : '尚未生成可确认预览'}。${message}`;
 }
-function isExecutedReceiptQuestion(message: string): boolean {
-  return /(?:这|那)?笔(?:记录|业务|操作)?.*(?:还能|可以|怎么|是否)?.*(?:打开|查看|查询|回执|结果)|(?:查看|查询|打开).*(?:原记录|回执|执行结果)/u.test(message.trim());
+function completePayrollCorrection(steps: DialogueMultiStepPlan['steps']): boolean {
+  return steps.every((step,index) => {
+    const next=steps[index+1];
+    if (step.operation !== 'payroll.cancel-payment' || next?.operation !== 'payroll.pay') return true;
+    const period=step.fields.period, paidAt=next.fields.paidAt;
+    return typeof period === 'string' && /^\d{4}-(?:0[1-9]|1[0-2])$/u.test(period) && next.fields.period === period
+      && typeof paidAt === 'string' && (z.iso.date().safeParse(paidAt).success || z.iso.datetime({offset:true}).safeParse(paidAt).success);
+  });
+}
+function validPayrollCorrection(task: NonNullable<DialogueTask['multiStep']>): boolean {
+  const hasCorrection=task.steps.some((step,index) => step.operation === 'payroll.cancel-payment' && task.steps[index+1]?.operation === 'payroll.pay');
+  if (!hasCorrection) return true;
+  if (!task.payrollCorrectionReviewed || !task.payrollCorrectionSteps) return false;
+  const pairs = (steps: DialogueMultiStepPlan['steps']) => steps.flatMap((step, index) => step.operation === 'payroll.cancel-payment' && steps[index + 1]?.operation === 'payroll.pay' ? [[step, steps[index + 1]]] : []);
+  if (JSON.stringify(pairs(task.steps)) !== JSON.stringify(pairs(task.payrollCorrectionSteps))) return false;
+  return completePayrollCorrection(task.payrollCorrectionSteps);
 }
 function executedReceiptText(preview: Record<string, unknown>): string {
   const display = preview.display && typeof preview.display === 'object' ? preview.display as Record<string, unknown> : {};
@@ -137,7 +111,7 @@ function executedReceiptText(preview: Record<string, unknown>): string {
   return `${title}已执行${summary ? `：${summary}` : ''}。原回执仍可查询，不会重复办理。`;
 }
 function choose(task: DialogueTask, runId: string, candidates: DialogueTask['candidates'], title: string): DialogueResult | undefined {
-  if (candidates.length === 0) return ask(task, runId, `没有找到${title}，请核对姓名、课程或日期。`);
+  if (candidates.length === 0) return ask(task, runId, title === '学生' ? '没有找到学生，请核对姓名；如果尚未建档，请由店主先新建学生，再继续办理。' : `没有找到${title}，请核对姓名、课程或日期。`);
   if (candidates.length === 1) {
     const item = candidates[0]!; task.selected[item.field] = item.id; Object.assign(task.fields, item.values); task.candidates = []; return undefined;
   }
@@ -180,7 +154,7 @@ function requiredFields(operation: DialogueTask['operation']): string[] {
 }
 
 export function createDialogueGraph(input: { tools: Tools; capability: string; understand?: UnderstandIntent; intentParser?: IntentParser; understandMultiStep?: UnderstandMultiStep; now?: () => Date }) {
-  type Prepared = { previous: DialogueTask; task: DialogueTask; alreadyExecuted: boolean; multiStepPlan?: DialogueMultiStepPlan; forcedIntent?: DialogueIntent };
+  type Prepared = { previous: DialogueTask; task: DialogueTask; alreadyExecuted: boolean; multiStepPlan?: DialogueMultiStepPlan; payrollCorrectionSteps?: DialogueMultiStepPlan['steps']; forcedIntent?: DialogueIntent };
   const loadContext = async (turn: DialogueTurn): Promise<{ prepared?: Prepared; result?: DialogueResult }> => {
     const parsed = TaskSchema.safeParse(turn.previous);
     const previous = parsed.success ? parsed.data : TaskSchema.parse({});
@@ -188,7 +162,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
     const task: DialogueTask = { ...previous, fields: { ...previous.fields }, selected: { ...previous.selected }, candidates: [...previous.candidates], references: [...previous.references], version: previous.version + 1 };
     if (!recoveryCommands.has(turn.message.trim())) task.lastUserMessage = turn.message;
     if (previous.multiStep && !['completed', 'cancelled'].includes(previous.status) && turn.message.trim() !== '取消当前办理'
-      && !hasExplicitPayrollCorrectionDates(previous.multiStep, previous.multiStep.payrollCorrectionSource ?? previous.lastUserMessage ?? '')) {
+      && !validPayrollCorrection(previous.multiStep)) {
       const answer = `${previous.previewId ? '当前已有确认单，状态需要先向Core核查；' : ''}这项历史工资纠错无法核实年份，请先取消当前办理，再分别写明工资所属年月和实际支付日期的年月日，重新发起。已执行的步骤不会自动撤销。`;
       return { result: finish(task, turn.runId, answer, document('请核实工资纠错年份', answer, [], 'clarification')) };
     }
@@ -216,28 +190,26 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           task.multiStep = multiStep;
           task.executedPreviewId = previous.previewId;
           task.status = 'completed';
-          const answer = `${multiStep.steps.length}步办理均已分别在Core确认执行。`;
+          const answer = multiStep.steps.some(step => isQueryOperation(step.operation)) ? `全部${multiStep.steps.length}步已完成；写入操作均已在Core确认执行。` : `${multiStep.steps.length}步办理均已分别在Core确认执行。`;
           return { result: finish(task, turn.runId, answer, document('多步办理已完成', answer)) };
         }
         const step = multiStep.steps[multiStep.currentStep]!;
         const nextFields={...step.fields};
-        if((step.operation==='payment.preview'||step.operation==='payroll.pay')&&!nextFields.channel){
-          const channel=['现金','微信','支付宝','银行卡','其他'].find(value=>turn.message.includes(value));
-          if(channel)nextFields.channel=channel;
-        }
         task.multiStep = multiStep;
         task.operation = step.operation;
         task.status = 'ready';
         task.fields = Object.fromEntries(Object.entries(nextFields).filter((entry): entry is [string, string] => entry[1] !== null));
         task.selected = {};
         task.candidates = [];
+        task.executedPreviewId = previous.previewId;
         delete task.previewId;
-        const withoutOldPreview = { ...previous };
+        const withoutOldPreview = { ...previous, executedPreviewId: previous.previewId };
         delete withoutOldPreview.previewId;
         if (turn.message.trim() === '取消当前办理') {
           return { prepared: { previous:withoutOldPreview, task, alreadyExecuted:false, forcedIntent:{ mode:'cancel',operation:null,fields:{},question:null } } };
         }
-        return { prepared: { previous: withoutOldPreview, task, alreadyExecuted: false, forcedIntent: { mode:'continue', operation:step.operation, fields:nextFields, question:null } } };
+        const isContinueCommand = ['继续','继续下一步','开始办理',...recoveryCommands].includes(turn.message.trim());
+        return { prepared: { previous: withoutOldPreview, task, alreadyExecuted: false, ...(isContinueCommand ? {forcedIntent: { mode:'continue' as const, operation:step.operation, fields:nextFields, question:null }} : {}) } };
       }
     }
     if (!previous.multiStep && previous.status === 'awaiting_confirmation' && previous.previewId) {
@@ -253,9 +225,10 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       if (preview.status === 'EXECUTED') {
         task.executedPreviewId = previous.previewId;
         task.status = 'completed';
-        if (isExecutedReceiptQuestion(turn.message)) {
-          const answer = executedReceiptText(preview);
-          return { result: finish(task, turn.runId, answer, document('业务回执', answer)) };
+        if (previous.pendingStudentIntent && turn.message.trim() === '继续') {
+          const forcedIntent = previous.pendingStudentIntent;
+          delete task.pendingStudentIntent;
+          return { prepared: { previous: { ...previous, executedPreviewId: previous.previewId, status:'completed' }, task, alreadyExecuted:true, forcedIntent } };
         }
         return { prepared: { previous: { ...previous, executedPreviewId: previous.previewId, status:'completed' }, task, alreadyExecuted: true } };
       }
@@ -270,35 +243,39 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
     const userMessage = recoveryCommands.has(turn.message.trim()) ? prepared.previous.lastUserMessage : turn.message;
     if (!userMessage) return { result: ask(prepared.task, turn.runId, '没有可重试的请求，请重新说明要办理的事项。') };
     const calendarDate = businessDate(input.now?.() ?? new Date());
-    const boundedPlan = !prepared.previous.multiStep ? deterministicMultiStep(userMessage, calendarDate) : null;
-    if (boundedPlan) {
-      if (!hasExplicitPayrollCorrectionDates(boundedPlan, userMessage)) return { result: ask(prepared.task, turn.runId, '请重新说明工资所属月份和更正后的实际支付日期，分别写明年份、月份和日期；当前未生成预览。') };
-      prepared.multiStepPlan = normalizeMultiStepPlan(boundedPlan, calendarDate);
-      const step = prepared.multiStepPlan.steps[0]!;
-      return { intent:{ mode:'new',operation:step.operation,fields:step.fields,question:null } };
-    }
     if (!prepared.previous.multiStep && input.understandMultiStep) {
       let candidate: DialogueMultiStepPlan | null;
       try {
-        candidate = await input.understandMultiStep({ userMessage, task: { operation:prepared.task.operation,fields:prepared.task.fields } }, signal);
+      candidate = await input.understandMultiStep({ userMessage, businessDate:calendarDate, task: { operation:prepared.task.operation,fields:prepared.task.fields, candidates:prepared.task.candidates, references:prepared.task.references }, history:prepared.previous.history }, signal);
       } catch (error) {
-        if (error instanceof Error && error.message === 'AI_MULTI_STEP_INVALID') return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；当前未生成预览。') };
+        if (error instanceof Error && error.message === 'AI_MULTI_STEP_INVALID') return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；涉及日期时请写明年份。当前未生成预览。') };
         throw error;
       }
       if (candidate) {
-        const plan = normalizeMultiStepPlan(DialogueMultiStepPlanSchema.parse(candidate), calendarDate);
-        if (!hasExplicitPayrollCorrectionDates(plan, userMessage)) return { result: ask(prepared.task, turn.runId, '请重新说明工资所属月份和更正后的实际支付日期，分别写明年份、月份和日期；当前未生成预览。') };
-        if (!hasRequiredStepOrder(plan, userMessage)) return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；当前未生成预览。') };
+        let plan = DialogueMultiStepPlanSchema.parse(candidate);
+        if (!completePayrollCorrection(plan.steps)) return { result: ask(prepared.task, turn.runId, '请重新说明工资所属月份和更正后的实际支付日期，分别写明年份、月份和日期；当前未生成预览。') };
+        if (plan.steps.some((step, index) => step.operation === 'payroll.cancel-payment' && plan.steps[index + 1]?.operation === 'payroll.pay')) prepared.payrollCorrectionSteps = plan.steps;
+        const mergedSteps: DialogueMultiStepPlan['steps'] = [];
+        for (let index = 0; index < plan.steps.length; index++) {
+          const open = plan.steps[index]!;
+          if (open.operation !== 'course-account.open') { mergedSteps.push(open); continue; }
+          const payment = plan.steps[index + 1];
+          if (!payment || payment.operation !== 'payment.preview') return { result: ask(prepared.task, turn.runId, '请先为该学生课程缴费并确认，再重新提出赠送或排课请求；请提供学生、课程、缴费金额和渠道。当前未生成预览。') };
+          const keys = ['studentName', 'courseName'] as const;
+          if (keys.some(key => !open.fields[key] || !payment.fields[key] || open.fields[key] !== payment.fields[key]) || (open.fields.currentUnitPrice && payment.fields.currentUnitPrice && open.fields.currentUnitPrice !== payment.fields.currentUnitPrice)) {
+            return { result: ask(prepared.task, turn.runId, '开户与缴费的学生、课程或单价无法确认一致，请明确说明同一学生、同一课程及单价；当前未生成预览。') };
+          }
+          mergedSteps.push({ ...payment, fields: { ...payment.fields, ...(open.fields.currentUnitPrice ? { currentUnitPrice:open.fields.currentUnitPrice } : {}) } });
+          index++;
+        }
+        if (mergedSteps.length === 1) return { intent:{ mode:'new',operation:mergedSteps[0]!.operation,fields:mergedSteps[0]!.fields,question:null } };
+        plan = DialogueMultiStepPlanSchema.parse({steps:mergedSteps});
         prepared.multiStepPlan = plan;
         const step = plan.steps[0]!;
         return { intent: { mode:'new', operation:step.operation, fields:step.fields, question:null } };
       }
-      const command = userMessage.split(/[,，；;]\s*备注[：:]?/u, 1)[0]!;
-      if (/(?:再|然后|接着)[^，。；;]{0,25}(?:排|交|缴|收|赠|送|登记|调整|支付|生成|办理|开户)/u.test(command)) {
-        return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；当前未生成预览。') };
-      }
     }
-    const context = { businessDate: calendarDate, task: { status:prepared.task.status,operation: prepared.task.operation, fields: prepared.task.fields, candidates: prepared.task.candidates, references: prepared.task.references, hasPreview: !!prepared.previous.previewId && !prepared.alreadyExecuted, alreadyExecuted: prepared.alreadyExecuted }, userMessage };
+    const context = { businessDate: calendarDate, task: { status:prepared.task.status,operation: prepared.task.operation, fields: prepared.task.fields, candidates: prepared.task.candidates, references: prepared.task.references, hasPreview: !!prepared.previous.previewId && !prepared.alreadyExecuted, alreadyExecuted: prepared.alreadyExecuted }, userMessage, history:prepared.previous.history };
     if (input.intentParser) {
       const parsed = await input.intentParser(context, signal);
       if (parsed.kind === 'parsed') return { intent: parsed.intent };
@@ -308,7 +285,8 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       return { result: ask(prepared.task, turn.runId, '我没太听懂这句话要办什么。可以说得更具体一点，比如"查今天的课表"、"给某位学生交费"或"排一节课"。') };
     }
     if (!input.understand) return { result: finish(prepared.task, turn.runId, 'AI暂不可用，请使用人工办理入口。', document('AI暂不可用', '未执行任何业务。', [{ type: 'error-recovery', code: 'AI_UNAVAILABLE', message: '请稍后重试，或使用人工办理入口。', actions: ['open-structured-page'] }], 'error')) };
-    return { intent: DialogueIntentSchema.parse(await input.understand(context, signal)) };
+    const understood = DialogueIntentSchema.parse(await input.understand(context, signal));
+    return { intent: understood };
   };
   const process = async (turn: DialogueTurn, prepared: Prepared, intent: DialogueIntent): Promise<DialogueResult> => {
     const { previous } = prepared;
@@ -350,6 +328,10 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         if (multiStep) task.multiStep = multiStep;
         task.status = 'cancelled';
         const completedSteps = multiStep?.completedPreviewIds.length ?? 0;
+        if (multiStep?.steps.some(step => isQueryOperation(step.operation)) && multiStep.currentStep > 0) {
+          const answer = `已取消后续步骤。前${multiStep.currentStep}步已完成，其中${completedSteps}项写入已确认生效且未撤销；剩余${multiStep.steps.length - multiStep.currentStep}步未完成。`;
+          return finish(task, turn.runId, answer, document('已取消后续步骤', answer));
+        }
         if (multiStep && completedSteps > 0) {
           const remainingSteps = multiStep.steps.length - completedSteps;
           const answer = `已取消后续步骤。${multiStep.steps.length}步办理里前 ${completedSteps} 步已经确认生效，剩余 ${remainingSteps} 步没有执行，也没有做任何撤销；如需撤回已生效的部分，请单独发起对应的纠错或冲正。`;
@@ -360,27 +342,42 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       if (task.multiStep && intent.operation && intent.operation !== task.multiStep.steps[task.multiStep.currentStep]?.operation) {
         return ask(task, turn.runId, `当前是第${task.multiStep.currentStep + 1}步；如需结束多步办理，请取消当前办理。`);
       }
-      if (intent.mode === 'clarify' && !intent.operation) {
-        const protectedAction = accessProbeForAmbiguousRequest(turn.message);
-        if (protectedAction) await input.tools.checkActionAccess(input.capability, protectedAction);
-        return ask(task, turn.runId, '请说明希望先查询或办理哪一项业务；当前尚未查询或执行任何记录。');
+      if (intent.operation === 'receipt.read') {
+        const previewId = previous.executedPreviewId ?? previous.previewId;
+        if (!previewId) return ask(task, turn.runId, '当前会话没有可查看的操作回执，请说明要查哪笔记录。');
+        const preview = await input.tools.readPreview(input.capability, previewId);
+        if (preview.status !== 'EXECUTED') return ask(task, turn.runId, '这项操作还没有已执行回执，请先核对当前确认单。');
+        task.executedPreviewId = previewId;
+        task.status = 'completed';
+        const answer = executedReceiptText(preview);
+        return finish(task, turn.runId, answer, document('业务回执', answer));
       }
-      const clarificationQuestion=intent.mode==='clarify'&&intent.operation==='refund.preview'&&/%/u.test(turn.message)
-        ? '退款手续费必须填写固定金额；百分比只在预览中根据固定金额换算显示，不能按百分比直接办理。请提供固定手续费金额。'
-        : null;
+      if (intent.mode === 'clarify' && intent.operation && intent.question) return ask(task, turn.runId, intent.question);
+      if (intent.mode === 'clarify' && !intent.operation) {
+        return ask(task, turn.runId, '无法确定要办理的事项，请说明要办理什么或查询什么；当前尚未查询或执行任何记录。');
+      }
       if (intent.mode === 'clarify') intent = { ...intent, mode: intent.operation === task.operation ? 'continue' : 'new' };
-      if (previous.status === 'collecting' && previous.operation && intent.operation === previous.operation && intent.mode === 'new') {
-        intent = { ...intent, mode:'continue' };
+      // An unconfirmed creation is not proof that its subject exists. Keep the
+      // request pending until Core reports execution when it refers to that student.
+      if (previous.operation === 'student.create' && previous.previewId && !alreadyExecuted
+        && intent.operation !== 'student.create' && 'studentName' in intent.fields
+        && (!intent.fields.studentName || intent.fields.studentName === previous.fields.name)) {
+        task.pendingStudentIntent = intent;
+        const question = '上一位学生的建档尚未确认执行，请先确认建档，再说“继续”处理刚才的请求；当前未查询学生账户。';
+        const workspace = previous.workspace ? { ...previous.workspace, blocks:[...previous.workspace.blocks, { type:'summary' as const, title:'等待建档确认', text:question }] } : document('等待建档确认', question, [], 'clarification');
+        return finish(task, turn.runId, question, workspace);
       }
       const changed = Object.entries(intent.fields).filter(([key]) => allowedFields.has(key));
       if (intent.mode === 'new') {
         await withdrawPreviousPreview('用户切换办理事项');
-        const explicitlyRefersToPreviousLesson = /(?:这节|那节|它|刚才|上述|上面)(?:课)?/u.test(turn.message);
-        task = { ...TaskSchema.parse({}), version: task.version, operation: intent.operation, ...(task.lastUserMessage ? {lastUserMessage:task.lastUserMessage} : {}), references: previous.operation === 'lessons.read' && explicitlyRefersToPreviousLesson ? previous.references : [] };
+        task = { ...TaskSchema.parse({}), version: task.version, operation: intent.operation, ...(task.lastUserMessage ? {lastUserMessage:task.lastUserMessage} : {}) };
       } else {
-        if (intent.mode === 'correct') await withdrawPreviousPreview('用户更正办理信息');
+        if (intent.mode === 'correct' || changed.some(([key, value]) => (value ?? undefined) !== task.fields[key])) {
+          await withdrawPreviousPreview('用户更正办理信息');
+          if (alreadyExecuted) return finish(task, turn.runId, '原业务已经确认执行，不能通过修改或取消对话撤回。请查询原记录，或另行发起允许的纠错业务。', document('原业务已执行', '没有追加或撤销任何业务记录。'));
+        }
         task.operation = intent.operation ?? task.operation;
-        if (intent.mode === 'correct' || changed.some(([key]) => ['studentName','courseName','teacherName','date','dateFrom','dateTo'].includes(key))) { task.selected = {}; task.candidates = []; }
+        if (changed.some(([key, value]) => ['studentName','courseName','teacherName','date','dateFrom','dateTo'].includes(key) && (value ?? undefined) !== task.fields[key])) { task.selected = {}; task.candidates = []; }
       }
       for (const [key, value] of changed) { if (value === null) delete task.fields[key]; else task.fields[key] = value; }
       if (intent.mode === 'new' && previous.operation === 'accounts.read' && intent.operation === 'payment.preview' && previous.selected.accountId && previous.fields.studentName === task.fields.studentName && previous.fields.courseName === task.fields.courseName) {
@@ -392,30 +389,17 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         task.selected[candidate.field] = candidate.id; Object.assign(task.fields, candidate.values); task.candidates = [];
       }
       const f = task.fields;
-      if (task.operation === 'lessons.read') {
-        const resolved = resolveLessonDateRange(turn.message, businessDate(now));
-        if (resolved.kind === 'ambiguous') return ask(task, turn.runId, '请补充具体范围，例如开始日期和结束日期。');
-        if (resolved.kind === 'resolved') {
-          f.dateFrom = resolved.dateFrom;
-          f.dateTo = resolved.dateTo;
-          delete f.date;
-        }
+      if (task.operation === 'course-account.open') {
+        if (!task.multiStep) task.operation = 'payment.preview';
+        return ask(task, turn.runId, `${task.multiStep ? '这是历史办理计划，请先取消当前办理，再重新发起缴费。' : ''}课程记录在首次缴费确认时按需建立。请提供学生、课程、缴费金额和渠道，例如“给林悦主课缴费1000元，微信”；如需指定单节价格也请一并说明。当前未生成开户预览。`);
       }
       if (task.operation === 'lessons.read' && f.date && !f.dateFrom) { f.dateFrom = f.date; f.dateTo = f.date; }
       if (!task.operation || task.operation === 'unsupported') {
         if (intent.question) return finish(task, turn.runId, intent.question, document('需要换个方式办理', intent.question, [], 'clarification'));
-        if (/退款手续费.*(?:手工收入|收入)/u.test(turn.message)) return finish(task, turn.runId, '退款手续费由最终退款业务自动形成经营收入，不能再重复登记为手工收入。当前未生成任何预览。', document('不能重复登记退款手续费', '退款手续费应随最终退款自动入账；本次未写入任何业务数据。'));
-        if (/退款.*手续费.*\d+(?:\.\d+)?%/u.test(turn.message)) return finish(task, turn.runId, '退款手续费必须填写固定金额；百分比只在预览中根据固定金额换算显示，不能按百分比直接办理。当前未生成任何预览。', document('请填写固定手续费', '请提供固定手续费金额；当前未写入任何业务数据。'));
-        if (task.fields.reason==='跨课程抵扣欠费'||/退款.*(?:抵|冲).*(?:欠费)|(?:主课|陪练).*抵.*(?:主课|陪练).*欠费/u.test(turn.message)) return finish(task, turn.runId, '不同课程账户不能相互抵扣欠费；请先分别处理各课程余额。当前未生成退款预览。', document('不能跨课程抵扣', '各课程金额独立核算，当前未写入任何业务数据。'));
-        if(task.fields.reason==='关账改日期绕过')return finish(task,turn.runId,'不能通过修改真实业务日期绕过关账。请填写实际发生日期；已关账月份如需补录，应先按规定重开账期。当前未生成任何预览。',document('不能绕过关账','系统保留真实业务日期，当前未写入任何业务数据。'));
-        if (task.fields.reason==='工资不支持分批支付') return finish(task, turn.runId, '系统不支持工资分批支付；工资只能按工资记录的实发金额一次登记，当前未生成任何部分支付预览。', document('不支持工资分批支付', '请按工资记录的实发金额一次登记；本次未写入任何业务数据。'));
-        if (task.fields.reason==='已关账工资不可调整') return finish(task, turn.runId, '已关账月份的工资不能直接修改；如需补发差额，请按当前开放月份登记经确认的工资调整，原历史工资保持不变。当前未生成预览。', document('不能修改已关账工资', '9月历史工资未修改，也未生成可执行预览。'));
-        if (/直接.*(?:转账|打款).*退给/u.test(turn.message)) return finish(task, turn.runId, '系统不代替店主向家长转账；退款申请和实际付款在线下完成后，系统仅登记最终退款。当前未生成任何预览。', document('退款在线下办理', '系统只登记，不执行银行或第三方转账。'));
         return ask(task, turn.runId, '本期不支持这项自动化请求。可以改为指定周数的排课，或办理已支持的查询和预览；当前未执行业务。');
       }
       const actionTypeForAccess: Record<string,string> = { 'accounts.read':'course-account.read', 'payment.preview':'course-account.payment', 'gift.preview':'course-account.gift', 'refund.preview':'student.final-refund', 'lesson.schedule':f.weeks ? 'lesson.schedule.weekly-batch' : 'lesson.schedule.single' };
       if (!['lessons.read','overview.read','ledger.read','report.monthly','payroll.read','directory.read','arrears.read','consumption.read','period.preclose.read'].includes(task.operation)) await input.tools.checkActionAccess(input.capability, actionTypeForAccess[task.operation] ?? task.operation);
-      if(clarificationQuestion)return ask(task,turn.runId,clarificationQuestion);
       if (['lesson.reschedule','lesson.cancel'].includes(task.operation) && !task.selected.lessonId && !f.studentName && (f.status === '已完成' || f.status === '已取消')) {
         const date = businessDate(now);
         const result = await input.tools.readLessons(input.capability, { dateFrom:date,dateTo:date,...(f.courseName ? {courseName:f.courseName}:{}), statusText:f.status });
@@ -434,7 +418,8 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       const missing = requiredFields(task.operation).filter(field => !f[field]);
       if (missing.length) {
         const retained = [f.studentName && `学生${f.studentName}`, f.courseName && `课程${f.courseName}`, f.teacherName && `老师${f.teacherName}`, f.amount && `金额${f.amount}`].filter(Boolean).join('、');
-        return ask(task, turn.runId, `${retained ? `已保留：${retained}。` : ''}还需要补充：${missing.map(field => labels[field] ?? field).join('、')}。`);
+        const dateRangeHint = missing.includes('dateFrom') && missing.includes('dateTo') ? '请补充具体范围。' : '';
+        return ask(task, turn.runId, `${retained ? `已保留：${retained}。` : ''}${dateRangeHint}还需要补充：${missing.map(field => labels[field] ?? field).join('、')}。`);
       }
       if (task.operation === 'student.update' && !f.name && !f.phone && !f.notes) return ask(task, turn.runId, '请说明要修改学生姓名、电话或备注中的哪一项。');
       if (task.operation === 'course.update' && !f.name && !f.defaultUnitPrice && !f.defaultDurationMinutes && !f.isActive) return ask(task, turn.runId, '请说明要修改课程名称、默认单价、时长或启用状态中的哪一项。');
@@ -563,15 +548,15 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         return finish(task, turn.runId, answer, workspace);
       }
       const accountOperations = ['accounts.read', 'ledger.read', 'payment.preview', 'gift.preview', 'ledger-entry.reversal', 'lesson.schedule', 'course-account.price'];
+      if (accountOperations.includes(task.operation) && !task.selected.accountId && !task.selected.studentId) {
+        const students = await input.tools.getStudentCandidates(input.capability, { studentName:f.studentName!,match:'search' });
+        const selection = choose(task, turn.runId, students.candidates.map(item => ({ id:item.studentId, label:item.name, description:`学生 ${item.studentId.slice(-8)}`, field:'studentId', values:{studentName:item.name} })), '学生');
+        if (selection) return selection;
+      }
       if (task.operation === 'accounts.read' && !f.courseName && !task.selected.accountId) {
         const found = await input.tools.getCourseAccountCandidates(input.capability, { studentName:f.studentName!,match:'search' });
-        if (found.candidates.length === 0) return ask(task, turn.runId, '没有找到该学生的课程账户，请核对学生姓名。');
-        const students = await input.tools.getStudentCandidates(input.capability, { studentName:f.studentName!,match:'search' });
-        if (students.candidates.length !== 1 || found.candidates.some(candidate => candidate.studentName !== students.candidates[0]?.name)) {
-          if (found.candidates.length === 1) return ask(task, turn.runId, '学生姓名有多个匹配，请补充课程名称并选择课程账户后查看余额。');
-          const selection = choose(task, turn.runId, found.candidates.map(item => ({ id:item.accountId,label:`${item.studentName} · ${item.courseName}`,description:`账户 ${item.accountId.slice(-8)}`,field:'accountId',values:{studentName:item.studentName,courseName:item.courseName} })), '学生课程账户');
-          if (selection) return selection;
-        }
+        found.candidates = found.candidates.filter(candidate => candidate.studentId === task.selected.studentId);
+        if (found.candidates.length === 0) return ask(task, turn.runId, '该学生尚无课程记录；需要缴费时，可以直接告诉我学生、课程和金额。');
         const accounts = await Promise.all(found.candidates.map(candidate => input.tools.readAccount(input.capability, { accountId:candidate.accountId })));
         const answer = accounts.map(account => `${account.courseName}：实收 ${account.paidBalance}，赠送 ${account.giftBalance}，总 ${account.totalBalance}，单价 ${account.currentUnitPrice}`).join('；');
         task.status = 'completed';
@@ -579,7 +564,41 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       }
       if (accountOperations.includes(task.operation) && !task.selected.accountId) {
         const found = await input.tools.getCourseAccountCandidates(input.capability, { studentName: f.studentName!, courseName: f.courseName!, match: 'search' });
-        const result = choose(task, turn.runId, found.candidates.map(item => ({ id: item.accountId, label: `${item.studentName} · ${item.courseName}`, description: `账户 ${item.accountId.slice(-8)}`, field: 'accountId', values: { studentName: item.studentName, courseName: item.courseName } })), '学生课程账户'); if (result) return result;
+        let matching = found.candidates.filter(item => item.studentId === task.selected.studentId);
+        if (!matching.length && (task.operation === 'gift.preview' || task.operation === 'lesson.schedule')) {
+          if (!input.tools.readDirectory) return ask(task, turn.runId, '暂时无法核实课程，请稍后重试；当前未生成预览。');
+          const directory = await input.tools.readDirectory(input.capability);
+          const query = f.courseName!.trim().toLocaleLowerCase();
+          const exact = directory.courses.filter(course => course.name.toLocaleLowerCase() === query);
+          const courses = exact.length ? exact : directory.courses.filter(course => course.name.toLocaleLowerCase().includes(query));
+          const choice = choose(task, turn.runId, courses.map(course => ({id:course.courseId,label:course.name,field:'courseId' as const,values:{courseName:course.name}})), '课程');
+          if (choice) return choice;
+          const course = courses.find(item => item.courseId === task.selected.courseId);
+          if (!course?.isActive) return ask(task, turn.runId, '该课程未启用，请核对课程状态；当前未生成预览。');
+          if (directory.courses.filter(item => item.name === course.name).length !== 1) return ask(task, turn.runId, '课程名称对应多个课程，暂时无法安全核实课程记录，请使用结构化页面核对。');
+          const rechecked = await input.tools.getCourseAccountCandidates(input.capability, {studentName:f.studentName!,courseName:course.name,match:'search'});
+          matching = rechecked.candidates.filter(item => item.studentId === task.selected.studentId && item.courseName === course.name);
+          if (!matching.length) {
+            const action = task.operation === 'gift.preview' ? '赠送' : '排课';
+            return ask(task, turn.runId, `该学生的${f.courseName}尚无课程记录，${action}尚未办理。请先提供学生、课程、缴费金额和渠道，生成缴费预览并确认；缴费确认后请重新提出${action}请求。`);
+          }
+        }
+        if (!matching.length && task.operation !== 'payment.preview') return ask(task, turn.runId, '没有找到该学生与所述课程的记录，请确认课程名称；如尚未缴费，可先办理缴费。');
+        if(matching.length) { const result = choose(task, turn.runId, matching.map(item => ({ id: item.accountId, label: `${item.studentName} · ${item.courseName}`, description: `账户 ${item.accountId.slice(-8)}`, field: 'accountId', values: { studentName: item.studentName, courseName: item.courseName } })), '学生课程账户'); if (result) return result; }
+      }
+      if(task.operation==='payment.preview'&&f.currentUnitPrice&&!task.selected.studentId){
+        const students=await input.tools.getStudentCandidates(input.capability,{studentName:f.studentName!,match:'search'});
+        const choice=choose(task,turn.runId,students.candidates.map(student=>({id:student.studentId,label:student.name,field:'studentId' as const,values:{studentName:student.name}})),'学生');
+        if(choice)return choice;
+      }
+      if(task.operation==='payment.preview'&&(!task.selected.accountId||f.currentUnitPrice)&&!task.selected.courseId){
+        if(!input.tools.readDirectory) return ask(task,turn.runId,'暂时无法核实课程，请稍后重试；当前未生成缴费预览。');
+        const directory=await input.tools.readDirectory(input.capability);
+        const query=f.courseName!.trim().toLocaleLowerCase();
+        const exact=directory.courses.filter(course=>course.isActive&&course.name.toLocaleLowerCase()===query);
+        const courses=exact.length?exact:directory.courses.filter(course=>course.isActive&&course.name.toLocaleLowerCase().includes(query));
+        const choice=choose(task,turn.runId,courses.map(course=>({id:course.courseId,label:course.name,field:'courseId' as const,values:{courseName:course.name}})),'缴费课程');
+        if(choice)return choice;
       }
       if (task.operation === 'accounts.read') {
         const account = await input.tools.readAccount(input.capability, { accountId: task.selected.accountId! });
@@ -628,14 +647,14 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         })), '要冲正的原流水');
         if (result) return result;
       }
-      if (task.operation === 'student.update' || task.operation === 'course-account.open') {
+      if (task.operation === 'student.update') {
         if (!task.selected.studentId) {
           const found = await input.tools.getStudentCandidates(input.capability, { studentName:f.studentName!,match:'search' });
           const result = choose(task, turn.runId, found.candidates.map(item => ({ id:item.studentId,label:item.name,field:'studentId',values:{ studentName:item.name } })), '学生');
           if (result) return result;
         }
       }
-      if (task.operation === 'course.update' || task.operation === 'course-account.open') {
+      if (task.operation === 'course.update') {
         if (!task.selected.courseId) {
           if (!input.tools.readDirectory) return ask(task, turn.runId, '当前Agent没有安全的课程ID候选读取能力，无法识别该课程；未生成预览。');
           const directory = await input.tools.readDirectory(input.capability);
@@ -659,7 +678,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         if (task.operation === 'payment.preview' && !channel) return ask(task, turn.runId, '请选择实际收款渠道：现金、微信、支付宝、银行卡或其他。');
         if (channel === channelNames['其他'] && !f.note) return ask(task, turn.runId, '渠道选择其他时，请补充渠道备注。');
         await withdrawPreviousPreview('生成替代预览');
-        const preview = task.operation === 'payment.preview' ? await input.tools.createPaymentPreview(input.capability, { ...base, channel: channel! }) : await input.tools.createGiftPreview(input.capability, base);
+        const preview = task.operation === 'payment.preview' ? await input.tools.createPaymentPreview(input.capability, task.selected.courseId ? { ...keys,studentId:task.selected.studentId!,courseId:task.selected.courseId,amount,channel:channel!,occurredAt:dateTimeText(f.occurredAt,now),...(f.currentUnitPrice ? {currentUnitPrice:moneyText(f.currentUnitPrice)} : {}),...(f.note ? {note:f.note} : {}) } : { ...base, channel: channel! }) : await input.tools.createGiftPreview(input.capability, base);
         task.previewId = preview.previewId;
         task.status = 'awaiting_confirmation';
         const display = preview.display;
@@ -682,10 +701,9 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           let candidates = task.references;
           if (f.studentName) {
             const result = await input.tools.getLessonCandidates(input.capability, { studentName: f.studentName, match: 'search', ...(f.date || f.dateFrom ? { date: f.date ?? f.dateFrom! } : {}) });
-            const timeSuffix = sourceLessonTimeSuffix(turn.message, task.operation);
             candidates = result.candidates
               .filter(item => !f.courseName || item.courseName === f.courseName)
-              .filter(item => !timeSuffix || formatTime(item.startsAt).endsWith(timeSuffix))
+              .filter(item => !f.startsAt || (Number.isFinite(Date.parse(f.startsAt)) && Date.parse(item.startsAt) === Date.parse(f.startsAt)))
               .map(item => ({ id: item.lessonId, label: `${item.studentName} · ${item.courseName}`, description: `${formatTime(item.startsAt)} · ${item.teacherName} · ${item.status}`, field: 'lessonId', values: { studentName: item.studentName, courseName: item.courseName } }));
           }
           const result = choose(task, turn.runId, candidates, '要操作的课程'); if (result) return result;
@@ -715,6 +733,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         if ((task.operation === 'payroll.adjust' || task.operation === 'payroll.pay' || task.operation === 'payroll.cancel-payment') && !task.selected.payrollId) {
           const found = await input.tools.getPayrollCandidates(input.capability, { teacherName: f.teacherName!, period: f.period! });
           const eligible = found.candidates.filter(item => item.teacherId === task.selected.teacherId && (task.operation !== 'payroll.cancel-payment' || item.status === 'PAID'));
+          if (!eligible.length) return ask(task, turn.runId, task.operation === 'payroll.cancel-payment' ? '该老师该月份没有已支付工资记录，请核对老师和月份；未生成预览。' : '没有找到该老师该月份的工资记录，请核对月份；如尚未生成，请先生成工资。未生成预览。');
           const result = choose(task, turn.runId, eligible.map(item => ({ id: item.payrollId, label: `${item.teacherName} · ${item.period}`, description:item.status, field: 'payrollId', values: {} })), task.operation === 'payroll.cancel-payment' ? '已支付工资记录' : '工资记录'); if (result) return result;
         }
       }
@@ -728,7 +747,6 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         case 'teacher.compensation.update': command = { teacherId:task.selected.teacherId, baseSalary:moneyText(f.baseSalary!), commissionRate:rateText(f.commissionRate!) }; break;
         case 'course.create': command = { name:f.name, defaultUnitPrice:moneyText(f.defaultUnitPrice!), defaultDurationMinutes:Number(f.defaultDurationMinutes) }; break;
         case 'course.update': command = { courseId:task.selected.courseId, ...(f.name ? { name:f.name } : {}), ...(f.defaultUnitPrice ? { defaultUnitPrice:moneyText(f.defaultUnitPrice) } : {}), ...(f.defaultDurationMinutes ? { defaultDurationMinutes:Number(f.defaultDurationMinutes) } : {}), ...(f.isActive ? { isActive:f.isActive === 'true' } : {}) }; break;
-        case 'course-account.open': command = { studentId:task.selected.studentId, courseId:task.selected.courseId, ...(f.currentUnitPrice ? { currentUnitPrice:moneyText(f.currentUnitPrice) } : {}) }; break;
         case 'course-account.price': command = { accountId:task.selected.accountId, currentUnitPrice:moneyText(f.currentUnitPrice!) }; break;
         case 'ledger-entry.reversal': {
           const account = await input.tools.readAccount(input.capability, { accountId:task.selected.accountId! });
@@ -798,30 +816,63 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const task = prepared.task;
         task.operation = first.operation;
         task.fields = Object.fromEntries(Object.entries(first.fields).filter((entry): entry is [string,string] => entry[1] !== null));
-        task.multiStep = { steps:plan.steps,currentStep:0,completedPreviewIds:[], ...(first.operation === 'payroll.cancel-payment' && second.operation === 'payroll.pay' ? { payrollCorrectionSource:turn.message } : {}) };
+        task.multiStep = { steps:plan.steps,currentStep:0,completedPreviewIds:[], ...(prepared.payrollCorrectionSteps ? { payrollCorrectionSteps:prepared.payrollCorrectionSteps, payrollCorrectionReviewed:true } : {}) };
         task.status = 'ready';
-        const name = (operation: string) => operation === 'course-account.open' ? '开课程账户' : operation === 'payment.preview' ? '交费'
-          : operation === 'gift.preview' ? '赠送'
-            : operation === 'lesson.schedule' ? '排课'
-              : operation === 'ledger-entry.reversal' ? '冲正原流水'
-                : operation === 'payroll.cancel-payment' ? '撤销原工资支付' : operation === 'payroll.generate' ? '生成工资' : operation === 'payroll.adjust' ? '调整工资' : '登记工资支付';
+        const names: Record<DialogueMultiStepPlan['steps'][number]['operation'], string> = {
+          'receipt.read':'查看回执', 'lessons.read':'查询课表', 'accounts.read':'查询账户', 'ledger.read':'查询流水', 'overview.read':'查询经营概况', 'report.monthly':'查询月报',
+          'payroll.read':'查询工资', 'directory.read':'查询基础资料', 'arrears.read':'查询欠费', 'consumption.read':'查询课消', 'period.preclose.read':'查询关账预检',
+          'student.create':'学生建档', 'student.update':'修改学生资料', 'teacher.create':'新增教师', 'teacher.compensation.update':'修改教师薪酬',
+          'course.create':'新增课程', 'course.update':'修改课程', 'course-account.open':'开课程账户', 'course-account.price':'修改课程账户单价',
+          'payment.preview':'交费', 'gift.preview':'赠送', 'ledger-entry.reversal':'冲正原流水', 'lesson.schedule':'排课',
+          'lesson.reschedule':'调课', 'lesson.cancel':'取消课程', 'lesson.complete':'确认上课', 'lesson.complete.reversal':'撤销上课确认',
+          'lesson.complete.correction':'上课纠错', 'refund.preview':'退学退款', 'payroll.cancel-payment':'撤销原工资支付',
+          'payroll.generate':'生成工资', 'payroll.adjust':'调整工资', 'payroll.pay':'登记工资支付', 'manual-transaction.create':'登记收支',
+          'period.close':'关账', 'period.reopen':'重新开账',
+        };
+        const name = (operation: DialogueMultiStepPlan['steps'][number]['operation']) => names[operation];
         const describe = (step: typeof first) => `${name(step.operation)}${step.fields.courseName ? `（${step.fields.courseName}` : '（'}${step.fields.amount ? `${moneyText(step.fields.amount)}元` : ''}${step.fields.startsAt ? `，${step.fields.startsAt}` : ''}${step.fields.channel ? `，${step.fields.channel}` : ''}）${[step.fields.studentName && `学生：${step.fields.studentName}`,step.fields.teacherName && `老师：${step.fields.teacherName}`,step.fields.currentUnitPrice && `单价${moneyText(step.fields.currentUnitPrice)}元`,step.fields.weeks && `周数：${step.fields.weeks}`,step.fields.reason && `原因：${step.fields.reason}`,step.fields.period && `月份：${step.fields.period}`,step.fields.paidAt && `支付日期：${step.fields.paidAt}`,step.fields.baseSalary && `底薪${moneyText(step.fields.baseSalary)}元`,step.fields.commissionRate && `提成比例${step.fields.commissionRate}`,step.fields.bonusAmount && `奖金${moneyText(step.fields.bonusAmount)}元`,step.fields.bonusNote && `奖金说明：${step.fields.bonusNote}`,step.fields.deductionAmount && `代扣${moneyText(step.fields.deductionAmount)}元`,step.fields.deductionNote && `代扣说明：${step.fields.deductionNote}`].filter(Boolean).join('、')}`;
         const untouched = first.fields.courseName === second.fields.courseName && first.operation === 'payment.preview' && second.operation === 'gift.preview' ? '其他课程（如陪练）不会改动。' : '';
-        const statedTotal = /(?:收|合计)(\d+(?:\.\d{1,2})?)元/u.exec(turn.message)?.[1];
-        const totalText = statedTotal && first.operation === 'payment.preview' && second.operation === 'payment.preview' ? `原请求总额${moneyText(statedTotal)}元；` : '';
-        const stepsText = plan.steps.map((step,index) => `第${['一','二','三'][index]}步${describe(step)}`).join('；');
-        const answer = `已拆为按顺序分别确认的${plan.steps.length}步：${totalText}${stepsText}。${untouched}回复“开始第一步”后才生成第一步预览，当前尚未执行。`;
+        const stepsText = plan.steps.map((step,index) => `第${['一','二','三'][index] ?? index + 1}步${describe(step)}`).join('；');
+        const answer = plan.steps.some(step => isQueryOperation(step.operation))
+          ? `已拆为按顺序办理的${plan.steps.length}步：${stepsText}。${untouched}查询完成后可继续；写入须分别确认。回复“开始第一步”后才开始处理，当前尚未执行业务变更。`
+          : `已拆为按顺序分别确认的${plan.steps.length}步：${stepsText}。${untouched}回复“开始第一步”后才生成第一步预览，当前尚未执行。`;
         return { result: finish(task, turn.runId, answer, document('多步办理计划', answer, [], 'clarification')) };
       }
-      return { result: await process(turn, prepared, intent) };
+      const result = await process(turn, prepared, intent);
+      const task = result.task;
+      if (task.multiStep && task.status === 'completed' && isQueryOperation(task.operation)
+        && task.operation === task.multiStep.steps[task.multiStep.currentStep]?.operation && result.workspace.resultKind === 'query') {
+        const currentStep = task.multiStep.currentStep + 1;
+        task.multiStep = { ...task.multiStep, currentStep };
+        if (currentStep < task.multiStep.steps.length) {
+          const next = task.multiStep.steps[currentStep]!;
+          task.operation = next.operation;
+          task.fields = Object.fromEntries(Object.entries(next.fields).filter((entry): entry is [string, string] => entry[1] !== null));
+          task.selected = {};
+          task.candidates = [];
+          task.references = [];
+          task.status = 'ready';
+          const answer = `${result.answer} 第${currentStep}步查询完成，回复“继续”处理下一步。`;
+          return { result: finish(task, turn.runId, answer, { ...result.workspace, blocks:[...result.workspace.blocks, { type:'summary', title:'查询完成', text:'回复“继续”处理下一步。' }] }) };
+        }
+        const answer = `${result.answer} 查询完成，计划中的写入均须经Core确认。`;
+        return { result: finish(task, turn.runId, answer, result.workspace) };
+      }
+      return { result };
     } catch (error) {
       return { result: failure(turn, prepared.task, error).result };
     }
   };
 
   return {
-    invoke: async (state: { turn: DialogueTurn }, config?: { signal?: AbortSignal }) =>
-      runTurn(state.turn, config?.signal ?? new AbortController().signal),
+    invoke: async (state: { turn: DialogueTurn }, config?: { signal?: AbortSignal }) => {
+      const previous = TaskSchema.safeParse(state.turn.previous);
+      const outcome = await runTurn(state.turn, config?.signal ?? new AbortController().signal);
+      if (!previous.success || previous.data.lastRunId !== state.turn.runId) {
+        outcome.result.task.history = [...(previous.success ? previous.data.history : []), {role:'user',content:state.turn.message}, {role:'assistant',content:outcome.result.answer}];
+      }
+      return outcome;
+    },
   };
 }
 
@@ -829,15 +880,6 @@ function lessonReferences(lessons: LessonReadResult['lessons']): DialogueTask['r
   return lessons.map(item => ({ id: item.lessonId, label: `${item.studentName} · ${item.courseName}`, description: `${formatTime(item.startsAt)} · ${item.teacherName} · ${item.statusLabel}`, field: 'lessonId', values: { studentName: item.studentName, courseName: item.courseName, status:item.statusLabel } }));
 }
 
-function accessProbeForAmbiguousRequest(message: string): string | undefined {
-  if (/撤销.*(?:上课确认|课消)|撤回.*(?:上课确认|课消)/u.test(message)) return 'lesson.complete.reversal';
-  if (/退费|退款/u.test(message)) return 'student.final-refund';
-  if (/交费|收款/u.test(message)) return 'course-account.payment';
-  if (/赠送/u.test(message)) return 'course-account.gift';
-  if (/工资/u.test(message)) return 'payroll.generate';
-  if (/关账/u.test(message)) return 'period.close';
-  return undefined;
-}
 function actionBlock(preview: { previewId: string; actionType: string; expiresAt: string; display: { title?: string | undefined }; riskLevel?: 'L1' | 'L2' | undefined }, expectedRisk: 'L1' | 'L2'): WorkspaceDocument['blocks'][number] {
   if (!preview.riskLevel || preview.riskLevel !== expectedRisk) throw new Error('CORE_RISK_METADATA_INVALID');
   return { type: 'action-preview', previewId: preview.previewId, actionType: preview.actionType, title: preview.display.title ?? '核对操作', schemaVersion: `${preview.actionType}.v1`, riskLevel: preview.riskLevel, expiresAt: preview.expiresAt };

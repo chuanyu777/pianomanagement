@@ -2,6 +2,34 @@ import { describe, expect, it, vi } from 'vitest';
 import { createModelIntentInterpreter, deterministicIntent, DialogueIntentSchema } from '../src/graph/dialogue-intent.js';
 
 describe('意图输出结构校验', () => {
+  it.each(['查一下林悦同学。', '查一下林悦学生。'])('称谓不应被当作学生姓名：%s', message => {
+    expect(deterministicIntent({businessDate:'2026-10-21',task:{},userMessage:message}))
+      .toMatchObject({operation:'directory.read',fields:{studentName:'林悦'}});
+  });
+
+  it.each(['查一下房租支出', '帮我看看合作收入', '这个月的水电支出是多少'])('查询口语不应被强制路由为登记：%s', async message => {
+    const invoke = vi.fn().mockResolvedValue({content:JSON.stringify({mode:'new',operation:'report.monthly',fields:{period:'2026-10'},question:null})});
+    const result = await createModelIntentInterpreter({invoke} as never)({businessDate:'2026-10-21',task:{},userMessage:message});
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(result.operation).toBe('report.monthly');
+  });
+
+  it('资料查询不会把“资料”拼进姓名', async () => {
+    const invoke = vi.fn().mockResolvedValue({content:JSON.stringify({mode:'new',operation:'directory.read',fields:{studentName:'林悦'},question:null})});
+    const result = await createModelIntentInterpreter({invoke} as never)({businessDate:'2026-10-21',task:{},userMessage:'查一下林悦资料'});
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(result.fields.studentName).toBe('林悦');
+  });
+
+  it('提示模型处理口语、语序和业务词错别字，但不猜测人名或金额', async () => {
+    const invoke = vi.fn().mockResolvedValue({content:JSON.stringify({mode:'new',operation:'accounts.read',fields:{studentName:'林悦',courseName:'主课'},question:null})});
+    await createModelIntentInterpreter({invoke} as never)({businessDate:'2026-10-21',task:{},userMessage:'林悦主课的余額还有多少'});
+    const messages = invoke.mock.calls[0]![0] as {content: string}[];
+    expect(messages[0]!.content).toContain('错别字');
+    expect(messages[0]!.content).toContain('不得纠正或猜测人名');
+    expect(messages[1]!.content).toContain('林悦主课的余額还有多少');
+  });
+
   it('按 operation 拒绝不适用的已知字段，并拒绝未知字段', () => {
     expect(DialogueIntentSchema.safeParse({ mode: 'new', operation: 'accounts.read', fields: { studentName: '林悦', amount: '100' }, question: null }).success).toBe(false);
     expect(DialogueIntentSchema.safeParse({ mode: 'new', operation: 'accounts.read', fields: { studentName: '林悦', mystery: '100' }, question: null }).success).toBe(false);

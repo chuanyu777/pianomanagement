@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { components } from '@piano/generated-core-client/generated/core-api';
 import { createSignedInternalRequestHeaders } from '@piano/assistant-protocol/internal-auth';
 import { DashboardSummarySchema, type DashboardSummary } from './dashboard-summary.js';
 import { CoreDialogueError } from './dialogue-tools.js';
@@ -120,7 +121,7 @@ const PREVIEW_PATHS = {
 
 type PreviewRequestPath = (typeof PREVIEW_PATHS)[keyof typeof PREVIEW_PATHS];
 
-const PositiveMoneyStringSchema = z.string().regex(/^(?:0\.(?:0[1-9]|[1-9]\d)|[1-9]\d*\.\d{2})$/);
+const PositiveMoneyStringSchema = z.string().regex(/^(?:0\.(?:0[1-9]|[1-9]\d)|[1-9]\d{0,11}\.\d{2})$/);
 const BalanceMoneyStringSchema = z.string().regex(/^-?(?:0|[1-9]\d*)\.\d{2}$/);
 const PaymentChannelSchema = z.enum(['CASH', 'WECHAT', 'ALIPAY', 'BANK_CARD', 'OTHER']);
 
@@ -135,9 +136,10 @@ const MoneyPreviewBaseRequestSchema = z
   })
   .strict();
 
-const PaymentPreviewRequestSchema = MoneyPreviewBaseRequestSchema.extend({
-  channel: PaymentChannelSchema,
-}).strict();
+const PaymentPreviewRequestSchema = z.union([
+  MoneyPreviewBaseRequestSchema.extend({channel:PaymentChannelSchema}).strict(),
+  MoneyPreviewBaseRequestSchema.omit({accountId:true}).extend({studentId:z.uuid(),courseId:z.uuid(),currentUnitPrice:PositiveMoneyStringSchema.optional(),channel:PaymentChannelSchema}).strict(),
+]);
 
 const GiftPreviewRequestSchema = MoneyPreviewBaseRequestSchema;
 
@@ -162,7 +164,7 @@ const MoneyPreviewDisplaySchema = z
   })
   .strict();
 
-const PaymentPreviewResponseSchema = z
+const LegacyPaymentPreviewResponseSchema = z
   .object({
     riskLevel: z.enum(['L1', 'L2']).optional(),
     previewId: z.uuid(),
@@ -176,11 +178,19 @@ const PaymentPreviewResponseSchema = z
         note: z.string().nullable(),
       })
       .strict(),
-    display: MoneyPreviewDisplaySchema,
+    display: MoneyPreviewDisplaySchema.extend({currentUnitPrice:PositiveMoneyStringSchema.optional(),studentName:z.string().optional(),courseName:z.string().optional()}).strict(),
     expiresAt: z.iso.datetime(),
     auditEventId: z.uuid(),
   })
   .strict();
+
+const CombinedPaymentPreviewResponseSchema = z.object({
+  riskLevel:z.enum(['L1','L2']).optional(),previewId:z.uuid(),actionType:z.literal('course-account.payment'),
+  command:z.object({studentId:z.uuid(),courseId:z.uuid(),amount:PositiveMoneyStringSchema,channel:PaymentChannelSchema,occurredAt:z.iso.datetime(),note:z.string().nullable(),currentUnitPrice:PositiveMoneyStringSchema,priceExplicit:z.boolean()}).strict(),
+  display:z.object({title:z.string().min(1),summary:z.string().min(1),studentName:z.string(),courseName:z.string(),amount:PositiveMoneyStringSchema,channel:PaymentChannelSchema,priceBefore:BalanceMoneyStringSchema.nullable(),priceAfter:PositiveMoneyStringSchema,beforeBalance:CourseAccountBalanceSchema.omit({accountId:true}).extend({accountId:z.uuid().optional()}).strict(),afterBalance:CourseAccountBalanceSchema.omit({accountId:true}).extend({accountId:z.uuid().optional()}).strict()}).strict(),
+  expiresAt:z.iso.datetime(),auditEventId:z.uuid(),
+}).strict();
+const PaymentPreviewResponseSchema=z.union([LegacyPaymentPreviewResponseSchema,CombinedPaymentPreviewResponseSchema]);
 
 const GiftPreviewResponseSchema = z
   .object({
@@ -215,12 +225,13 @@ export type SystemStatus = z.infer<typeof SystemStatusSchema>;
 const CourseAccountCandidatesSchema = z.object({
   candidates: z.array(z.object({
     accountId: z.uuid(),
+    studentId: z.uuid(),
     studentName: z.string().trim().min(1),
     courseName: z.string().trim().min(1),
   }).strict()),
 }).strict();
 
-export type CourseAccountCandidates = z.infer<typeof CourseAccountCandidatesSchema>;
+export type CourseAccountCandidates = components['schemas']['CourseAccountCandidatesResponse'];
 
 const TeacherCandidatesSchema = z
   .object({

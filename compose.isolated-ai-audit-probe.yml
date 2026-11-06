@@ -1,0 +1,8 @@
+# Probe-only: use already installed audit images, never for current-source acceptance.
+services:
+  core:
+    image: pianomanager-core:ai-audit
+    build: !reset null
+  agent:
+    image: pianomanager-agent:ai-audit
+    build: !reset null

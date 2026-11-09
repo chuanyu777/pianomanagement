@@ -22,4 +22,13 @@ describe('长会话上下文', () => {
     const history = Array.from({length:30}, () => ({role:'user' as const,content:'甲'.repeat(1000)}));
     await expect(compactConversation({invoke:vi.fn().mockRejectedValue(new Error('offline'))} as never,history)).rejects.toThrow();
   });
+  it('总结早期对话时保持普通消息完整，避免把一句话切到不同摘要中', async () => {
+    const invoke = vi.fn().mockResolvedValue({content:'早期对话摘要'});
+    const history = Array.from({length:20}, (_, index) => ({role:'user' as const, content:`消息${index}：${String(index % 10).repeat(1100)}结尾${index}`}));
+    await compactConversation({invoke} as never, history);
+    const chunks = invoke.mock.calls.map(call => JSON.parse(String(call[0][1].content)).nextHistory as string);
+    for (const message of history.slice(0, 15)) {
+      expect(chunks.some(chunk => chunk.includes(message.content))).toBe(true);
+    }
+  });
 });

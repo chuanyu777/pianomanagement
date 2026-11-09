@@ -46,6 +46,14 @@ function setup(intents: DialogueIntent[], multiStep?: DialogueMultiStepPlan | nu
   return { tools, understand, run, restart };
 }
 describe('模型驱动的持续业务任务', () => {
+  it('多步查询完成后可以自然开始新的查询', async () => {
+    const steps = [{operation:'lessons.read',fields:{dateFrom:'2026-10-21',dateTo:'2026-10-21'}},{operation:'arrears.read',fields:{}}];
+    const flow = setup([intent('overview.read',{})], undefined, {status:'completed',operation:'arrears.read',multiStep:{steps,currentStep:2,completedPreviewIds:[]}});
+    const result = await flow.run('看看今天经营怎么样');
+    expect(result.workspace.resultKind).toBe('query');
+    expect(flow.tools.getDashboardSummary).toHaveBeenCalled();
+    expect(result.task.multiStep).toBeUndefined();
+  });
   it('多步确认后可查询刚执行的回执，不重复生成预览', async () => {
     const previous={status:'awaiting_confirmation',operation:'payment.preview',previewId:'first',multiStep:{currentStep:0,completedPreviewIds:[],steps:[
       {operation:'payment.preview',fields:{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}},
@@ -190,6 +198,55 @@ describe('模型驱动的持续业务任务', () => {
     expect(flow.tools.getStudentCandidates).not.toHaveBeenCalled();
     expect(flow.tools.getCourseAccountCandidates).not.toHaveBeenCalled();
     expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('建档确认后，模型理解自然说法可继续先前的缴费请求', async () => {
+    const flow = setup([
+      intent('student.create',{name:'林悦'}),
+      intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}),
+      intent('payment.preview',{},'continue'),
+    ]);
+    await flow.run('给林悦建档');
+    await flow.run('给她主课交100元微信');
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    const result = await flow.run('好的，接着办');
+    expect(result.workspace.resultKind).toBe('preview');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({amount:'100.00',channel:'WECHAT'}));
+  });
+  it('判断是否多项业务时向模型提供建档确认状态和待续办请求', async () => {
+    const pending=intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'});
+    const understandMultiStep=vi.fn().mockResolvedValue(null);
+    const graph=createDialogueGraph({capability:'cap',tools:{readPreview:vi.fn().mockResolvedValue({status:'EXECUTED'}),checkActionAccess:vi.fn().mockResolvedValue({allowed:true})} as never,understandMultiStep,understand:vi.fn().mockResolvedValue(intent('payment.preview',{},'continue'))});
+    await graph.invoke({turn:{runId:'pending',threadId:'thread',message:'好的，接着办',previous:{status:'awaiting_confirmation',operation:'student.create',fields:{name:'林悦'},previewId:'student-preview',pendingStudentIntent:pending}}});
+    expect(understandMultiStep).toHaveBeenCalledWith(expect.objectContaining({task:expect.objectContaining({alreadyExecuted:true,pendingStudentIntent:pending})}),expect.any(AbortSignal));
+  });
+  it('建档确认后可以取消待办理的缴费，不撤销已确认建档', async () => {
+    const flow = setup([
+      intent('student.create',{name:'林悦'}),
+      intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}),
+      intent(null,{},'cancel'),
+    ]);
+    await flow.run('给林悦建档');
+    await flow.run('给她主课交100元微信');
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    const result = await flow.run('先算了，别收钱');
+    expect(result.answer).toContain('已取消');
+    expect(result.answer).toContain('建档');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    expect(flow.tools.invalidatePreview).not.toHaveBeenCalled();
+  });
+  it('建档确认后更正待办理缴费的金额，仅对新预览生效', async () => {
+    const flow = setup([
+      intent('student.create',{name:'林悦'}),
+      intent('payment.preview',{studentName:'林悦',courseName:'主课',amount:'100',channel:'微信'}),
+      intent('payment.preview',{amount:'200'},'correct'),
+    ]);
+    await flow.run('给林悦建档');
+    await flow.run('给她主课交100元微信');
+    flow.tools.readPreview.mockResolvedValue({status:'EXECUTED'});
+    const result = await flow.run('金额改成200再办');
+    expect(result.workspace.resultKind).toBe('preview');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledWith('cap',expect.objectContaining({amount:'200.00',channel:'WECHAT'}));
+    expect(flow.tools.invalidatePreview).not.toHaveBeenCalled();
   });
   it('合并开户缴费时保留后续所有步骤并正确展示第四步', async () => {
     const person = {studentName:'林悦',courseName:'主课'};

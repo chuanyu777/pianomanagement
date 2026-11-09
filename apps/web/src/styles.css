@@ -502,7 +502,6 @@ button { cursor: pointer; }
   .topbar { align-items: flex-start; }
   .topbar-actions .connection-status { display: none; }
   .nav-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .sidebar-footer { display: none; }
   .workspace-page-head { display: grid; }
   .student-toolbar { grid-template-columns: 1fr auto; }
   .student-toolbar .eyebrow { display: none; }
@@ -701,7 +700,8 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, a:focus-visib
   .workspace-grid, .workspace-grid.assistant-layout, .workspace-grid.structured-layout { height: auto; min-height: calc(100dvh - 28px); display: block; }
   .sidebar { height: auto; padding: 12px 14px; }
   .sidebar-brand { padding-bottom: 10px; }
-  .sidebar-heading, .sidebar-footer { display: none; }
+  .sidebar-heading { display: none; }
+  .sidebar-footer { margin-top: 8px; padding: 8px 4px 0; }
   .nav-list { margin-top: 8px; grid-template-columns: repeat(4, minmax(0,1fr)); }
   .nav-item { min-height: 50px; padding: 5px; justify-content: center; }
   .nav-copy small { display: none; }

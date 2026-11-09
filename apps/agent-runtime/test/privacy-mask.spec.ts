@@ -26,6 +26,15 @@ describe('name masking before a message leaves the process', () => {
     expect(mask.maskedContext.userMessage).toContain('实体');
   });
 
+  it('masks known names inside a pending student request as well', () => {
+    const task = { ...withCandidates, pendingStudentIntent: { mode:'new', operation:'payment.preview', fields:{studentName:'王小明',courseName:'主课',amount:'100'}, question:null } };
+    const mask = buildNameMask(context('接着办', task));
+    const maskedTask = mask.maskedContext.task as typeof task;
+    expect(JSON.stringify(maskedTask)).not.toContain('王小明');
+    expect(maskedTask.pendingStudentIntent.fields.studentName).toMatch(/^实体\d+$/u);
+    expect(maskedTask.pendingStudentIntent.fields.amount).toBe('100');
+  });
+
   it('restores the exact original names from the model output', () => {
     const mask = buildNameMask(context('给王小明主课交1000', withCandidates));
     const restored = mask.restoreIntent({

@@ -158,6 +158,9 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
   const loadContext = async (turn: DialogueTurn): Promise<{ prepared?: Prepared; result?: DialogueResult }> => {
     const parsed = TaskSchema.safeParse(turn.previous);
     const previous = parsed.success ? parsed.data : TaskSchema.parse({});
+    if (previous.status === 'completed' && previous.multiStep && previous.multiStep.currentStep >= previous.multiStep.steps.length) {
+      delete previous.multiStep;
+    }
     if (previous.lastRunId === turn.runId && previous.workspace && previous.answer !== undefined) return { result: { task: previous, workspace: previous.workspace, answer: previous.answer } };
     const task: DialogueTask = { ...previous, fields: { ...previous.fields }, selected: { ...previous.selected }, candidates: [...previous.candidates], references: [...previous.references], version: previous.version + 1 };
     if (!recoveryCommands.has(turn.message.trim())) task.lastUserMessage = turn.message;
@@ -246,7 +249,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
     if (!prepared.previous.multiStep && input.understandMultiStep) {
       let candidate: DialogueMultiStepPlan | null;
       try {
-      candidate = await input.understandMultiStep({ userMessage, businessDate:calendarDate, task: { operation:prepared.task.operation,fields:prepared.task.fields, candidates:prepared.task.candidates, references:prepared.task.references }, history:prepared.previous.history }, signal);
+      candidate = await input.understandMultiStep({ userMessage, businessDate:calendarDate, task: { operation:prepared.task.operation,fields:prepared.task.fields, candidates:prepared.task.candidates, references:prepared.task.references, pendingStudentIntent:prepared.previous.pendingStudentIntent, alreadyExecuted:prepared.alreadyExecuted }, history:prepared.previous.history }, signal);
       } catch (error) {
         if (error instanceof Error && error.message === 'AI_MULTI_STEP_INVALID') return { result: ask(prepared.task, turn.runId, '未能安全拆分完整的有序请求，请补充每项业务及办理顺序；涉及日期时请写明年份。当前未生成预览。') };
         throw error;
@@ -275,7 +278,7 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         return { intent: { mode:'new', operation:step.operation, fields:step.fields, question:null } };
       }
     }
-    const context = { businessDate: calendarDate, task: { status:prepared.task.status,operation: prepared.task.operation, fields: prepared.task.fields, candidates: prepared.task.candidates, references: prepared.task.references, hasPreview: !!prepared.previous.previewId && !prepared.alreadyExecuted, alreadyExecuted: prepared.alreadyExecuted }, userMessage, history:prepared.previous.history };
+    const context = { businessDate: calendarDate, task: { status:prepared.task.status,operation: prepared.task.operation, fields: prepared.task.fields, candidates: prepared.task.candidates, references: prepared.task.references, pendingStudentIntent:prepared.previous.pendingStudentIntent, hasPreview: !!prepared.previous.previewId && !prepared.alreadyExecuted, alreadyExecuted: prepared.alreadyExecuted }, userMessage, history:prepared.previous.history };
     if (input.intentParser) {
       const parsed = await input.intentParser(context, signal);
       if (parsed.kind === 'parsed') return { intent: parsed.intent };
@@ -313,6 +316,21 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const selected = task.candidates.find(item => item.id === selection[1]);
         if (!selected) return ask(task, turn.runId, '该对象不在当前授权候选中，请重新选择。');
         task.selected[selected.field] = selected.id; Object.assign(task.fields, selected.values); task.candidates = [];
+      }
+      if (alreadyExecuted && previous.pendingStudentIntent && intent.mode === 'cancel') {
+        delete task.pendingStudentIntent;
+        delete task.previewId;
+        task.status = 'completed';
+        const answer = '已取消待办理事项，学生建档已经确认，不受影响。';
+        return finish(task, turn.runId, answer, document('已取消待办理事项', answer));
+      }
+      if (alreadyExecuted && previous.pendingStudentIntent && ['continue','correct'].includes(intent.mode)
+        && (!intent.operation || intent.operation === previous.pendingStudentIntent.operation)) {
+        const resumed = DialogueIntentSchema.safeParse({ ...previous.pendingStudentIntent, mode:'new', fields:{ ...previous.pendingStudentIntent.fields, ...intent.fields } });
+        if (!resumed.success) return ask(task, turn.runId, '无法确定继续办理的信息，请重新说明学生、课程和需要办理的事项。');
+        intent = resumed.data;
+        delete task.pendingStudentIntent;
+        delete task.previewId;
       }
       if (alreadyExecuted && ['continue','correct','cancel'].includes(intent.mode)) return finish(task, turn.runId, '原业务已经确认执行，不能通过修改或取消对话撤回。请查询原记录，或另行发起允许的纠错业务。', document('原业务已执行', '没有追加或撤销任何业务记录。'));
       if (intent.mode === 'cancel') {

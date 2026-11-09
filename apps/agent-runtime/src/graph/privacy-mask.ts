@@ -73,6 +73,12 @@ export function buildNameMask(context: IntentContext): NameMask {
     if (!task || typeof task !== 'object') return task;
     const record = { ...(task as Record<string, unknown>) };
     if (record['fields']) record['fields'] = maskRecord(record['fields']);
+    if (record['pendingStudentIntent'] && typeof record['pendingStudentIntent'] === 'object') {
+      const pending = { ...(record['pendingStudentIntent'] as Record<string, unknown>) };
+      if (pending['fields']) pending['fields'] = maskRecord(pending['fields']);
+      if (typeof pending['question'] === 'string') pending['question'] = maskText(pending['question']);
+      record['pendingStudentIntent'] = pending;
+    }
     for (const listKey of ['candidates', 'references'] as const) {
       const list = record[listKey];
       if (!Array.isArray(list)) continue;

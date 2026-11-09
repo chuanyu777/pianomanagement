@@ -26,6 +26,14 @@ for (const [name, message, expected] of cases) {
   }
 }
 try {
+  const plan = await createModelMultiStepInterpreter(model)({businessDate:'2026-10-21',task:{},userMessage:'先查今天排课，再查本月经营利润，然后查王老师本月工资，最后查欠费学生'});
+  const actual = plan?.steps.map(step => step.operation);
+  const expected = ['lessons.read','report.monthly','payroll.read','arrears.read'];
+  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  console.log(`four_ordered_queries:${ok ? 'PASS' : 'FAIL'}`);
+  if (!ok) failed = true;
+} catch { console.log('four_ordered_queries:REJECTED'); failed = true; }
+try {
   const plan = await createModelMultiStepInterpreter(model)({businessDate:'2026-10-21',task:{},userMessage:'先给小雨的主课微信缴费100元，再安排王老师明天下午三点上主课'});
   const scheduled = plan?.steps.find(step => step.operation === 'lesson.schedule');
   const ok = !!scheduled?.fields.startsAt && Date.parse(scheduled.fields.startsAt) === Date.parse('2026-10-22T15:00:00+08:00');

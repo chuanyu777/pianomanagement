@@ -30,6 +30,26 @@ describe('business page AI workspace', () => {
     window.localStorage.setItem('pianomanager.accessToken', 'jwt-test');
   });
 
+  it('starts a fresh shared session from a business page', async () => {
+    const user = userEvent.setup();
+    const key = 'pianomanager.assistant.session.v1:u1%3AOWNER%3A';
+    const oldThreadId = '4f229d18-5a0f-4ec2-904d-c522927d8d0c';
+    window.sessionStorage.setItem(key, JSON.stringify({threadId:oldThreadId,messages:[{id:'m1',role:'user',text:'原来的业务对话'}]}));
+    const fetchMock=vi.fn(async (input: RequestInfo | URL) => String(input)==='/api/auth/me'
+      ? Response.json({id:'u1',username:'owner',role:'OWNER'}) : new Response('{}',{status:404}));
+    vi.stubGlobal('fetch',fetchMock);
+    renderApp();
+    expect(await screen.findByText('原来的业务对话')).toBeInTheDocument();
+    await user.click(screen.getByRole('button',{name:'新会话'}));
+    expect(await screen.findByLabelText('学生与账户经营问题')).toBeInTheDocument();
+    expect(screen.queryByText('原来的业务对话')).not.toBeInTheDocument();
+    const newThreadId=JSON.parse(window.sessionStorage.getItem(key)!).threadId;
+    expect(newThreadId).not.toBe(oldThreadId);
+    expect(screen.getByLabelText('业务工作区')).toBeInTheDocument();
+    expect(JSON.parse(window.sessionStorage.getItem(key)!).threadId).toBe(newThreadId);
+    expect(fetchMock.mock.calls.some(([input]) => String(input)==='/api/assistant/runs')).toBe(false);
+  });
+
   it('keeps recovered preview protections and confirmed receipts when moving through a business page', async () => {
     const key = 'pianomanager.assistant.session.v1:u1%3AOWNER%3A';
     window.sessionStorage.setItem(key, JSON.stringify({
@@ -107,8 +127,10 @@ describe('business page AI workspace', () => {
     await user.type(await screen.findByLabelText('学生与账户经营问题'), '查询');
     await user.click(screen.getByRole('button', { name: '发送 ↑' }));
     await waitFor(() => expect(streams).toBe(1));
+    expect(screen.getByRole('button', { name: '新会话' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: /排课与课消/ }));
     expect(await screen.findByText('跨页面完整回复')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '新会话' })).toBeEnabled();
     expect(screen.getByText('查询')).toBeInTheDocument();
     expect(starts).toBe(1);
   });

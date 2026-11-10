@@ -43,6 +43,11 @@ button { cursor: pointer; }
 .sidebar-heading { padding: 24px 10px 8px; border-top: 0; }
 .sidebar-heading .eyebrow { color: #737d98; letter-spacing: .08em; }
 .sidebar-caption { color: #59627b; font-family: 'DM Mono', monospace; font-size: 8px; letter-spacing: .08em; }
+.new-session-button { width: 100%; min-height: 38px; padding: 8px 13px; display: flex; align-items: center; gap: 7px; border: 1px solid #596b99; border-radius: 9px; color: #fff; background: #253253; font-weight: 600; text-align: left; }
+.new-session-button:hover:not(:disabled) { border-color: #b7c7ff; background: #304372; }
+.new-session-button:disabled { border-color: #596178; color: #c0c8d9; background: #2b3449; cursor: not-allowed; }
+.new-session-button:focus-visible { outline: 3px solid #c7fa4e; outline-offset: 2px; }
+.new-session-button span { font-size: 18px; line-height: 1; }
 .nav-list { margin-top: 8px; display: grid; gap: 6px; }
 .nav-item { position: relative; width: 100%; padding: 13px 14px; display: flex; align-items: center; justify-content: flex-start; gap: 12px; border: 0; border-radius: 13px; color: #b6bfcc; background: transparent; text-align: left; transition: background .2s, color .2s, transform .2s; }
 .nav-item:hover { color: #fff; background: #20273a; }
@@ -701,6 +706,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, a:focus-visib
   .sidebar { height: auto; padding: 12px 14px; }
   .sidebar-brand { padding-bottom: 10px; }
   .sidebar-heading { display: none; }
+  .new-session-button { justify-content: center; margin-top: 8px; }
   .sidebar-footer { margin-top: 8px; padding: 8px 4px 0; }
   .nav-list { margin-top: 8px; grid-template-columns: repeat(4, minmax(0,1fr)); }
   .nav-item { min-height: 50px; padding: 5px; justify-content: center; }
@@ -853,3 +859,19 @@ button:not(.ant-btn):disabled, button:not(.ant-btn):disabled:hover {
   .balance-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .balance-strip > div { padding: 10px; }
 }
+
+.page-assistant-head .new-session-button, .card-heading .new-session-button { width: auto; min-height: 34px; margin: 0; padding: 5px 10px; color: #314a9a; background: #fff; border-color: #c8d2e7; white-space: nowrap; font-size: 12px; }
+.page-assistant-head .new-session-button:disabled, .card-heading .new-session-button:disabled { color: #626d83; background: #e8ebf2; border-color: #c8d2e0; }
+
+.inline-account-ledger { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--v2-line); }
+.inline-ledger-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.inline-ledger-heading h3 { margin: 0; font-size: 16px; }
+.inline-ledger-heading > span { color: var(--v2-muted); font-size: 12px; }
+.inline-account-ledger .ledger-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.inline-account-ledger .ledger-filters .ant-select { min-width: 120px; }
+.inline-ledger-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 14px; color: var(--v2-muted); }
+.student-profile-action { display: flex; justify-content: flex-end; margin: -4px 0 12px; }
+.student-profile-action .ant-btn { padding-inline: 0; }
+.inline-account-ledger .ledger-filters .business-date-field.ant-picker { width: 165px; max-width: 100%; }
+.student-withdrawal-entry { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px; color: var(--v2-muted); font-size: 12px; }
+.student-withdrawal-entry .ant-btn { padding-inline: 0; }

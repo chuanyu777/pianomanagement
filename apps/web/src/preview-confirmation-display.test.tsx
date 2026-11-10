@@ -22,7 +22,7 @@ describe('confirmation display integration', () => {
     render(<QueryClientProvider client={client}><PreviewDialog preview={{ previewId, actionType: 'course-account.payment', schemaVersion: 'course-account.payment.v1', riskLevel: 'L2', status: 'PENDING', expiresAt: '2099-10-28T00:00:00.000Z', receipt: null, display, success: '交费已登记', invalidate: [] }} onCancel={() => {}} onConfirm={async () => ({ afterBalance: { paidBalance: '80.00', totalBalance: '100.00' }, receiptId: 'receipt-internal' })} /></QueryClientProvider>);
 
     const dialog = await screen.findByRole('dialog', { name: '课程交费' });
-    expect(within(dialog).getByText('高风险')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/高风险|低风险/)).not.toBeInTheDocument();
     expect(within(dialog).getByText('操作前余额')).toBeInTheDocument();
     expect(within(dialog).getByText('操作后余额')).toBeInTheDocument();
     expect(within(dialog).getAllByText('实付余额')).toHaveLength(2);
@@ -31,7 +31,9 @@ describe('confirmation display integration', () => {
 
     await userEvent.click(within(dialog).getByRole('button', { name: '确认执行' }));
     expect(await within(dialog).findByText('执行回执')).toBeInTheDocument();
-    expect(within(dialog).getAllByText('账户总余额').length).toBeGreaterThanOrEqual(3);
+    expect(within(dialog).getByText('交费已登记')).toBeInTheDocument();
+    expect(within(dialog).queryByText('操作前余额')).not.toBeInTheDocument();
+    expect(within(dialog).getByText('账户总余额')).toBeInTheDocument();
     expect(within(dialog).queryByText('receipt-internal')).not.toBeInTheDocument();
   });
 
@@ -43,6 +45,7 @@ describe('confirmation display integration', () => {
       if (path === '/api/teachers' || path === '/api/courses') return new Response('[]', { status: 200 });
       if (path === '/api/assistant/previews/structured-action') return new Response(JSON.stringify({ previewId: basicPreviewId, actionType: 'teacher.create', schemaVersion: 'teacher.create.v1', riskLevel: 'L1', expiresAt: '2099-10-28T00:00:00.000Z', display: { title: '新增教师资料', summary: '林老师，基本工资 ¥3200.00', name: '林老师', baseSalary: '3200.00', commissionRate: '8.0000', createsLoginAccount: false, teacherId: 'teacher-internal', requestId: 'request-internal' } }), { status: 201 });
       if (path === `/api/assistant/previews/${basicPreviewId}`) return new Response(JSON.stringify({ previewId: basicPreviewId, actionType: 'teacher.create', schemaVersion: 'teacher.create.v1', riskLevel: 'L1', status: 'PENDING', expiresAt: '2099-10-28T00:00:00.000Z', receipt: null }), { status: 200 });
+      if (path === `/api/assistant/previews/${basicPreviewId}/confirm`) return new Response(JSON.stringify({ previewId: basicPreviewId, actionType: 'teacher.create', schemaVersion: 'teacher.create.v1', riskLevel: 'L1', status: 'EXECUTED', expiresAt: '2099-10-28T00:00:00.000Z', receipt: { teacherId: 'teacher-internal' } }), { status: 200 });
       return new Response('{}', { status: 404 });
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -58,12 +61,16 @@ describe('confirmation display integration', () => {
     await user.click(screen.getByRole('button', { name: '生成确认单' }));
 
     const dialog = await screen.findByRole('dialog', { name: '新增教师资料' });
-    expect(within(dialog).getByText('低风险')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/高风险|低风险/)).not.toBeInTheDocument();
     expect(within(dialog).getByText('教师姓名')).toBeInTheDocument();
     expect(within(dialog).getByText('基本工资')).toBeInTheDocument();
     expect(within(dialog).getByText('¥3200.00')).toBeInTheDocument();
     expect(within(dialog).getByText('提成比例')).toBeInTheDocument();
     expect(within(dialog).getByText('不会创建登录账号')).toBeInTheDocument();
     expect(within(dialog).queryByText(/teacher-internal|request-internal/)).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: '确认执行' }));
+    expect(await within(dialog).findByText('教师资料已创建')).toBeInTheDocument();
+    expect(within(dialog).queryByText('基本工资')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: '确认执行' })).not.toBeInTheDocument();
   });
 });

@@ -30,6 +30,56 @@ describe('AI workspace', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Agent Runtime unavailable')));
   });
 
+  it('opens a new session without cancelling the previous task', async () => {
+    const user = userEvent.setup();
+    const oldThreadId = '4f229d18-5a0f-4ec2-904d-c522927d8d0c';
+    const sessionKey = `pianomanager.assistant.session.v1:${encodeURIComponent('u1:OWNER:')}`;
+    window.localStorage.setItem('pianomanager.accessToken', 'test-token');
+    window.sessionStorage.setItem(sessionKey, JSON.stringify({threadId:oldThreadId,messages:[{id:'old',role:'user',text:'先前的对话'}]}));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => String(input)==='/api/auth/me'
+      ? Response.json({id:'u1',username:'owner',role:'OWNER'}) : new Response('{}',{status:404}));
+    vi.stubGlobal('fetch', fetchMock);
+    renderApp();
+    expect(await screen.findByText('先前的对话')).toBeInTheDocument();
+    await user.click(screen.getByRole('button',{name:'新会话'}));
+    expect(screen.queryByText('先前的对话')).not.toBeInTheDocument();
+    await waitFor(() => expect(JSON.parse(window.sessionStorage.getItem(sessionKey)!).threadId).not.toBe(oldThreadId));
+    expect(fetchMock.mock.calls.some(([input]) => String(input)==='/api/assistant/runs')).toBe(false);
+  });
+
+  it('keeps the new-session action unavailable while an assistant run is in progress', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem('pianomanager.accessToken', 'test-token');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input)==='/api/auth/me') return Response.json({id:'u1',username:'owner',role:'OWNER'});
+      if (String(input)==='/api/assistant/runs') return new Promise<Response>(() => {});
+      return new Response('{}',{status:404});
+    }));
+    renderApp();
+    await user.type(await screen.findByLabelText('经营问题'),'查看今天的排课');
+    await user.click(screen.getByRole('button',{name:/发送消息/}));
+    await waitFor(() => expect(screen.getByRole('button',{name:'新会话'})).toBeDisabled());
+  });
+
+  it('allows a fresh session after the current run connection fails', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem('pianomanager.accessToken', 'test-token');
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input)==='/api/auth/me') return Response.json({id:'u1',username:'owner',role:'OWNER'});
+      if (String(input)==='/api/assistant/runs') throw new Error('连接失败');
+      return new Response('{}',{status:404});
+    }));
+    renderApp();
+    await user.type(await screen.findByLabelText('经营问题'),'查看今天的排课');
+    await user.click(screen.getByRole('button',{name:/发送消息/}));
+    expect(await screen.findByText(/请刷新页面恢复当前回复/)).toBeInTheDocument();
+    const start=screen.getByRole('button',{name:'新会话'});
+    expect(start).toBeEnabled();
+    await user.click(start);
+    expect(screen.queryByText('查看今天的排课')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('经营问题')).toBeEnabled();
+  });
+
   it('starts a fresh conversation after an explicit login even if an older session remains', async () => {
     const user = userEvent.setup();
     const sessionKey = `pianomanager.assistant.session.v1:${encodeURIComponent('u1:OWNER:')}`;
@@ -230,7 +280,7 @@ describe('AI workspace', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ username: 'owner', password: 'correct-password' });
     const studentsCall = fetchMock.mock.calls.find(([path]) => String(path).startsWith('/api/students/page?'));
     expect(new Headers(studentsCall?.[1]?.headers).get('Authorization')).toBe('Bearer jwt-test');
-    expect(screen.getByText('学生档案与课程账户')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '搜索学生或联系电话' })).toBeInTheDocument();
   });
 
   it('loads real schedule records with their related student and course', async () => {
@@ -426,7 +476,7 @@ describe('AI workspace', () => {
     expect(await screen.findByText('确认课程完成')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: '确认执行' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: '确认执行' }));
-    expect(await screen.findByText('课程已确认完成')).toBeInTheDocument();
+    expect((await screen.findAllByText('课程已确认完成')).length).toBeGreaterThan(0);
     expect(await screen.findByText('执行回执')).toBeInTheDocument();
     expect(screen.getAllByText('已完成').length).toBeGreaterThan(0);
     expect(screen.getByText('上课计费单价')).toBeInTheDocument();

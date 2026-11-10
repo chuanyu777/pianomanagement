@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, Empty, Input, Modal, Tag, Typography } from 'antd';
 import type { components } from '@piano/generated-core-client/generated/core-api';
 import { confirmAssistantPreview, createAssistantPreview, getAssistantPreview, notifyAuthExpired, type AssistantPreviewDraft } from './assistant-client.js';
-import { PreviewFacts } from './preview-facts.js';
+import { ConfirmationDialogContent } from './confirmation-dialog-content.js';
 import './basic-data-workbench.css';
 
 const { Title } = Typography;
@@ -335,8 +335,8 @@ export function BasicDataWorkbench({ onAskAssistant }: { onAskAssistant?: ((prom
     <Modal open={accountConfirmationOpen} title="确认开通登录账号" okText="确认并开通" cancelText="返回修改" confirmLoading={accountBusy} onCancel={() => setAccountConfirmationOpen(false)} onOk={() => void confirmOpenAccount()}>
       <p>确认后将为「{accountEditor?.teacher.name}」开通登录账号 <strong>{accountEditor?.username.trim()}</strong>。请确认用户名无误，初始密码请妥善保存。</p>
     </Modal>
-    <Modal open={Boolean(preview)} title={typeof preview?.display.title === 'string' ? preview.display.title : '确认操作'} footer={previewState === 'executed' ? <Button onClick={() => setPreview(null)}>关闭</Button> : <><Button disabled={previewState === 'confirming'} onClick={() => setPreview(null)}>关闭</Button>{previewState === 'unknown' ? <Button onClick={() => void recheck()}>重查状态</Button> : <Button disabled={previewState !== 'pending'} loading={previewState === 'confirming'} onClick={() => void confirm()} type="primary">确认执行</Button>}</>} onCancel={() => { if (previewState !== 'confirming') setPreview(null); }}>
-      {preview && <div className="preview-summary"><Tag color={preview.riskLevel === 'L2' ? 'orange' : 'blue'}>{preview.riskLevel === 'L2' ? '高风险' : '低风险'}</Tag><p>{typeof preview.display.summary === 'string' ? preview.display.summary : '请核对下方操作后确认执行。'}</p><PreviewFacts value={preview.display} actionType={preview.actionType} />{previewMessage && <Alert message={previewMessage} type={previewState === 'executed' ? 'success' : 'warning'} showIcon />}{receipt && <><strong>执行回执</strong><PreviewFacts value={receipt} actionType={preview.actionType} /></>}</div>}
+    <Modal open={Boolean(preview)} title={typeof preview?.display.title === 'string' ? preview.display.title : '确认操作'} closable={previewState !== 'confirming'} maskClosable={previewState !== 'confirming'} footer={previewState === 'executed' ? <Button onClick={() => setPreview(null)}>关闭</Button> : <><Button disabled={previewState === 'confirming'} onClick={() => setPreview(null)}>关闭</Button>{previewState === 'unknown' ? <Button onClick={() => void recheck()}>重查状态</Button> : <Button disabled={previewState !== 'pending'} loading={previewState === 'confirming'} onClick={() => void confirm()} type="primary">确认执行</Button>}</>} onCancel={() => { if (previewState !== 'confirming') setPreview(null); }}>
+      {preview && <ConfirmationDialogContent preview={preview} state={previewState} message={previewMessage} receipt={receipt} />}
     </Modal>
   </section>;
 }

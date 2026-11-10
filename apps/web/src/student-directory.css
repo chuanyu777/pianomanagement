@@ -15,3 +15,18 @@
   .student-workspace .student-toolbar { grid-template-columns: minmax(0,1fr) auto; }
   .student-toolbar > .ant-input-affix-wrapper { grid-column: 1/-1; }
 }
+
+.student-search-bar { position: relative; display: flex; align-items: center; gap: 10px; margin: 16px 0; }
+.student-search-bar > .ant-input-affix-wrapper { flex: 1; min-width: 0; }
+.student-search-bar > button { white-space: nowrap; }
+.student-picker { position: absolute; z-index: 10; top: calc(100% + 8px); left: 0; right: 0; padding: 14px; border: 1px solid #d3d9e6; border-radius: 8px; background: #fff; box-shadow: 0 8px 24px #0002; }
+.student-workspace .student-picker .student-toolbar { display: flex; gap: 8px; margin: 0 0 10px; align-items: center; }
+.student-picker .student-toolbar > span:first-child { flex: 1; color: #526079; font-size: 12px; }
+.student-picker .student-directory { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.student-workspace .student-master-detail { display: block; }
+@media (max-width: 420px) {
+  .student-search-bar { flex-wrap: wrap; }
+  .student-search-bar > .ant-input-affix-wrapper { flex-basis: 100%; }
+  .student-picker .student-toolbar { flex-wrap: wrap; }
+  .student-picker .student-directory { grid-template-columns: 1fr; }
+}

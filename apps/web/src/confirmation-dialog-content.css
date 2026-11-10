@@ -1,0 +1,10 @@
+.confirmation-intro { padding: 16px; border-radius: 12px; background: #f6f8f5; }
+.confirmation-intro p { margin: 0; color: #38443d; line-height: 1.6; }
+.confirmation-facts { margin: 14px 0; }
+.confirmation-checking { color: #68756d; font-size: 13px; }
+.confirmation-result-heading { display: flex; align-items: center; gap: 12px; padding: 16px; border-radius: 12px; background: #eff8f1; }
+.confirmation-result-heading > span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; color: #fff; background: #459768; font-size: 20px; }
+.confirmation-result-heading strong { color: #225d3b; font-size: 16px; }
+.confirmation-result-heading p { margin: 3px 0 0; color: #64806c; font-size: 12px; }
+.confirmation-receipt { margin-top: 18px; color: #47544b; }
+.confirmation-receipt > strong { font-size: 13px; }

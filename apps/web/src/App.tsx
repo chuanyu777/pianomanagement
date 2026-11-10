@@ -484,12 +484,12 @@ function pendingRunPromise(pending: PendingPageRun): ReturnType<typeof startAssi
 type PendingPageRunRef = { current: PendingPageRun | null };
 
 function StructuredBusinessPage({ section }: { section: 'students' | 'schedule' | 'finance' | 'settings' }) {
-  const { assistantState, user, hiddenTask, hiddenThreads, pendingPageRun } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; pendingPageRun: PendingPageRunRef }>();
+  const { assistantState, user, hiddenTask, hiddenThreads, pendingPageRun, setWorkspaceInteractionDisabled, setSessionSwitchBlocked, startNewSession, sessionSwitchBlocked } = useOutletContext<{ assistantState: ReturnType<typeof useAssistantState>; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; pendingPageRun: PendingPageRunRef; setWorkspaceInteractionDisabled: (disabled: boolean) => void; setSessionSwitchBlocked: (blocked: boolean) => void; startNewSession: () => void; sessionSwitchBlocked: boolean }>();
   const [resultTarget, setResultTarget] = useState<HTMLDivElement | null>(null);
   const [showResult, setShowResult] = useState(false);
   const [assistantDraft, setAssistantDraft] = useState<{ text: string; revision: number } | null>(null);
   return <ResizableWorkspace className={`business-page-${section}`}>
-    <AssistantCompanion assistantState={assistantState} section={section} user={user} hiddenTask={hiddenTask} hiddenThreads={hiddenThreads} pendingPageRun={pendingPageRun} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} onHideResult={() => setShowResult(false)} draft={assistantDraft} />
+    <AssistantCompanion assistantState={assistantState} section={section} user={user} hiddenTask={hiddenTask} hiddenThreads={hiddenThreads} pendingPageRun={pendingPageRun} onBusyChange={setWorkspaceInteractionDisabled} onSessionBusyChange={setSessionSwitchBlocked} startNewSession={startNewSession} sessionSwitchBlocked={sessionSwitchBlocked} resultTarget={resultTarget} onShowResult={() => setShowResult(true)} onHideResult={() => setShowResult(false)} draft={assistantDraft} />
     <div aria-label="业务工作区" className="business-workspace panel-surface"><div hidden={showResult}><StructuredWorkbench section={section} role={user?.role ?? ''} onAskAssistant={(text) => setAssistantDraft((current) => ({ text, revision: (current?.revision ?? 0) + 1 }))} /></div><div hidden={!showResult} ref={setResultTarget} /><div hidden={!showResult} className="business-result-actions"><Button onClick={() => setShowResult(false)}>返回业务功能</Button></div></div>
   </ResizableWorkspace>;
 }
@@ -501,7 +501,7 @@ const pageAssistantCopy = {
   settings: { title: '教师与课程', welcome: '在这里维护教师资料、默认薪酬和课程信息，也可以告诉我你想要办理的事项。', suggestions: ['查看教师', '查看课程', '新增课程'] },
 } as const;
 
-function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenThreads, pendingPageRun, resultTarget, onShowResult, onHideResult, draft }: { pendingPageRun: PendingPageRunRef; assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; resultTarget: HTMLDivElement | null; onShowResult: () => void; onHideResult: () => void; draft: { text: string; revision: number } | null }) {
+function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenThreads, pendingPageRun, onBusyChange, onSessionBusyChange, startNewSession, sessionSwitchBlocked, resultTarget, onShowResult, onHideResult, draft }: { pendingPageRun: PendingPageRunRef; assistantState: ReturnType<typeof useAssistantState>; section: keyof typeof pageAssistantCopy; user: AuthUser | null; hiddenTask: HiddenTaskUpdate; hiddenThreads: Set<string>; onBusyChange: (busy: boolean) => void; onSessionBusyChange: (busy: boolean) => void; startNewSession: () => void; sessionSwitchBlocked: boolean; resultTarget: HTMLDivElement | null; onShowResult: () => void; onHideResult: () => void; draft: { text: string; revision: number } | null }) {
   const copy = pageAssistantCopy[section];
   const queryClient = useQueryClient();
   const initialRef = useRef<PersistedAssistantSession | null>(null);
@@ -592,6 +592,8 @@ function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenT
     void attachRun(pending, controller);
   };
   const isPending = status === 'running' || pendingPageRun.current?.threadId === threadId;
+  useEffect(() => { onBusyChange(isPending); return () => onBusyChange(false); }, [isPending, onBusyChange]);
+  useEffect(() => { onSessionBusyChange(status === 'running'); return () => onSessionBusyChange(false); }, [status, onSessionBusyChange]);
   const selectCandidate = (candidateId: string, taskVersion?: number) => {
     if (isPending || workspaceThreadId !== threadId || !workspace?.blocks.some((block) => block.type === 'entity-picker' && block.candidates.some((candidate) => candidate.id === candidateId))) return;
     void send(`选择候选:${candidateId}${typeof taskVersion === 'number' ? `:${taskVersion}` : ''}`);
@@ -601,7 +603,7 @@ function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenT
   };
   const visibleMessages = messages.slice(-8);
   return <section aria-label={`${copy.title}经营助手`} className="page-assistant panel-surface">
-    <div className="page-assistant-head"><div><span className="eyebrow">AI OPERATING ASSISTANT</span><Title level={2}>{copy.title}</Title></div><span className={`assistant-availability ${assistantState.data?.available ? 'is-online' : ''}`}>{assistantState.data?.available ? '在线' : '暂不可用'}</span></div>
+    <div className="page-assistant-head"><div><span className="eyebrow">AI OPERATING ASSISTANT</span><Title level={2}>{copy.title}</Title></div><button className="new-session-button" disabled={sessionSwitchBlocked} onClick={startNewSession} title={sessionSwitchBlocked ? '请等待当前回复完成' : undefined} type="button"><span aria-hidden="true">＋</span> 新会话</button><span className={`assistant-availability ${assistantState.data?.available ? 'is-online' : ''}`}>{assistantState.data?.available ? '在线' : '暂不可用'}</span></div>
     <div className="page-chat-stream"><div aria-label="AI 助手的消息" className="chat-message assistant" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><p>{copy.welcome}</p></div>{visibleMessages.map((message) => <div aria-label={message.role === 'user' ? '你的消息' : 'AI 助手的消息'} className={`chat-message ${message.role}`} key={message.id} role="group">{message.role === 'assistant' && <span aria-hidden="true" className="chat-avatar">AI</span>}<p>{formatAssistantReply(message.text)}</p></div>)}{reply && <div aria-label="AI 助手的消息" className="chat-message assistant" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><p>{formatAssistantReply(reply)}</p></div>}</div>
     {workspace && <button className="workspace-result-link" onClick={onShowResult} type="button">查看本次对话结果 →</button>}
     {workspace && resultTarget && createPortal(<section aria-label="AI 工作区结果" className="business-ai-workspace"><div className="context-heading"><div><span className="eyebrow">CURRENT TASK</span><Title level={3}>本次对话结果</Title></div></div><WorkspaceContent document={workspace} interactionDisabled={isPending || workspaceThreadId !== threadId} isCurrentWorkspace={workspaceThreadId === threadId} onCandidateSelect={selectCandidate} onPreviewConfirmed={(previewId) => { setConfirmedPreviewIds((current) => new Set(current).add(previewId)); void queryClient.invalidateQueries(); }} onRecoveryAction={recoverWorkspace} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCorePreviewDisplay} /></section>, resultTarget)}
@@ -670,8 +672,11 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
   const queryClient = useQueryClient();
   const hiddenThreads = useRef(new Set<string>());
   const [pendingPageRun] = useState<PendingPageRunRef>(() => ({ current: restorePendingRun(user) }));
+  const [sessionSwitchBlocked, setSessionSwitchBlocked] = useState(() => Boolean(pendingPageRun.current));
   const [hiddenTask, setHiddenTask] = useState<HiddenTaskUpdate>(null);
   const [workspace, setWorkspaceState] = useState<WorkspaceState | null>(null);
+  const [sessionRevision, setSessionRevision] = useState(0);
+  const freshSessionRef = useRef<PersistedAssistantSession | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [workspaceInteractionDisabled, setWorkspaceInteractionDisabled] = useState(false);
   const [previewRecheckVersion, setPreviewRecheckVersion] = useState(0);
@@ -745,6 +750,19 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
       if (recoveryActionRef.current === handler) recoveryActionRef.current = null;
     };
   }, []);
+  const startNewSession = () => {
+    if (sessionSwitchBlocked) return;
+    const session = { threadId: createAssistantIds().threadId, messages: [] };
+    clearPendingRun(user, pendingPageRun);
+    freshSessionRef.current = location.pathname === '/' ? session : null;
+    writeAssistantSession(user, session);
+    setWorkspaceState(null);
+    setActiveThreadId(null);
+    setWorkspaceInteractionDisabled(false);
+    setSessionSwitchBlocked(false);
+    setPreviewRecheckVersion(0);
+    setSessionRevision((current) => current + 1);
+  };
   return (
     <div className="app-shell">
       <div className="prototype-strip"><span>AI NATIVE · 经营工作台</span><span>重要操作先确认，再执行</span></div>
@@ -768,7 +786,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
             <Button aria-label="退出登录" ghost onClick={onLogout} size="small">退出</Button>
           </div>
         </aside>
-        <main className="main-column"><Outlet context={{ assistantState, onLogout, user, hiddenTask, hiddenThreads: hiddenThreads.current, pendingPageRun, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction }} /></main>
+        <main className="main-column"><Outlet key={sessionRevision} context={{ assistantState, onLogout, user, hiddenTask, hiddenThreads: hiddenThreads.current, pendingPageRun, freshSessionRef, startNewSession, sessionSwitchBlocked, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setSessionSwitchBlocked, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction }} /></main>
         {isAssistantWorkspace && <aside aria-label="经营工作区" className="context-panel panel-surface"><ContextPanel
           activeThreadId={activeThreadId}
           interactionDisabled={workspaceInteractionDisabled}
@@ -800,16 +818,20 @@ function WorkspaceHome() {
   const [reply, setReply] = useState('');
   const [clarification, setClarification] = useState('');
   const [runError, setRunError] = useState('');
-  const { assistantState, onLogout, user, hiddenTask, hiddenThreads, pendingPageRun, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction } = useOutletContext<{
+  const { assistantState, onLogout, user, hiddenTask, hiddenThreads, pendingPageRun, freshSessionRef, startNewSession, sessionSwitchBlocked, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setSessionSwitchBlocked, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction } = useOutletContext<{
     assistantState: ReturnType<typeof useAssistantState>;
     onLogout: () => void;
     user: AuthUser | null;
     hiddenTask: HiddenTaskUpdate;
     hiddenThreads: Set<string>;
     pendingPageRun: PendingPageRunRef;
+    freshSessionRef: { current: PersistedAssistantSession | null };
+    startNewSession: () => void;
+    sessionSwitchBlocked: boolean;
     setWorkspace: (workspace: WorkspaceDocument | null, threadId?: string, requireCoreDisplay?: boolean) => void;
     setActiveThreadId: (threadId: string | null) => void;
     setWorkspaceInteractionDisabled: (disabled: boolean) => void;
+    setSessionSwitchBlocked: (blocked: boolean) => void;
     setPreviewRecheckVersion: (update: (current: number) => number) => void;
     registerCandidateSelection: (handler: CandidateSelectionHandler) => () => void;
     registerClearConversation: (handler: ClearConversationHandler) => () => void;
@@ -817,7 +839,10 @@ function WorkspaceHome() {
     registerRecoveryAction: (handler: RecoveryActionHandler) => () => void;
   }>();
   const initialSessionRef = useRef<PersistedAssistantSession | null>(null);
-  if (!initialSessionRef.current) initialSessionRef.current = newConversation(user);
+  if (!initialSessionRef.current) {
+    initialSessionRef.current = freshSessionRef.current ?? newConversation(user);
+    freshSessionRef.current = null;
+  }
   const [threadId, setThreadId] = useState(() => initialSessionRef.current?.threadId ?? createAssistantIds().threadId);
   const [messages, setMessages] = useState<ConversationMessage[]>(() => initialSessionRef.current?.messages ?? []);
   const [workspace, setLocalWorkspace] = useState<WorkspaceDocument | null>(() => initialSessionRef.current?.workspace ?? null);
@@ -833,6 +858,10 @@ function WorkspaceHome() {
     setWorkspaceInteractionDisabled(isBusy);
     return () => setWorkspaceInteractionDisabled(false);
   }, [isBusy, setWorkspaceInteractionDisabled]);
+  useEffect(() => {
+    setSessionSwitchBlocked(isBusy && runStatus !== 'connection_failed');
+    return () => setSessionSwitchBlocked(false);
+  }, [isBusy, runStatus, setSessionSwitchBlocked]);
   useEffect(() => {
     setActiveThreadId(threadId);
     if (workspace) setWorkspace(workspace, workspaceThreadId, requireCorePreviewDisplay);
@@ -1051,7 +1080,7 @@ function WorkspaceHome() {
         <div className="date-chip"><span className="date-label">业务日</span><strong>尚未设置</strong></div></div>
       {isUnavailable && <Alert className="availability-alert" description={user?.role === 'TEACHER' ? '助手暂时无法回答问题，你仍可以使用排课页面。' : '助手暂时无法回答问题，你仍可以使用学生、排课和收支页面。'} title="助手暂时不可用" showIcon type="warning" />}
       <Card className="prompt-card" variant="borderless">
-        <div className="card-heading"><div><span className="eyebrow">OPERATING THREAD</span><Title level={3}>今天先处理什么？</Title></div><span className={`assistant-availability ${isUnavailable ? '' : 'is-online'}`}>{isUnavailable ? '暂不可用' : '在线'}</span></div>
+        <div className="card-heading"><div><span className="eyebrow">OPERATING THREAD</span><Title level={3}>今天先处理什么？</Title></div><button className="new-session-button" disabled={sessionSwitchBlocked} onClick={startNewSession} title={sessionSwitchBlocked ? '请等待当前回复完成' : undefined} type="button"><span aria-hidden="true">＋</span> 新会话</button><span className={`assistant-availability ${isUnavailable ? '' : 'is-online'}`}>{isUnavailable ? '暂不可用' : '在线'}</span></div>
         <section aria-label="对话历史" className="conversation-history home-conversation">
           {messages.length === 0 && <div aria-label="AI 助手的消息" className="conversation-message conversation-message-assistant welcome-message" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><div><p>{user?.role === 'TEACHER' ? '早上好。你可以查看自己的课表，办理调课、请假或确认上课。' : '早上好。你可以直接查询今天的排课、本月经营情况，或办理学生账户和日常经营事项。'}</p></div></div>}
           {messages.map((message) => <div aria-label={message.role === 'user' ? '你的消息' : 'AI 助手的消息'} className={`conversation-message conversation-message-${message.role}`} key={message.id} role="group">
@@ -1331,7 +1360,7 @@ function PreviewConfirmationCard({ confirmAllowed = true, interactionDisabled, o
     {canShowDetails ? <>
       <div className="preview-card-heading">{displayTitle !== workspaceTitle && <strong>{displayTitle}</strong>}<span className={`preview-status ${status === 'executed' ? 'is-complete' : ''}`}>{status === 'executed' ? '已完成' : '操作确认'}</span></div>
       {status !== 'executed' && <p className="preview-guidance">请核对以下信息，确认后生效。</p>}
-      {coreDisplay && <section aria-label="当前确认单内容" className="preview-core-display">
+      {status !== 'executed' && coreDisplay && <section aria-label="当前确认单内容" className="preview-core-display">
         {typeof coreDisplay.summary === 'string' && <p>{coreDisplay.summary}</p>}
         <PreviewFacts value={coreDisplay} actionType={coreActionType ?? preview.actionType} />
       </section>}

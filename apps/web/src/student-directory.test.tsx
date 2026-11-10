@@ -33,6 +33,8 @@ function mount(path = '/students', withAccount = false) {
 
 it('bounds a 43-student directory and preserves the active account context while paging', async () => {
   mount();
+  await screen.findByRole('heading', { name: '学生1' });
+  await userEvent.click(screen.getByRole('button', { name: '浏览全部学生' }));
   await screen.findByRole('button', { name: '学生1 在读' });
   const directory = screen.getByRole('complementary', { name: '学生列表' });
   expect(within(directory).getAllByRole('button', { name: /^学生\d/ })).toHaveLength(8);
@@ -45,18 +47,23 @@ it('bounds a 43-student directory and preserves the active account context while
 
 it('requests a bounded student page from the server', async () => {
   mount();
+  await screen.findByRole('heading', { name: '学生1' });
+  await userEvent.click(screen.getByRole('button', { name: '浏览全部学生' }));
   await screen.findByRole('button', { name: '学生1 在读' });
   expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).startsWith('/api/students/page?'))).toBe(true);
 });
 
 it('returns to the last available page when a saved page is out of range', async () => {
   mount('/students?page=99');
+  await userEvent.click(screen.getByRole('button', { name: '浏览全部学生' }));
   expect(await screen.findByRole('button', { name: '学生43 冻结' })).toBeInTheDocument();
   expect(screen.getByLabelText('学生目录分页')).toHaveTextContent('6 / 6');
 });
 
 it('puts a deep-linked student on the visible directory page', async () => {
   mount('/students?student=s-42');
+  await screen.findByRole('heading', { name: '学生43' });
+  await userEvent.click(screen.getByRole('button', { name: '浏览全部学生' }));
   expect(await screen.findByRole('button', { name: '学生43 冻结' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByRole('heading', { name: '学生43' })).toBeInTheDocument();
 });
@@ -80,6 +87,9 @@ it('locates the linked entry in the specified student account', async () => {
   const row = (await screen.findByText('店主', { exact: false })).closest('.account-ledger-row');
   expect(row).toHaveAttribute('id', 'account-ledger-entry-1');
   expect(row).toHaveClass('is-linked');
+  await userEvent.type(screen.getByRole('textbox', { name: '搜索学生或联系电话' }), '不存在');
+  await screen.findByText('没有符合条件的学生');
+  expect(screen.getByText('店主', { exact: false }).closest('.account-ledger-row')).toHaveClass('is-linked');
 });
 
 it('reports a missing linked entry rather than presenting other entries as the requested one', async () => {
@@ -89,17 +99,53 @@ it('reports a missing linked entry rather than presenting other entries as the r
 
 it('filters the full directory instead of just the visible page', async () => {
   mount();
+  await screen.findByRole('heading', { name: '学生1' });
+  await userEvent.click(screen.getByRole('button', { name: '浏览全部学生' }));
   await screen.findByRole('button', { name: '学生1 在读' });
   await userEvent.click(screen.getByRole('combobox', { name: '学生学籍筛选' }));
   await userEvent.click(await screen.findByText('冻结', { exact: true }));
   expect(await screen.findByRole('button', { name: '学生43 冻结' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '下一页学生' })).not.toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '学生1' })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: '学生43 冻结' }));
   expect(screen.getByRole('heading', { name: '学生43' })).toBeInTheDocument();
 });
 
-it('selects a matching result when the user searches after selecting a student', async () => {
+it('allows selecting a matching result after searching for another student', async () => {
   mount('/students?student=s-0');
+  await screen.findByRole('heading', { name: '学生1' });
+  await userEvent.click(screen.getByRole('button', { name: '浏览全部学生' }));
   await screen.findByRole('button', { name: '学生1 在读' });
   await userEvent.type(screen.getByRole('textbox', { name: '搜索学生或联系电话' }), '学生43');
+  await userEvent.click(await screen.findByRole('button', { name: '学生43 冻结' }));
   expect(await screen.findByRole('heading', { name: '学生43' })).toBeInTheDocument();
+});
+
+
+it('keeps the current student while searching and selects only after a result is chosen', async () => {
+  mount('/students?student=s-0');
+  await screen.findByRole('heading', { name: '学生1' });
+  const search = screen.getByRole('textbox', { name: '搜索学生或联系电话' });
+  expect(screen.getByRole('button', { name: '浏览全部学生' })).toBeInTheDocument();
+  await userEvent.type(search, '学生43');
+  const result = await screen.findByRole('button', { name: '学生43 冻结' });
+  expect(screen.getByRole('heading', { name: '学生1' })).toBeInTheDocument();
+  await userEvent.click(result);
+  expect(await screen.findByRole('heading', { name: '学生43' })).toBeInTheDocument();
+  expect(screen.queryByRole('complementary', { name: '学生列表' })).not.toBeInTheDocument();
+});
+
+it('preserves the selected student and course while searching with no matches and filtering', async () => {
+  mount('/students?student=s-0&account=account-1&tab=accounts', true);
+  await screen.findByRole('heading', { name: '学生1' });
+  expect(await screen.findByRole('heading', { name: '钢琴账户' })).toBeInTheDocument();
+  const search = screen.getByRole('textbox', { name: '搜索学生或联系电话' });
+  await userEvent.type(search, '不存在');
+  await screen.findByText('没有符合条件的学生');
+  expect(screen.getByRole('heading', { name: '学生1' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '钢琴账户' })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('combobox', { name: '学生学籍筛选' }));
+  await userEvent.click(await screen.findByText('冻结', { exact: true }));
+  expect(screen.getByRole('heading', { name: '学生1' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '钢琴账户' })).toBeInTheDocument();
 });

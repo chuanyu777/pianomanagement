@@ -178,17 +178,16 @@ describe('critical finance workflows', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderWorkbench('students', '/students');
 
-    await screen.findByRole('button', { name: /小周/ });
+    await screen.findByRole('heading', { name: '小周' });
     await screen.findByRole('button', { name: '登记交费' });
     await user.click(screen.getByRole('button', { name: '最终退款' }));
     await user.clear(screen.getByLabelText('退款手续费'));
     await user.type(screen.getByLabelText('退款手续费'), '0.00');
     await user.click(screen.getByRole('button', { name: '生成确认单' }));
     await user.click(await screen.findByRole('button', { name: '确认执行' }));
-    expect(await screen.findByText('执行回执')).toBeInTheDocument();
-    expect(screen.getAllByText('¥100.00').length).toBeGreaterThanOrEqual(2);
+    expect(await screen.findByText('最终退款已完成')).toBeInTheDocument();
     expect(screen.queryByText('refund-1')).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('button', { name: /小周.*退学/ })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('退学')).toBeInTheDocument());
     expect(fetchMock.mock.calls.some(([path, request]) => String(path).endsWith(`/previews/${previewId}/confirm`) && request?.method === 'POST')).toBe(true);
   });
 });

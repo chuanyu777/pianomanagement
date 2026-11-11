@@ -1,6 +1,18 @@
 import { z } from 'zod';
-import type { components } from '@piano/generated-core-client/generated/core-api';
 import { createSignedInternalRequestHeaders } from '@piano/assistant-protocol/internal-auth';
+import {
+  SingleLessonPreviewResponseSchema,
+  BatchLessonPreviewResponseSchema,
+  FinalRefundPreviewResponseSchema,
+  PaymentPreviewResponseSchema,
+  GiftPreviewResponseSchema,
+  StructuredActionPreviewResponseSchema,
+  CourseAccountCandidatesResponseSchema as CourseAccountCandidatesSchema,
+  TeacherCandidatesResponseSchema as TeacherCandidatesSchema,
+  StudentCandidatesResponseSchema as StudentCandidatesSchema,
+  LessonCandidatesResponseSchema as LessonCandidatesSchema,
+  PayrollCandidatesResponseSchema as PayrollCandidatesSchema,
+} from '@piano/assistant-protocol';
 import { DashboardSummarySchema, type DashboardSummary } from './dashboard-summary.js';
 import { CoreDialogueError } from './dialogue-tools.js';
 
@@ -17,29 +29,7 @@ const SingleLessonPreviewRequestSchema = z
 
 export type SingleLessonPreviewRequest = z.infer<typeof SingleLessonPreviewRequestSchema>;
 
-const SingleLessonPreviewResponseSchema = z
-  .object({
-    riskLevel: z.enum(['L1', 'L2']).optional(),
-    previewId: z.uuid(),
-    actionType: z.literal('lesson.schedule.single'),
-    command: z
-      .object({
-        accountId: z.uuid(),
-        teacherId: z.uuid(),
-        startsAt: z.iso.datetime(),
-        endsAt: z.iso.datetime(),
-        note: z.string().optional(),
-      })
-      .strict(),
-    display: z
-      .object({
-        title: z.string().min(1),
-        summary: z.string().min(1),
-      })
-      .strict(),
-    expiresAt: z.iso.datetime(),
-  })
-  .strict();
+// 响应结构统一在 @piano/assistant-protocol 定义，Agent 不再手写第二份。
 
 export type SingleLessonPreviewResponse = z.infer<typeof SingleLessonPreviewResponseSchema>;
 
@@ -53,23 +43,7 @@ const BatchLessonPreviewRequestSchema = z.object({
   requestId: z.uuid(),
 }).strict();
 
-const BatchLessonPreviewResponseSchema = z.object({
-  riskLevel: z.enum(['L1', 'L2']).optional(),
-  previewId: z.uuid(),
-  actionType: z.literal('lesson.schedule.weekly-batch'),
-  command: z.object({
-    accountId: z.uuid(), teacherId: z.uuid(), firstStartsAt: z.iso.datetime(),
-    weeks: z.number().int().min(1).max(52), note: z.string().nullable(),
-  }).strict(),
-  display: z.object({
-    title: z.string().min(1), summary: z.string().min(1),
-    lessons: z.array(z.object({ week: z.number().int().min(1), startsAt: z.iso.datetime(), endsAt: z.iso.datetime() }).strict()),
-    conflicts: z.array(z.record(z.string(), z.string())),
-  }).strict(),
-  resourceVersions: z.record(z.string(), z.unknown()),
-  expiresAt: z.iso.datetime(),
-  auditEventId: z.uuid(),
-}).strict();
+// 响应结构统一在 @piano/assistant-protocol 定义，Agent 不再手写第二份。
 
 export type BatchLessonPreviewRequest = z.infer<typeof BatchLessonPreviewRequestSchema>;
 export type BatchLessonPreviewResponse = z.infer<typeof BatchLessonPreviewResponseSchema>;
@@ -84,28 +58,7 @@ const FinalRefundPreviewRequestSchema = z.object({
   requestId: z.uuid(),
 }).strict();
 
-const FinalRefundPreviewResponseSchema = z.object({
-  riskLevel: z.enum(['L1', 'L2']).optional(),
-  previewId: z.uuid(),
-  actionType: z.literal('student.final-refund'),
-  command: z.object({
-    studentId: z.uuid(), feeAmount: z.string().regex(/^(?:0|[1-9]\d{0,11})\.\d{2}$/), channel: z.enum(['CASH', 'WECHAT', 'ALIPAY', 'BANK_CARD', 'OTHER']),
-    occurredAt: z.iso.datetime(), note: z.string().nullable(),
-  }).strict(),
-  display: z.object({
-    title: z.string().min(1), summary: z.string().min(1), studentId: z.uuid(), studentName: z.string().min(1),
-    studentStatusBefore: z.string().min(1), studentStatusAfter: z.string().min(1), totalPaidRefund: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/),
-    feeAmount: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/), feePercentage: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/),
-    actualRefundAmount: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/),
-    courses: z.array(z.object({
-      accountId: z.uuid(), courseName: z.string().min(1), paidBalanceBefore: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/),
-      giftBalanceBefore: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/),
-      paidRefundAmount: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/), giftClearingAmount: z.string().regex(/^(?:0|[1-9]\d*)\.\d{2}$/),
-    }).strict()),
-  }).strict(),
-  resourceVersions: z.record(z.string(), z.unknown()),
-  expiresAt: z.iso.datetime(), auditEventId: z.uuid(),
-}).strict();
+// 响应结构统一在 @piano/assistant-protocol 定义，Agent 不再手写第二份。
 
 export type FinalRefundPreviewRequest = z.infer<typeof FinalRefundPreviewRequestSchema>;
 export type FinalRefundPreviewResponse = z.infer<typeof FinalRefundPreviewResponseSchema>;
@@ -122,7 +75,6 @@ const PREVIEW_PATHS = {
 type PreviewRequestPath = (typeof PREVIEW_PATHS)[keyof typeof PREVIEW_PATHS];
 
 const PositiveMoneyStringSchema = z.string().regex(/^(?:0\.(?:0[1-9]|[1-9]\d)|[1-9]\d{0,11}\.\d{2})$/);
-const BalanceMoneyStringSchema = z.string().regex(/^-?(?:0|[1-9]\d*)\.\d{2}$/);
 const PaymentChannelSchema = z.enum(['CASH', 'WECHAT', 'ALIPAY', 'BANK_CARD', 'OTHER']);
 
 const MoneyPreviewBaseRequestSchema = z
@@ -146,70 +98,8 @@ const GiftPreviewRequestSchema = MoneyPreviewBaseRequestSchema;
 export type PaymentPreviewRequest = z.infer<typeof PaymentPreviewRequestSchema>;
 export type GiftPreviewRequest = z.infer<typeof GiftPreviewRequestSchema>;
 
-const CourseAccountBalanceSchema = z
-  .object({
-    accountId: z.uuid(),
-    paidBalance: BalanceMoneyStringSchema,
-    giftBalance: BalanceMoneyStringSchema,
-    totalBalance: BalanceMoneyStringSchema,
-  })
-  .strict();
+// 响应结构统一在 @piano/assistant-protocol 定义，Agent 不再手写第二份。
 
-const MoneyPreviewDisplaySchema = z
-  .object({
-    title: z.string().min(1),
-    summary: z.string().min(1),
-    beforeBalance: CourseAccountBalanceSchema,
-    afterBalance: CourseAccountBalanceSchema,
-  })
-  .strict();
-
-const LegacyPaymentPreviewResponseSchema = z
-  .object({
-    riskLevel: z.enum(['L1', 'L2']).optional(),
-    previewId: z.uuid(),
-    actionType: z.literal('course-account.payment'),
-    command: z
-      .object({
-        accountId: z.uuid(),
-        amount: PositiveMoneyStringSchema,
-        channel: PaymentChannelSchema,
-        occurredAt: z.iso.datetime(),
-        note: z.string().nullable(),
-      })
-      .strict(),
-    display: MoneyPreviewDisplaySchema.extend({currentUnitPrice:PositiveMoneyStringSchema.optional(),studentName:z.string().optional(),courseName:z.string().optional()}).strict(),
-    expiresAt: z.iso.datetime(),
-    auditEventId: z.uuid(),
-  })
-  .strict();
-
-const CombinedPaymentPreviewResponseSchema = z.object({
-  riskLevel:z.enum(['L1','L2']).optional(),previewId:z.uuid(),actionType:z.literal('course-account.payment'),
-  command:z.object({studentId:z.uuid(),courseId:z.uuid(),amount:PositiveMoneyStringSchema,channel:PaymentChannelSchema,occurredAt:z.iso.datetime(),note:z.string().nullable(),currentUnitPrice:PositiveMoneyStringSchema,priceExplicit:z.boolean()}).strict(),
-  display:z.object({title:z.string().min(1),summary:z.string().min(1),studentName:z.string(),courseName:z.string(),amount:PositiveMoneyStringSchema,channel:PaymentChannelSchema,priceBefore:BalanceMoneyStringSchema.nullable(),priceAfter:PositiveMoneyStringSchema,beforeBalance:CourseAccountBalanceSchema.omit({accountId:true}).extend({accountId:z.uuid().optional()}).strict(),afterBalance:CourseAccountBalanceSchema.omit({accountId:true}).extend({accountId:z.uuid().optional()}).strict()}).strict(),
-  expiresAt:z.iso.datetime(),auditEventId:z.uuid(),
-}).strict();
-const PaymentPreviewResponseSchema=z.union([LegacyPaymentPreviewResponseSchema,CombinedPaymentPreviewResponseSchema]);
-
-const GiftPreviewResponseSchema = z
-  .object({
-    riskLevel: z.enum(['L1', 'L2']).optional(),
-    previewId: z.uuid(),
-    actionType: z.literal('course-account.gift'),
-    command: z
-      .object({
-        accountId: z.uuid(),
-        amount: PositiveMoneyStringSchema,
-        occurredAt: z.iso.datetime(),
-        note: z.string().nullable(),
-      })
-      .strict(),
-    display: MoneyPreviewDisplaySchema,
-    expiresAt: z.iso.datetime(),
-    auditEventId: z.uuid(),
-  })
-  .strict();
 
 export type PaymentPreviewResponse = z.infer<typeof PaymentPreviewResponseSchema>;
 export type GiftPreviewResponse = z.infer<typeof GiftPreviewResponseSchema>;
@@ -222,48 +112,11 @@ const SystemStatusSchema = z.object({
 
 export type SystemStatus = z.infer<typeof SystemStatusSchema>;
 
-const CourseAccountCandidatesSchema = z.object({
-  candidates: z.array(z.object({
-    accountId: z.uuid(),
-    studentId: z.uuid(),
-    studentName: z.string().trim().min(1),
-    courseName: z.string().trim().min(1),
-  }).strict()),
-}).strict();
-
-export type CourseAccountCandidates = components['schemas']['CourseAccountCandidatesResponse'];
-
-const TeacherCandidatesSchema = z
-  .object({
-    candidates: z.array(z.object({
-      teacherId: z.uuid(),
-      name: z.string().trim().min(1),
-    }).strict()),
-  })
-  .strict();
-
+// 候选结构统一在 @piano/assistant-protocol 定义，Agent 不再手写第二份。
+export type CourseAccountCandidates = z.infer<typeof CourseAccountCandidatesSchema>;
 export type TeacherCandidates = z.infer<typeof TeacherCandidatesSchema>;
-
-const StudentCandidatesSchema = z.object({
-  candidates: z.array(z.object({ studentId: z.uuid(), name: z.string().trim().min(1) }).strict()),
-}).strict();
-
 export type StudentCandidates = z.infer<typeof StudentCandidatesSchema>;
-
-const LessonCandidatesSchema = z.object({
-  candidates: z.array(z.object({
-    lessonId: z.uuid(), studentName: z.string().trim().min(1), courseName: z.string().trim().min(1),
-    teacherName: z.string().trim().min(1), startsAt: z.iso.datetime(), status: z.string().trim().min(1),
-  }).strict()),
-}).strict();
-
 export type LessonCandidates = z.infer<typeof LessonCandidatesSchema>;
-
-const PayrollCandidatesSchema = z.object({
-  candidates: z.array(z.object({
-    payrollId: z.uuid(), teacherId: z.uuid(), teacherName: z.string().trim().min(1), period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/), status: z.string().trim().min(1),
-  }).strict()),
-}).strict();
 export type PayrollCandidates = z.infer<typeof PayrollCandidatesSchema>;
 
 const StructuredActionPreviewRequestSchema = z.object({
@@ -271,13 +124,7 @@ const StructuredActionPreviewRequestSchema = z.object({
   idempotencyKey: z.uuid(), requestId: z.uuid(),
 }).strict();
 
-const StructuredActionPreviewResponseSchema = z.object({
-  riskLevel: z.enum(['L1', 'L2']).optional(),
-  previewId: z.uuid(), actionType: z.string().trim().min(1), command: z.record(z.string(), z.unknown()),
-  display: z.object({ title: z.string().min(1).optional(), summary: z.string().min(1).optional() }).passthrough(),
-  resourceVersions: z.record(z.string(), z.unknown()).optional(),
-  expiresAt: z.iso.datetime(), auditEventId: z.uuid().optional(),
-}).strict();
+// 响应结构统一在 @piano/assistant-protocol 定义，Agent 不再手写第二份。
 
 export type StructuredActionPreviewRequest = z.infer<typeof StructuredActionPreviewRequestSchema>;
 export type StructuredActionPreviewResponse = z.infer<typeof StructuredActionPreviewResponseSchema>;

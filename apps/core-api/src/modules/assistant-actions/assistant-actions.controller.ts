@@ -14,6 +14,16 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiCreatedResponse, ApiHeader, ApiOkResponse, ApiProperty, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
+import {
+  BatchLessonPreviewResponseSchema,
+  FinalRefundPreviewResponseSchema,
+  GiftPreviewResponseSchema,
+  PaymentPreviewResponseSchema,
+  PreviewInvalidationSchema,
+  PreviewReceiptSchema,
+  SingleLessonPreviewResponseSchema,
+  StructuredActionPreviewResponseSchema,
+} from '@piano/assistant-protocol';
 import { JwtAuthGuard, type AuthenticatedRequest } from '../auth/jwt-auth.guard.js';
 import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
@@ -28,6 +38,15 @@ import {
   AssistantActionsService,
   type TechnicalPreviewResponse,
 } from './assistant-actions.service.js';
+
+/**
+ * 接口文档由协议包里唯一的确认单定义生成。
+ * 这样"文档写的结构"和"实际返回的结构"不会各写一份、互相漂移。
+ */
+function documentedSchema(schema: z.ZodType): Record<string, unknown> {
+  const { $schema: _ignoredSchema, ...rest } = z.toJSONSchema(schema) as Record<string, unknown>;
+  return rest;
+}
 
 export class CreateTechnicalPreviewBody {
   @ApiProperty({ type: String, minLength: 1 })
@@ -191,7 +210,7 @@ export class AssistantActionsController {
 
   @Post('previews/:previewId/invalidate')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['reason'], properties: { reason: { type: 'string', minLength: 1, maxLength: 2000 } } } })
-  @ApiOkResponse({ schema: { type: 'object', required: ['previewId', 'status'] } })
+  @ApiOkResponse({ schema: documentedSchema(PreviewInvalidationSchema) })
   @RequiresCapability('READ')
   invalidatePreview(@Param('previewId') previewId: string, @Body() body: unknown, @Req() request: CapabilityRequest) {
     const id = z.string().uuid().safeParse(previewId);
@@ -211,7 +230,7 @@ export class AssistantActionsController {
     startsAt: { type: 'string', format: 'date-time' }, note: { type: 'string', maxLength: 2000 },
     idempotencyKey: { type: 'string', format: 'uuid' }, requestId: { type: 'string', format: 'uuid' },
   } } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(SingleLessonPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L1')
   createSingleLessonPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = SingleLessonPreviewSchema.safeParse(body);
@@ -232,7 +251,7 @@ export class AssistantActionsController {
     note: { type: 'string', maxLength: 2000 }, idempotencyKey: { type: 'string', format: 'uuid' },
     requestId: { type: 'string', format: 'uuid' },
   } } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(BatchLessonPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L1')
   createBatchLessonPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = BatchLessonPreviewSchema.safeParse(body);
@@ -244,7 +263,7 @@ export class AssistantActionsController {
 
   @Post('lessons/reschedule/preview')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'startsAt', 'idempotencyKey', 'requestId'] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L1')
   createReschedulePreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = ReschedulePreviewSchema.safeParse(body);
@@ -256,7 +275,7 @@ export class AssistantActionsController {
 
   @Post('lessons/cancel/preview')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'idempotencyKey', 'requestId'] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L1')
   createCancelPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
@@ -268,7 +287,7 @@ export class AssistantActionsController {
 
   @Post('lessons/complete/preview')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'idempotencyKey', 'requestId'] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L2')
   createCompletionPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
@@ -280,7 +299,7 @@ export class AssistantActionsController {
 
   @Post('lessons/complete/reversal/preview')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'idempotencyKey', 'requestId'] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L2')
   createCompletionReversalPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
@@ -292,7 +311,7 @@ export class AssistantActionsController {
 
   @Post('lessons/complete/correction/preview')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['lessonId', 'correctedUnitPrice', 'idempotencyKey', 'requestId'] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L2')
   createCompletionCorrectionPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = CompletionCorrectionPreviewSchema.safeParse(body);
@@ -304,7 +323,7 @@ export class AssistantActionsController {
 
   @Post('structured-action/preview')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['actionType', 'command', 'idempotencyKey', 'requestId'] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L2')
   createStructuredActionPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = StructuredActionPreviewSchema.safeParse(body);
@@ -319,7 +338,7 @@ export class AssistantActionsController {
     {type:'object',required:['accountId','amount','channel','occurredAt','idempotencyKey','requestId'],properties:{accountId:{type:'string',format:'uuid'},amount:{type:'string'},channel:{type:'string',enum:Object.values(PaymentChannel)},occurredAt:{type:'string',format:'date-time'},idempotencyKey:{type:'string',format:'uuid'},requestId:{type:'string',format:'uuid'},note:{type:'string'}}},
     {type:'object',required:['studentId','courseId','amount','channel','occurredAt','idempotencyKey','requestId'],properties:{studentId:{type:'string',format:'uuid'},courseId:{type:'string',format:'uuid'},currentUnitPrice:{type:'string'},amount:{type:'string'},channel:{type:'string',enum:Object.values(PaymentChannel)},occurredAt:{type:'string',format:'date-time'},idempotencyKey:{type:'string',format:'uuid'},requestId:{type:'string',format:'uuid'},note:{type:'string'}}},
   ] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(PaymentPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L2')
   createPaymentPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = PaymentPreviewSchema.safeParse(body);
@@ -331,7 +350,7 @@ export class AssistantActionsController {
 
   @Post('course-accounts/gift/preview')
   @ApiBody({ schema: { type: 'object', additionalProperties: false, required: ['accountId', 'amount', 'occurredAt', 'idempotencyKey', 'requestId'] } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(GiftPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L2')
   createGiftPreview(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = MoneyPreviewBaseSchema.safeParse(body);
@@ -347,7 +366,7 @@ export class AssistantActionsController {
     channel: { type: 'string', enum: Object.values(PaymentChannel) }, occurredAt: { type: 'string', format: 'date-time' },
     note: { type: 'string', maxLength: 2000 }, idempotencyKey: { type: 'string', format: 'uuid' }, requestId: { type: 'string', format: 'uuid' },
   } } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'command', 'display', 'resourceVersions', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(FinalRefundPreviewResponseSchema) })
   @RequiresCapability('PREVIEW_L2')
   previewFinalRefund(@Body() body: unknown, @Req() request: CapabilityRequest) {
     const parsed = FinalRefundPreviewSchema.safeParse(body);
@@ -373,7 +392,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('lessons/single')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(SingleLessonPreviewResponseSchema) })
   createSingleLesson(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = SingleLessonPreviewSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -382,7 +401,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('lessons/batch')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(BatchLessonPreviewResponseSchema) })
   createBatchLessons(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = BatchLessonPreviewSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -391,7 +410,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('lessons/reschedule')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   createReschedule(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = ReschedulePreviewSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -400,7 +419,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('lessons/cancel')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   createCancel(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -409,7 +428,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('lessons/complete')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   createCompletion(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = LessonMutationPreviewBaseSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -418,7 +437,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('structured-action')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(StructuredActionPreviewResponseSchema) })
   createStructuredAction(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = StructuredActionPreviewSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -427,7 +446,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('course-accounts/payment')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(PaymentPreviewResponseSchema) })
   createPayment(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = PaymentPreviewSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -436,7 +455,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('course-accounts/gift')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(GiftPreviewResponseSchema) })
   createGift(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = MoneyPreviewBaseSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -445,7 +464,7 @@ export class AssistantPreviewConfirmController {
 
   @Post('students/final-refund')
   @ApiBody({ schema: { type: 'object' } })
-  @ApiCreatedResponse({ schema: { type: 'object', required: ['previewId', 'actionType', 'riskLevel', 'expiresAt'] } })
+  @ApiCreatedResponse({ schema: documentedSchema(FinalRefundPreviewResponseSchema) })
   createFinalRefund(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const parsed = FinalRefundPreviewSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('请求参数不合法');
@@ -464,7 +483,7 @@ export class AssistantPreviewConfirmController {
   @Post(':previewId/confirm')
   @ApiBearerAuth()
   @ApiHeader({ name: 'Idempotency-Key', required: true, schema: { type: 'string', format: 'uuid' } })
-  @ApiOkResponse({ schema: { type: 'object', required: ['previewId', 'status', 'receipt'] } })
+  @ApiOkResponse({ schema: documentedSchema(PreviewReceiptSchema) })
   confirm(
     @Param('previewId') previewId: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,

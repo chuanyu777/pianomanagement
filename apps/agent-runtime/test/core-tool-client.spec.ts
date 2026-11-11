@@ -9,7 +9,7 @@ import { verifySignedInternalRequest } from '@piano/assistant-protocol/internal-
 import { CoreToolClient } from '../src/tools/core-tool-client.js';
 
 describe('CoreToolClient course account identity', () => {
-  it('requires the Core-generated student association and rejects extra or missing fields', async () => {
+  it('requires the Core-generated student association and tolerates extra display fields', async () => {
     const candidate = { accountId:'49fbcf47-c616-468a-a058-cdca1ee66025', studentId:'71726279-43f1-4fe6-9aa1-b12988812b5d', studentName:'林悦', courseName:'主课' };
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({ candidates:[candidate] })))
@@ -18,8 +18,11 @@ describe('CoreToolClient course account identity', () => {
     vi.stubGlobal('fetch', fetchMock);
     const client = new CoreToolClient('http://core.test/api/internal', 1_000, 'unit-test-secret-012345678901234567890123');
     await expect(client.getCourseAccountCandidates('cap', { studentName:'林悦' })).resolves.toEqual({ candidates:[candidate] });
+    // 缺少必要关联字段必须失败：这是身份识别依据，不能放宽。
     await expect(client.getCourseAccountCandidates('cap', { studentName:'林悦' })).rejects.toThrow();
-    await expect(client.getCourseAccountCandidates('cap', { studentName:'林悦' })).rejects.toThrow();
+    // 新增展示字段不属于必要字段，必须被容忍，否则 Core 每加一个展示项都会让对话中断。
+    const widened = await client.getCourseAccountCandidates('cap', { studentName:'林悦' });
+    expect(widened.candidates[0]).toMatchObject(candidate);
   });
 });
 
@@ -96,13 +99,20 @@ describe('CoreToolClient teacher candidates', () => {
     })).toBe(true);
   });
 
-  it('rejects malformed responses using a strict schema', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(JSON.stringify({ candidates: [{ ...candidates.candidates[0], role: 'OWNER' }] }), { status: 200 }),
-    );
+  it('rejects responses that lose a required field while tolerating extra display fields', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ candidates: [{ ...candidates.candidates[0], role: 'OWNER' }] }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ candidates: [{ name: '王老师' }] }), { status: 200 }),
+      );
     vi.stubGlobal('fetch', fetchMock);
     const client = new CoreToolClient('http://core.test/api/internal', 1_000, secret);
 
+    // 额外展示字段被容忍，不会让对话中断。
+    await expect(client.getTeacherCandidates('read-capability', { teacherName: '王老师' })).resolves.toBeTruthy();
+    // 缺少教师标识仍然必须拒绝。
     await expect(client.getTeacherCandidates('read-capability', { teacherName: '王老师' })).rejects.toThrow();
   });
 
@@ -136,7 +146,15 @@ describe('CoreToolClient single lesson Preview', () => {
       endsAt: '2026-11-02T01:45:00.000Z',
       note: request.note,
     },
-    display: { title: '单节排课', summary: '确认后创建一节排课记录。' },
+    display: {
+      title: '单节排课',
+      summary: '小明 · 主课 · 周老师，请核对上课时间。',
+      studentName: '小明',
+      courseName: '主课',
+      teacherName: '周老师',
+      startsAt: '2026-11-02T01:00:00.000Z',
+      endsAt: '2026-11-02T01:45:00.000Z',
+    },
     expiresAt: '2026-11-02T01:05:00.000Z',
   };
 

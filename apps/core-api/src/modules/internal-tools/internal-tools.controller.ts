@@ -18,6 +18,19 @@ import {
   InternalPeriodPrecloseResponse,
 } from './internal-tools.dto.js';
 import { InternalToolsService } from './internal-tools.service.js';
+import {
+  DashboardSummarySchema,
+  LessonCandidatesResponseSchema,
+  PayrollCandidatesResponseSchema,
+  StudentCandidatesResponseSchema,
+  TeacherCandidatesResponseSchema,
+} from '@piano/assistant-protocol';
+
+/** 接口文档由协议包里唯一的候选定义生成，避免文档与返回结构各写一份。 */
+function documentedSchema(schema: z.ZodType): Record<string, unknown> {
+  const { $schema: _ignoredSchema, ...rest } = z.toJSONSchema(schema) as Record<string, unknown>;
+  return rest;
+}
 
 class SystemStatusResponse {
   @ApiProperty({ type: String, enum: ['available'], example: 'available' })
@@ -111,7 +124,7 @@ export class InternalToolsController {
   }
 
   @Get('dashboard-summary')
-  @ApiOkResponse({ description: '按数据库账号角色隔离的经营摘要' })
+  @ApiOkResponse({ schema: documentedSchema(DashboardSummarySchema) })
   @RequiresCapability('READ')
   dashboardSummary(@Req() request: CapabilityRequest) {
     return this.tools.dashboardSummary(request.capability!.sub);
@@ -147,7 +160,7 @@ export class InternalToolsController {
   }
 
   @Get('teacher-candidates')
-  @ApiOkResponse({ description: '教师候选，仅包含教师 ID 与姓名' })
+  @ApiOkResponse({ schema: documentedSchema(TeacherCandidatesResponseSchema) })
   @ApiQuery({ name: 'teacherName', required: true, type: String, maxLength: 100 })
   @ApiQuery({ name: 'match', required: false, enum: ['search'], description: '启用不区分大小写的包含搜索；精确名称优先且不会替用户消除歧义' })
   @RequiresCapability('READ')
@@ -161,7 +174,7 @@ export class InternalToolsController {
   }
 
   @Get('student-candidates')
-  @ApiOkResponse({ description: '精确匹配的学生候选，仅包含学生 ID 与姓名' })
+  @ApiOkResponse({ schema: documentedSchema(StudentCandidatesResponseSchema) })
   @ApiQuery({ name: 'studentName', required: true, type: String, maxLength: 100 })
   @ApiQuery({ name: 'match', required: false, enum: ['search'], description: '启用不区分大小写的包含搜索；精确名称优先且不会替用户消除歧义' })
   @RequiresCapability('READ')
@@ -175,7 +188,7 @@ export class InternalToolsController {
   }
 
   @Get('lesson-candidates')
-  @ApiOkResponse({ description: '按学生和可选业务日期查询排课候选' })
+  @ApiOkResponse({ schema: documentedSchema(LessonCandidatesResponseSchema) })
   @ApiQuery({ name: 'studentName', required: true, type: String, maxLength: 100 })
   @ApiQuery({ name: 'date', required: false, type: String, example: '2026-10-19' })
   @ApiQuery({ name: 'match', required: false, enum: ['search'], description: '启用不区分大小写的包含搜索；精确名称优先且不会替用户消除歧义' })
@@ -222,7 +235,7 @@ export class InternalToolsController {
   }
 
   @Get('payroll-candidates')
-  @ApiOkResponse({ description: '按老师和业务月份查询工资候选，仅包含安全选择所需字段' })
+  @ApiOkResponse({ schema: documentedSchema(PayrollCandidatesResponseSchema) })
   @ApiQuery({ name: 'teacherName', required: true, type: String, maxLength: 100 })
   @ApiQuery({ name: 'period', required: true, type: String, example: '2026-10' })
   @RequiresCapability('READ')

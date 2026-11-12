@@ -120,6 +120,25 @@ describe('PostgresDialogueTaskStore', () => {
     }
   }, 30_000);
 
+  integration('does not hold a database transaction open during the callback', async () => {
+    const ids = await createRun(databaseUrl!, { status: 'queued' });
+    const store = new PostgresDialogueTaskStore(databaseUrl!);
+    const control = new Pool({ connectionString: databaseUrl });
+    stores.push(store);
+    try {
+      await store.withTask({ threadId: ids.threadId, runId: ids.runId, actorKey: 'owner:1' }, async () => {
+        const activity = await control.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM pg_stat_activity WHERE datname = current_database() AND state = 'idle in transaction' AND query LIKE '%dialogue_tasks%'",
+        );
+        expect(activity.rows[0]?.count).toBe('0');
+        return { state: { checked: true }, result: null };
+      });
+    } finally {
+      await control.end();
+      await cleanupRun(databaseUrl!, ids);
+    }
+  }, 30_000);
+
   integration('rejects a lease-fenced save after ownership changes and does not expose stale state', async () => {
     const firstOwner = crypto.randomUUID();
     const secondOwner = crypto.randomUUID();
@@ -173,6 +192,33 @@ describe('PostgresDialogueTaskStore', () => {
         [ids.threadId],
       );
       expect(row.rows[0]?.state).toEqual({ lastRunId: 'already-durable' });
+    } finally {
+      release();
+      await control.end();
+      await cleanupRun(databaseUrl!, ids);
+    }
+  }, 30_000);
+
+  integration('rejects a stale revision save instead of overwriting a newer plan', async () => {
+    const ids = await createRun(databaseUrl!, { status: 'queued' });
+    const store = new PostgresDialogueTaskStore(databaseUrl!);
+    const control = new Pool({ connectionString: databaseUrl });
+    stores.push(store);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const inFlight = store.withTask({ threadId: ids.threadId, runId: ids.runId, actorKey: 'owner:1' }, async () => {
+        await released;
+        return { state: { stale: true }, result: null };
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await control.query(
+        `UPDATE agent_runtime.dialogue_tasks SET state = $2::jsonb, revision = revision + 1 WHERE thread_id = $1`,
+        [ids.threadId, JSON.stringify({ current: 'newer' })],
+      );
+      release();
+      await expect(inFlight).rejects.toBeInstanceOf(TaskAccessError);
+      await expect(control.query('SELECT state FROM agent_runtime.dialogue_tasks WHERE thread_id = $1', [ids.threadId])).resolves.toMatchObject({ rows: [{ state: { current: 'newer' } }] });
     } finally {
       release();
       await control.end();

@@ -6,6 +6,7 @@ import { DialogueIntentSchema, type DialogueIntent, type UnderstandIntent } from
 import type { IntentParser } from './intent-parser.js';
 import { refusalGuidance } from './refusal-messages.js';
 import { DialogueMultiStepPlanSchema, isQueryOperation, type DialogueMultiStepPlan, type UnderstandMultiStep } from './dialogue-multi-step.js';
+import { applyPlanPatch, parameter, PlanDraftSchema, createPlanDraftFromSteps, skipPlanStep } from './plan-types.js';
 
 const CandidateSchema = z.object({ id: z.string(), label: z.string(), description: z.string().optional(), field: z.enum(['accountId', 'teacherId', 'lessonId', 'studentId', 'courseId', 'payrollId', 'entryId']), values: z.record(z.string(), z.string()) });
 const TaskSchema = z.object({
@@ -24,7 +25,8 @@ const TaskSchema = z.object({
   pendingStudentIntent: DialogueIntentSchema.optional(),
   answer: z.string().optional(),
   workspace: WorkspaceDocumentSchema.optional(),
-  multiStep: z.object({ steps: DialogueMultiStepPlanSchema.shape.steps, currentStep: z.number().int().min(0), completedPreviewIds: z.array(z.string()), payrollCorrectionSource: z.string().optional(), payrollCorrectionSteps: DialogueMultiStepPlanSchema.shape.steps.optional(), payrollCorrectionReviewed:z.boolean().optional() }).strict().optional(),
+  multiStep: z.object({ steps: DialogueMultiStepPlanSchema.shape.steps, issues: DialogueMultiStepPlanSchema.shape.issues.default([]), currentStep: z.number().int().min(0), completedPreviewIds: z.array(z.string()), payrollCorrectionSource: z.string().optional(), payrollCorrectionSteps: DialogueMultiStepPlanSchema.shape.steps.optional(), payrollCorrectionReviewed:z.boolean().optional() }).strict().optional(),
+  planDraft: PlanDraftSchema.optional(),
 });
 export type DialogueTask = z.infer<typeof TaskSchema>;
 export type DialogueTurn = { runId: string; threadId: string; message: string; previous: unknown };
@@ -103,6 +105,25 @@ function validPayrollCorrection(task: NonNullable<DialogueTask['multiStep']>): b
   const pairs = (steps: DialogueMultiStepPlan['steps']) => steps.flatMap((step, index) => step.operation === 'payroll.cancel-payment' && steps[index + 1]?.operation === 'payroll.pay' ? [[step, steps[index + 1]]] : []);
   if (JSON.stringify(pairs(task.steps)) !== JSON.stringify(pairs(task.payrollCorrectionSteps))) return false;
   return completePayrollCorrection(task.payrollCorrectionSteps);
+}
+function syncMultiStepFromDraft(task: DialogueTask): void {
+  if (!task.planDraft || !task.multiStep) return;
+  task.multiStep.issues = task.planDraft.issues;
+  task.multiStep.steps = task.planDraft.steps.map(step => Object.fromEntries(Object.entries(step.fields).map(([key, value]) => [key, value.value]))).map((fields, index) => ({ operation: task.planDraft!.steps[index]!.operation, fields }));
+  const current = task.planDraft.steps.findIndex(step => step.id === task.planDraft?.activeStepId);
+  if (current >= 0) {
+    task.multiStep.currentStep = current;
+    task.operation = task.multiStep.steps[current]!.operation;
+    task.fields = Object.fromEntries(Object.entries(task.planDraft.steps[current]!.fields).filter(([, value]) => value.value !== null).map(([key, value]) => [key, value.value!]));
+  }
+}
+function planBlockForTask(task: DialogueTask): Extract<WorkspaceDocument['blocks'][number], { type: 'task-plan' }> | undefined {
+  if (!task.planDraft || !task.multiStep) return undefined;
+  const labels: Record<string, string> = {
+    'student.create':'学生建档', 'student.update':'修改学生资料', 'payment.preview':'交费', 'gift.preview':'赠送', 'lesson.schedule':'排课',
+    'lessons.read':'查询课表', 'arrears.read':'查询欠费', 'payroll.generate':'生成工资', 'payroll.adjust':'调整工资', 'payroll.pay':'登记工资支付',
+  };
+  return { type: 'task-plan', planId: task.planDraft.planId, revision: task.planDraft.revision, status: task.planDraft.status, steps: task.planDraft.steps.map((step, index) => ({ id: step.id, label: `${index + 1}. ${labels[step.operation] ?? step.operation}`, status: step.status, detail: Object.entries(step.fields).filter(([, value]) => value.value !== null).map(([key, value]) => `${key}：${value.value}`).join('、') || undefined })), issues: task.planDraft.issues.map(issue => ({ code: issue.code, message: issue.message, blocking: issue.blocking })) };
 }
 function executedReceiptText(preview: Record<string, unknown>): string {
   const display = preview.display && typeof preview.display === 'object' ? preview.display as Record<string, unknown> : {};
@@ -256,6 +277,18 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       }
       if (candidate) {
         let plan = DialogueMultiStepPlanSchema.parse(candidate);
+        if ((plan.issues ?? []).some(issue => issue.blocking)) {
+          const issues = plan.issues ?? [];
+          const task = prepared.task;
+          task.multiStep = { steps: plan.steps, issues, currentStep: 0, completedPreviewIds: [] };
+          task.planDraft = createPlanDraftFromSteps(plan.steps, `${turn.threadId}:${turn.runId}`);
+          task.planDraft = PlanDraftSchema.parse({ ...task.planDraft, status: 'blocked', issues });
+          task.status = 'collecting';
+          const issueText = issues.filter(issue => issue.blocking).map(issue => issue.message).join('；');
+          const answer = `${issueText || '这组请求有未解决的问题'}。当前保留了办理计划，但没有生成任何预览。请补充或更正有问题的步骤，修正后再继续。`;
+          const block = planBlockForTask(task);
+          return { result: finish(task, turn.runId, answer, document('办理计划需要修正', answer, block ? [block] : [], 'clarification')) };
+        }
         if (!completePayrollCorrection(plan.steps)) return { result: ask(prepared.task, turn.runId, '请重新说明工资所属月份和更正后的实际支付日期，分别写明年份、月份和日期；当前未生成预览。') };
         if (plan.steps.some((step, index) => step.operation === 'payroll.cancel-payment' && plan.steps[index + 1]?.operation === 'payroll.pay')) prepared.payrollCorrectionSteps = plan.steps;
         const mergedSteps: DialogueMultiStepPlan['steps'] = [];
@@ -357,7 +390,8 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         }
         return finish(task, turn.runId, '已取消当前待办理事项，未执行业务变更。', document('已取消办理', '待办理预览已失效；已经确认的业务不受影响。'));
       }
-      if (task.multiStep && intent.operation && intent.operation !== task.multiStep.steps[task.multiStep.currentStep]?.operation) {
+      if (task.multiStep && intent.operation && intent.operation !== task.multiStep.steps[task.multiStep.currentStep]?.operation
+        && !(task.planDraft && ['correct', 'continue'].includes(intent.mode))) {
         return ask(task, turn.runId, `当前是第${task.multiStep.currentStep + 1}步；如需结束多步办理，请取消当前办理。`);
       }
       if (intent.operation === 'receipt.read') {
@@ -375,6 +409,60 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         return ask(task, turn.runId, '无法确定要办理的事项，请说明要办理什么或查询什么；当前尚未查询或执行任何记录。');
       }
       if (intent.mode === 'clarify') intent = { ...intent, mode: intent.operation === task.operation ? 'continue' : 'new' };
+      // A model-understood correction can update the unconfirmed plan in place.
+      // It never edits a completed step; changing a field also removes that
+      // step's old preview through the plan reducer.
+      if (task.planDraft && task.multiStep && (intent.mode === 'correct' || (intent.mode === 'continue' && !prepared.forcedIntent)) && !alreadyExecuted) {
+        const currentStep = task.planDraft.steps[task.multiStep.currentStep];
+        const subjectChanges: Array<{ kind: 'rename'; subjectId: string; name: string }> = [];
+        const stepChanges: Array<{ kind: 'set-field'; stepId: string; field: string; parameter: ReturnType<typeof parameter> }> = [];
+        const studentName = intent.fields.studentName;
+        if (studentName) {
+          const subject = task.planDraft.subjects.find(item => item.kind === 'student' && (item.name === task.fields.studentName || item.name === task.fields.name || item.name === studentName));
+          if (subject && subject.name !== studentName) subjectChanges.push({ kind: 'rename', subjectId: subject.id, name: studentName });
+        }
+        for (const [field, value] of Object.entries(intent.fields)) {
+          if (value === null || field === 'selectionId' || field === 'studentName') continue;
+          const targets = task.planDraft.steps.filter(step => !['completed', 'cancelled'].includes(step.status) && Object.prototype.hasOwnProperty.call(step.fields, field));
+          for (const target of targets) stepChanges.push({ kind: 'set-field', stepId: target.id, field, parameter: parameter(value, { explicit: true }) });
+        }
+        if (studentName) {
+          for (const target of task.planDraft.steps.filter(step => !['completed', 'cancelled'].includes(step.status) && Object.prototype.hasOwnProperty.call(step.fields, 'studentName'))) {
+            stepChanges.push({ kind: 'set-field', stepId: target.id, field: 'studentName', parameter: parameter(studentName, { explicit: true }) });
+          }
+          for (const target of task.planDraft.steps.filter(step => !['completed', 'cancelled'].includes(step.status) && step.operation === 'student.create' && Object.prototype.hasOwnProperty.call(step.fields, 'name'))) {
+            stepChanges.push({ kind: 'set-field', stepId: target.id, field: 'name', parameter: parameter(studentName, { explicit: true }) });
+          }
+        }
+        if (subjectChanges.length || stepChanges.length) {
+          try {
+            // A normal field correction must not silently remove an unresolved
+            // unsupported/conflict/permission issue. The user must cancel and
+            // start a new plan (or use an explicit issue-resolution flow).
+            task.planDraft = applyPlanPatch(task.planDraft, { baseRevision: task.planDraft.revision, turnKind: intent.mode === 'correct' ? 'correct' : 'supplement', subjectChanges, stepChanges, issues: task.planDraft.issues, evidence: [] }, { messageId: turn.runId, message: turn.message });
+            syncMultiStepFromDraft(task);
+            task.status = 'ready';
+          } catch (error) {
+            return ask(task, turn.runId, error instanceof Error ? error.message : '这次更正无法安全应用，请重新说明。');
+          }
+          if (previous.status === 'ready' && !previous.previewId) {
+            const answer = '已更新当前办理计划，尚未生成预览。请继续补充信息，或回复“开始第一步”后再办理。';
+            const block = planBlockForTask(task);
+            return finish(task, turn.runId, answer, document('多步办理计划', answer, block ? [block] : [], 'clarification'));
+          }
+        }
+        if (currentStep && task.operation !== currentStep.operation) task.operation = currentStep.operation;
+      }
+      const blockingPlanIssues = [
+        ...(task.planDraft?.issues ?? []),
+        ...(task.multiStep?.issues ?? []),
+      ].filter(issue => issue.blocking);
+      if (blockingPlanIssues.length > 0) {
+        const issueText = [...new Set(blockingPlanIssues.map(issue => issue.message))].join('；');
+        const answer = `${issueText}。当前办理计划仍有未解决问题，未生成预览；如不再办理，请取消当前办理后重新发起。`;
+        const block = planBlockForTask(task);
+        return finish(task, turn.runId, answer, document('办理计划需要修正', answer, block ? [block] : [], 'clarification'));
+      }
       // An unconfirmed creation is not proof that its subject exists. Keep the
       // request pending until Core reports execution when it refers to that student.
       if (previous.operation === 'student.create' && previous.previewId && !alreadyExecuted
@@ -789,6 +877,18 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
           : f.studentName ?? f.teacherName ?? f.courseName ?? '';
       return finish(task, turn.runId, `已生成${previewSubject ? `${previewSubject}的` : ''}操作预览，尚未执行。`, structuredDocument(preview));
     } catch (error) {
+      if (task.planDraft && task.multiStep) {
+        const active = task.planDraft.steps[task.multiStep.currentStep];
+        if (active && !['completed', 'cancelled'].includes(active.status)) {
+          task.planDraft = PlanDraftSchema.parse({
+            ...task.planDraft,
+            revision: task.planDraft.revision + 1,
+            status: 'partial',
+            steps: task.planDraft.steps.map(step => step.id === active.id ? { ...step, status: 'failed' as const, previewId: undefined } : step),
+          });
+          task.status = 'ready';
+        }
+      }
       const message = withCompletedSteps(task, error instanceof CoreDialogueError ? error.message : error instanceof z.ZodError ? '业务参数不完整或不合法，请核对后再试' : 'AI处理暂时失败，请稍后重试。未确认的业务不会自动执行。');
       const recovery: WorkspaceDocument['blocks'][number] = { type: 'error-recovery', code: error instanceof CoreDialogueError ? `CORE_${error.status}` : error instanceof z.ZodError ? 'CORE_400' : 'AI_PROCESS_FAILED', message, actions: ['refresh', 'open-structured-page'] };
       const workspace = task.previewId && task.workspace ? { ...task.workspace, resultKind: 'error' as const, blocks: [...task.workspace.blocks, recovery] } : document('暂时无法完成', message, [recovery], 'error');
@@ -816,6 +916,41 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
       return { result: failure(turn, { ...previous, version: previous.version + 1 }, error).result };
     }
 
+    const skipCommand = /^跳过第([1-9]\d*)步$/u.exec(turn.message.trim());
+    if (skipCommand && prepared.task.planDraft && prepared.task.multiStep) {
+      const task = prepared.task;
+      const blocking = [...(task.planDraft!.issues ?? []), ...(task.multiStep!.issues ?? [])].filter(issue => issue.blocking);
+      if (blocking.length > 0) {
+        const answer = `${[...new Set(blocking.map(issue => issue.message))].join('；')}。问题未解决前不能跳过步骤，请取消当前办理后重新发起。`;
+        const block = planBlockForTask(task);
+        return { result: finish(task, turn.runId, answer, document('办理计划需要修正', answer, block ? [block] : [], 'clarification')) };
+      }
+      const index = Number(skipCommand[1]) - 1;
+      const step = task.planDraft!.steps[index];
+      if (!step) return { result: ask(task, turn.runId, '没有找到要跳过的步骤，请按当前计划中的序号操作。') };
+      try {
+        task.planDraft = skipPlanStep(task.planDraft!, step.id);
+      } catch (error) {
+        return { result: ask(task, turn.runId, error instanceof Error ? error.message : '当前步骤不能跳过。') };
+      }
+      syncMultiStepFromDraft(task);
+      const nextIndex = task.planDraft!.steps.findIndex(item => !['completed', 'cancelled'].includes(item.status));
+      task.multiStep!.currentStep = nextIndex < 0 ? task.multiStep!.steps.length : nextIndex;
+      if (nextIndex < 0) {
+        task.status = 'completed';
+        task.operation = null;
+        const answer = '已跳过最后一个步骤，当前办理计划已结束；没有执行该步骤的业务变更。';
+        const block = planBlockForTask(task);
+        return { result: finish(task, turn.runId, answer, document('办理计划已结束', answer, block ? [block] : [], 'clarification')) };
+      }
+      task.operation = task.multiStep!.steps[nextIndex]!.operation;
+      task.fields = Object.fromEntries(Object.entries(task.planDraft!.steps[nextIndex]!.fields).filter(([, value]) => value.value !== null).map(([key, value]) => [key, value.value!]));
+      task.status = 'ready';
+      const answer = `已跳过第${index + 1}步，下一步是第${nextIndex + 1}步。回复“开始第一步”或“继续”后才会生成预览。`;
+      const block = planBlockForTask(task);
+      return { result: finish(task, turn.runId, answer, document('办理计划已更新', answer, block ? [block] : [], 'clarification')) };
+    }
+
     let intent: DialogueIntent;
     try {
       const understood = await understandTurn(turn, prepared, signal);
@@ -834,7 +969,9 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const task = prepared.task;
         task.operation = first.operation;
         task.fields = Object.fromEntries(Object.entries(first.fields).filter((entry): entry is [string,string] => entry[1] !== null));
-        task.multiStep = { steps:plan.steps,currentStep:0,completedPreviewIds:[], ...(prepared.payrollCorrectionSteps ? { payrollCorrectionSteps:prepared.payrollCorrectionSteps, payrollCorrectionReviewed:true } : {}) };
+        task.multiStep = { steps:plan.steps, issues: plan.issues ?? [], currentStep:0,completedPreviewIds:[], ...(prepared.payrollCorrectionSteps ? { payrollCorrectionSteps:prepared.payrollCorrectionSteps, payrollCorrectionReviewed:true } : {}) };
+        const initialDraft = createPlanDraftFromSteps(plan.steps, `${turn.threadId}:${turn.runId}`);
+        task.planDraft = PlanDraftSchema.parse({ ...initialDraft, status: 'ready', steps: initialDraft.steps.map((step, index) => ({ ...step, status: index === 0 ? 'ready' : 'draft' })) });
         task.status = 'ready';
         const names: Record<DialogueMultiStepPlan['steps'][number]['operation'], string> = {
           'receipt.read':'查看回执', 'lessons.read':'查询课表', 'accounts.read':'查询账户', 'ledger.read':'查询流水', 'overview.read':'查询经营概况', 'report.monthly':'查询月报',
@@ -850,11 +987,12 @@ export function createDialogueGraph(input: { tools: Tools; capability: string; u
         const name = (operation: DialogueMultiStepPlan['steps'][number]['operation']) => names[operation];
         const describe = (step: typeof first) => `${name(step.operation)}${step.fields.courseName ? `（${step.fields.courseName}` : '（'}${step.fields.amount ? `${moneyText(step.fields.amount)}元` : ''}${step.fields.startsAt ? `，${step.fields.startsAt}` : ''}${step.fields.channel ? `，${step.fields.channel}` : ''}）${[step.fields.studentName && `学生：${step.fields.studentName}`,step.fields.teacherName && `老师：${step.fields.teacherName}`,step.fields.currentUnitPrice && `单价${moneyText(step.fields.currentUnitPrice)}元`,step.fields.weeks && `周数：${step.fields.weeks}`,step.fields.reason && `原因：${step.fields.reason}`,step.fields.period && `月份：${step.fields.period}`,step.fields.paidAt && `支付日期：${step.fields.paidAt}`,step.fields.baseSalary && `底薪${moneyText(step.fields.baseSalary)}元`,step.fields.commissionRate && `提成比例${step.fields.commissionRate}`,step.fields.bonusAmount && `奖金${moneyText(step.fields.bonusAmount)}元`,step.fields.bonusNote && `奖金说明：${step.fields.bonusNote}`,step.fields.deductionAmount && `代扣${moneyText(step.fields.deductionAmount)}元`,step.fields.deductionNote && `代扣说明：${step.fields.deductionNote}`].filter(Boolean).join('、')}`;
         const untouched = first.fields.courseName === second.fields.courseName && first.operation === 'payment.preview' && second.operation === 'gift.preview' ? '其他课程（如陪练）不会改动。' : '';
-        const stepsText = plan.steps.map((step,index) => `第${['一','二','三'][index] ?? index + 1}步${describe(step)}`).join('；');
+        const stepsText = plan.steps.map((step,index) => `第${['一','二','三'][index] ?? index + 1}步${describe(step)}${step.fields.name ? ` 名称：${step.fields.name}` : ''}`).join('；');
+        const taskPlanBlock: WorkspaceDocument['blocks'][number] = { type: 'task-plan', planId: task.planDraft!.planId, revision: task.planDraft!.revision, status: task.planDraft!.status, steps: task.planDraft!.steps.map((step, index) => ({ id: step.id, label: `${index + 1}. ${name(step.operation)}`, status: step.status, detail: describe(plan.steps[index]!) })), issues: task.planDraft!.issues.map(issue => ({ code: issue.code, message: issue.message, blocking: issue.blocking })) };
         const answer = plan.steps.some(step => isQueryOperation(step.operation))
           ? `已拆为按顺序办理的${plan.steps.length}步：${stepsText}。${untouched}查询完成后可继续；写入须分别确认。回复“开始第一步”后才开始处理，当前尚未执行业务变更。`
           : `已拆为按顺序分别确认的${plan.steps.length}步：${stepsText}。${untouched}回复“开始第一步”后才生成第一步预览，当前尚未执行。`;
-        return { result: finish(task, turn.runId, answer, document('多步办理计划', answer, [], 'clarification')) };
+        return { result: finish(task, turn.runId, answer, document('多步办理计划', answer, [taskPlanBlock], 'clarification')) };
       }
       const result = await process(turn, prepared, intent);
       const task = result.task;

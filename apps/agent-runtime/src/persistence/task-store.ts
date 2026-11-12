@@ -31,6 +31,7 @@ type RunLeaseRow = {
 type DialogueTaskRow = {
   actor_key: string;
   state: unknown;
+  revision: string;
 };
 
 function jsonState(value: unknown): string {
@@ -87,9 +88,11 @@ export class PostgresDialogueTaskStore implements DialogueTaskStore {
     work: (state: unknown) => Promise<{ state: unknown; result: T }>,
   ): Promise<T> {
     const client = await this.#pool.connect();
+    let locked = false;
     try {
+      await client.query('SELECT pg_advisory_lock(hashtext($1))', [input.threadId]);
+      locked = true;
       await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [input.threadId]);
 
       await assertLiveRun(client, input, false);
       await client.query(
@@ -99,7 +102,7 @@ export class PostgresDialogueTaskStore implements DialogueTaskStore {
         [input.threadId, input.actorKey],
       );
       const task = await client.query<DialogueTaskRow>(
-        `SELECT actor_key, state
+        `SELECT actor_key, state, revision
            FROM ${schema}.dialogue_tasks
           WHERE thread_id = $1`,
         [input.threadId],
@@ -107,16 +110,19 @@ export class PostgresDialogueTaskStore implements DialogueTaskStore {
       const row = task.rows[0];
       if (!row || row.actor_key !== input.actorKey) throw new TaskAccessError();
 
+      await client.query('COMMIT');
+
       const outcome = await work(row.state);
       const serializedState = jsonState(outcome.state);
 
+      await client.query('BEGIN');
       await assertLiveRun(client, input, true);
       const saved = await client.query(
         `UPDATE ${schema}.dialogue_tasks
-            SET state = $2::jsonb, updated_at = clock_timestamp()
+            SET state = $2::jsonb, revision = revision + 1, updated_at = clock_timestamp()
           WHERE thread_id = $1
-            AND actor_key = $3`,
-        [input.threadId, serializedState, input.actorKey],
+            AND actor_key = $3 AND revision = $4::bigint`,
+        [input.threadId, serializedState, input.actorKey, row.revision],
       );
       if (saved.rowCount !== 1) throw new TaskAccessError();
 
@@ -126,7 +132,12 @@ export class PostgresDialogueTaskStore implements DialogueTaskStore {
       await client.query('ROLLBACK').catch(() => undefined);
       throw error;
     } finally {
-      client.release();
+      try {
+        if (locked) await client.query('SELECT pg_advisory_unlock(hashtext($1))', [input.threadId]);
+        client.release();
+      } catch (error) {
+        client.release(error instanceof Error ? error : new Error('无法释放任务锁'));
+      }
     }
   }
 

@@ -17,6 +17,12 @@ const withCandidates = {
 };
 
 describe('name masking before a message leaves the process', () => {
+  it('masks known names in nested multi-step plans and change history', () => {
+    const task = { ...withCandidates, multiStep: { steps: [{ fields: { studentName: '王小明' } }] }, changes: [{ before: '王小明', after: '王小明的课程' }] };
+    const mask = buildNameMask(context('继续', task));
+    expect(JSON.stringify(mask.maskedContext.task)).not.toContain('王小明');
+    expect(JSON.stringify(task)).toContain('王小明');
+  });
   it('replaces known names in the message and in the task payload', () => {
     const mask = buildNameMask(context('给王小明主课交1000', withCandidates));
 

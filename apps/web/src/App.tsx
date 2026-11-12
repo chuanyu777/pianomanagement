@@ -44,6 +44,7 @@ type ClearConversationHandler = () => void;
 type PreviewConfirmationHandler = (previewId: string) => void;
 type RecoveryAction = Extract<WorkspaceBlock, { type: 'error-recovery' }>['actions'][number];
 type RecoveryActionHandler = (action: RecoveryAction) => void;
+type PlanCommandHandler = (command: string) => void;
 
 const ACTOR_SESSION_KEY = 'pianomanager.assistant.actor';
 const ASSISTANT_SESSION_PREFIX = 'pianomanager.assistant.session.v1:';
@@ -606,7 +607,7 @@ function AssistantCompanion({ assistantState, section, user, hiddenTask, hiddenT
     <div className="page-assistant-head"><div><span className="eyebrow">AI OPERATING ASSISTANT</span><Title level={2}>{copy.title}</Title></div><button className="new-session-button" disabled={sessionSwitchBlocked} onClick={startNewSession} title={sessionSwitchBlocked ? '请等待当前回复完成' : undefined} type="button"><span aria-hidden="true">＋</span> 新会话</button><span className={`assistant-availability ${assistantState.data?.available ? 'is-online' : ''}`}>{assistantState.data?.available ? '在线' : '暂不可用'}</span></div>
     <div className="page-chat-stream"><div aria-label="AI 助手的消息" className="chat-message assistant" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><p>{copy.welcome}</p></div>{visibleMessages.map((message) => <div aria-label={message.role === 'user' ? '你的消息' : 'AI 助手的消息'} className={`chat-message ${message.role}`} key={message.id} role="group">{message.role === 'assistant' && <span aria-hidden="true" className="chat-avatar">AI</span>}<p>{formatAssistantReply(message.text)}</p></div>)}{reply && <div aria-label="AI 助手的消息" className="chat-message assistant" role="group"><span aria-hidden="true" className="chat-avatar">AI</span><p>{formatAssistantReply(reply)}</p></div>}</div>
     {workspace && <button className="workspace-result-link" onClick={onShowResult} type="button">查看本次对话结果 →</button>}
-    {workspace && resultTarget && createPortal(<section aria-label="AI 工作区结果" className="business-ai-workspace"><div className="context-heading"><div><span className="eyebrow">CURRENT TASK</span><Title level={3}>本次对话结果</Title></div></div><WorkspaceContent document={workspace} interactionDisabled={isPending || workspaceThreadId !== threadId} isCurrentWorkspace={workspaceThreadId === threadId} onCandidateSelect={selectCandidate} onPreviewConfirmed={(previewId) => { setConfirmedPreviewIds((current) => new Set(current).add(previewId)); void queryClient.invalidateQueries(); }} onRecoveryAction={recoverWorkspace} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCorePreviewDisplay} /></section>, resultTarget)}
+    {workspace && resultTarget && createPortal(<section aria-label="AI 工作区结果" className="business-ai-workspace"><div className="context-heading"><div><span className="eyebrow">CURRENT TASK</span><Title level={3}>本次对话结果</Title></div></div><WorkspaceContent document={workspace} interactionDisabled={isPending || workspaceThreadId !== threadId} isCurrentWorkspace={workspaceThreadId === threadId} onCandidateSelect={selectCandidate} onPreviewConfirmed={(previewId) => { setConfirmedPreviewIds((current) => new Set(current).add(previewId)); void queryClient.invalidateQueries(); }} onRecoveryAction={recoverWorkspace} onPlanCommand={(command) => { if (!isPending) void send(command); }} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCorePreviewDisplay} /></section>, resultTarget)}
     <div className="page-chat-composer"><div className="page-quick-prompts">{copy.suggestions.map((item) => <button disabled={isPending} key={item} onClick={() => setPrompt(item)} type="button">{item}</button>)}</div><form onSubmit={(event) => { event.preventDefault(); void send(prompt); }}><TextArea aria-label={`${copy.title}经营问题`} autoSize={{ minRows: 2, maxRows: 4 }} disabled={isPending} onChange={(event) => setPrompt(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(prompt); } }} placeholder="直接描述你想查询或办理的事情…" value={prompt} /><Button disabled={!prompt.trim() || isPending} htmlType="submit" type="primary">{isPending ? '处理中…' : '发送 ↑'}</Button></form></div>
   </section>;
 }
@@ -684,6 +685,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
   const clearConversationRef = useRef<ClearConversationHandler | null>(null);
   const previewConfirmationRef = useRef<PreviewConfirmationHandler | null>(null);
   const recoveryActionRef = useRef<RecoveryActionHandler | null>(null);
+  const planCommandRef = useRef<PlanCommandHandler | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
   const assistantState = useAssistantState();
@@ -750,6 +752,12 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
       if (recoveryActionRef.current === handler) recoveryActionRef.current = null;
     };
   }, []);
+  const registerPlanCommand = useCallback((handler: PlanCommandHandler) => {
+    planCommandRef.current = handler;
+    return () => {
+      if (planCommandRef.current === handler) planCommandRef.current = null;
+    };
+  }, []);
   const startNewSession = () => {
     if (sessionSwitchBlocked) return;
     const session = { threadId: createAssistantIds().threadId, messages: [] };
@@ -786,7 +794,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
             <Button aria-label="退出登录" ghost onClick={onLogout} size="small">退出</Button>
           </div>
         </aside>
-        <main className="main-column"><Outlet key={sessionRevision} context={{ assistantState, onLogout, user, hiddenTask, hiddenThreads: hiddenThreads.current, pendingPageRun, freshSessionRef, startNewSession, sessionSwitchBlocked, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setSessionSwitchBlocked, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction }} /></main>
+        <main className="main-column"><Outlet key={sessionRevision} context={{ assistantState, onLogout, user, hiddenTask, hiddenThreads: hiddenThreads.current, pendingPageRun, freshSessionRef, startNewSession, sessionSwitchBlocked, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setSessionSwitchBlocked, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction, registerPlanCommand }} /></main>
         {isAssistantWorkspace && <aside aria-label="经营工作区" className="context-panel panel-surface"><ContextPanel
           activeThreadId={activeThreadId}
           interactionDisabled={workspaceInteractionDisabled}
@@ -794,6 +802,7 @@ function WorkspaceLayout({ onLogout, user }: { onLogout: () => void; user: AuthU
           onClear={() => clearConversationRef.current?.()}
           onPreviewConfirmed={(previewId) => previewConfirmationRef.current?.(previewId)}
           onRecoveryAction={(action) => recoveryActionRef.current?.(action)}
+          onPlanCommand={(command) => planCommandRef.current?.(command)}
           previewRecheckVersion={previewRecheckVersion}
           user={user}
           workspace={workspace}
@@ -818,7 +827,7 @@ function WorkspaceHome() {
   const [reply, setReply] = useState('');
   const [clarification, setClarification] = useState('');
   const [runError, setRunError] = useState('');
-  const { assistantState, onLogout, user, hiddenTask, hiddenThreads, pendingPageRun, freshSessionRef, startNewSession, sessionSwitchBlocked, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setSessionSwitchBlocked, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction } = useOutletContext<{
+  const { assistantState, onLogout, user, hiddenTask, hiddenThreads, pendingPageRun, freshSessionRef, startNewSession, sessionSwitchBlocked, setWorkspace, setActiveThreadId, setWorkspaceInteractionDisabled, setSessionSwitchBlocked, setPreviewRecheckVersion, registerCandidateSelection, registerClearConversation, registerPreviewConfirmation, registerRecoveryAction, registerPlanCommand } = useOutletContext<{
     assistantState: ReturnType<typeof useAssistantState>;
     onLogout: () => void;
     user: AuthUser | null;
@@ -837,6 +846,7 @@ function WorkspaceHome() {
     registerClearConversation: (handler: ClearConversationHandler) => () => void;
     registerPreviewConfirmation: (handler: PreviewConfirmationHandler) => () => void;
     registerRecoveryAction: (handler: RecoveryActionHandler) => () => void;
+    registerPlanCommand: (handler: PlanCommandHandler) => () => void;
   }>();
   const initialSessionRef = useRef<PersistedAssistantSession | null>(null);
   if (!initialSessionRef.current) {
@@ -1019,6 +1029,11 @@ function WorkspaceHome() {
     void submitMessage(action === 'refresh' ? '刷新当前结果' : '重新生成预览');
   }), [isBusy, registerRecoveryAction, submitMessage]);
 
+  useEffect(() => registerPlanCommand((command) => {
+    if (isBusy || !workspace || workspaceThreadId !== threadId) return;
+    void submitMessage(command);
+  }), [isBusy, registerPlanCommand, submitMessage, threadId, workspace, workspaceThreadId]);
+
   const resetConversation = () => {
     clearPendingRun(user, pendingPageRun);
     const newThreadId = createAssistantIds().threadId;
@@ -1141,13 +1156,14 @@ function WorkflowStep({ detail, number, title }: { detail: string; number: strin
   return <div className="workflow-step"><span className="step-number">{number}</span><div><strong>{title}</strong><span>{detail}</span></div></div>;
 }
 
-function ContextPanel({ activeThreadId, interactionDisabled, onCandidateSelect, onClear, onPreviewConfirmed, onRecoveryAction, previewRecheckVersion, user, workspace }: {
+function ContextPanel({ activeThreadId, interactionDisabled, onCandidateSelect, onClear, onPreviewConfirmed, onRecoveryAction, onPlanCommand, previewRecheckVersion, user, workspace }: {
   activeThreadId: string | null;
   interactionDisabled: boolean;
   onCandidateSelect: CandidateSelectionHandler;
   onClear: () => void;
   onPreviewConfirmed: PreviewConfirmationHandler;
   onRecoveryAction: RecoveryActionHandler;
+  onPlanCommand: PlanCommandHandler;
   previewRecheckVersion: number;
   user: AuthUser | null;
   workspace: WorkspaceState | null;
@@ -1162,19 +1178,21 @@ function ContextPanel({ activeThreadId, interactionDisabled, onCandidateSelect, 
       onCandidateSelect={onCandidateSelect}
       onPreviewConfirmed={onPreviewConfirmed}
       onRecoveryAction={onRecoveryAction}
+      onPlanCommand={onPlanCommand}
       previewRecheckVersion={previewRecheckVersion}
       requireCoreDisplay={workspace.requireCoreDisplay ?? false}
     /> : <HomeOverview user={user} overview={overview} />}
   </div>;
 }
 
-function WorkspaceContent({ document, interactionDisabled, isCurrentWorkspace, onCandidateSelect, onPreviewConfirmed, onRecoveryAction, previewRecheckVersion, requireCoreDisplay = false }: {
+function WorkspaceContent({ document, interactionDisabled, isCurrentWorkspace, onCandidateSelect, onPreviewConfirmed, onRecoveryAction, onPlanCommand, previewRecheckVersion, requireCoreDisplay = false }: {
   document: WorkspaceDocument;
   interactionDisabled: boolean;
   isCurrentWorkspace: boolean;
   onCandidateSelect: CandidateSelectionHandler;
   onPreviewConfirmed: PreviewConfirmationHandler;
   onRecoveryAction: RecoveryActionHandler;
+  onPlanCommand: PlanCommandHandler;
   previewRecheckVersion: number;
   requireCoreDisplay?: boolean;
 }) {
@@ -1203,6 +1221,7 @@ function WorkspaceContent({ document, interactionDisabled, isCurrentWorkspace, o
         </div>;
         if (block.type === 'ledger-detail') return <section aria-label="流水明细" className="workspace-summary ledger-detail" key={`ledger-${index}`}><strong>流水明细</strong><p>账户：{block.accountId}</p>{block.entries.map((entry) => <div className="ledger-entry" key={entry.id}><div><strong>{entry.description}</strong><span>{formatDateTime(entry.occurredAt)}</span></div><span>实收 {entry.paidDelta} · 赠送 {entry.giftDelta}</span></div>)}</section>;
         if (block.type === 'calculation-breakdown') return <section aria-label="金额计算" className="workspace-summary" key={`calculation-${index}`}><strong>{block.title}</strong>{block.lines.map((line) => <p key={line.label}>{line.label}：¥{line.amount}</p>)}<p><strong>合计：¥{block.total}</strong></p></section>;
+        if (block.type === 'task-plan') return <section aria-label="办理计划" className="workspace-summary task-plan" key={`task-plan-${index}`}><strong>办理计划 · 第{block.revision + 1}版</strong><div className="task-plan-steps">{block.steps.map((step, stepIndex) => { const canStart = isCurrentWorkspace && !interactionDisabled && (step.status === 'ready' || step.status === 'failed'); const canSkip = isCurrentWorkspace && !interactionDisabled && (step.status === 'ready' || step.status === 'failed'); return <div className={`task-plan-step status-${step.status}`} key={step.id}><span>{stepIndex + 1}</span><div><strong>{step.label}</strong>{step.detail && <small>{step.detail}</small>}<div className="task-plan-actions">{canStart && <button type="button" onClick={() => onPlanCommand('开始第一步')}>{step.status === 'failed' ? '重试' : '开始'}</button>}{canSkip && <button type="button" onClick={() => onPlanCommand(`跳过第${stepIndex + 1}步`)}>跳过</button>}</div></div><em>{step.status === 'completed' ? '已完成' : step.status === 'awaiting-confirmation' ? '待确认' : step.status === 'cancelled' ? '已跳过' : step.status === 'failed' ? '需处理' : step.status === 'ready' ? '当前步骤' : '待办理'}</em></div>; })}</div>{block.issues.filter((issue) => issue.blocking).map((issue) => <Alert key={`${issue.code}-${issue.message}`} message={issue.message} showIcon type="warning" />)}</section>;
         if (block.type === 'receipt') return <ReceiptBlockView block={block} key={`receipt-${index}`} />;
         if (block.type === 'action-preview') return <PreviewConfirmationCard interactionDisabled={interactionDisabled} key={block.previewId} onConfirmed={onPreviewConfirmed} preview={block} previewRecheckVersion={previewRecheckVersion} requireCoreDisplay={requireCoreDisplay} workspaceTitle={document.title} />;
         if (block.type === 'error-recovery') return <section aria-label="错误恢复" className="workspace-summary error-recovery" key={`error-${index}`}><Alert message={block.message} showIcon type="error" /><div className="recovery-actions">{block.actions.filter(action=>action!=='open-structured-page'||recoveryPath).map((action) => <button className="recovery-action" disabled={interactionDisabled} key={action} onClick={() => { if (action === 'open-structured-page' && recoveryPath) navigate(recoveryPath); else onRecoveryAction(action); }} type="button">{action === 'refresh' ? '刷新结果' : action === 'repreview' ? '重新生成预览' : '打开业务页面'}</button>)}</div></section>;

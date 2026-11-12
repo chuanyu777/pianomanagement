@@ -169,6 +169,17 @@ button { cursor: pointer; }
 .workspace-summary { padding: 17px 18px; border: 1px solid #dfe3eb; border-radius: 4px; background: rgba(255,255,255,.94); box-shadow: 0 7px 20px rgba(42,51,73,.04); }
 .workspace-summary strong { color: #444d63; font-size: 12px; }
 .workspace-summary p { margin: 8px 0 0; color: #7a8294; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-plan-steps { display: grid; gap: 8px; margin-top: 12px; }
+.task-plan-step { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 9px 10px; border: 1px solid #e6e9f0; background: #fbfcfe; }
+.task-plan-step > span { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #edf0f6; color: #5b6478; font-size: 11px; }
+.task-plan-step > div { min-width: 0; }
+.task-plan-step small { display: block; margin-top: 4px; color: #7a8294; line-height: 1.5; overflow-wrap: anywhere; }
+.task-plan-step em { color: #7a8294; font-size: 11px; font-style: normal; white-space: nowrap; }
+.task-plan-step.status-ready { border-color: #9bb7df; background: #f5f9ff; }
+.task-plan-step.status-ready > span { background: #2f5d9f; color: #fff; }
+.task-plan-actions { display: flex; gap: 6px; margin-top: 7px; }
+.task-plan-actions button { padding: 2px 8px; border: 1px solid #c9d2e3; background: #fff; color: #34517f; font-size: 11px; cursor: pointer; }
+.task-plan-actions button:hover { border-color: #6f91c4; background: #f1f6ff; }
 .entity-candidates, .calendar-events, .recovery-actions { display: grid; gap: 8px; margin-top: 12px; }
 .entity-candidate { padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border: 1px solid #e3e6ed; border-radius: 9px; color: #555d70; background: #fbfcfe; text-align: left; }
 .entity-candidate:hover:not(:disabled) { border-color: #d7b56f; background: #fffaf1; }

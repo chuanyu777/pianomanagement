@@ -125,6 +125,14 @@ export const WorkspaceBlockSchema = z.discriminatedUnion('type', [
     lines: z.array(z.object({ label: z.string().min(1), amount: MoneyStringSchema })),
     total: MoneyStringSchema,
   }),
+  z.object({
+    type: z.literal('task-plan'),
+    planId: z.string().min(1),
+    revision: z.number().int().nonnegative(),
+    status: z.enum(['collecting', 'ready', 'in-progress', 'blocked', 'partial', 'completed', 'cancelled']),
+    steps: z.array(z.object({ id: z.string().min(1), label: z.string().min(1), status: z.enum(['draft', 'waiting-input', 'ready', 'previewing', 'awaiting-confirmation', 'result-unknown', 'completed', 'failed', 'cancelled', 'structured']), detail: z.string().optional() })),
+    issues: z.array(z.object({ code: z.string().min(1), message: z.string().min(1), blocking: z.boolean() })),
+  }),
   ActionPreviewBlockSchema,
   ReceiptBlockSchema,
   z.object({

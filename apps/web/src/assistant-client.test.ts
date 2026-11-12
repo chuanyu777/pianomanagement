@@ -140,6 +140,14 @@ describe('assistant client', () => {
     });
   });
 
+  it('accepts a versioned multi-step plan block', () => {
+    const plan = { type: 'task-plan', planId: 'thread-1:run-1', revision: 2, status: 'ready', steps: [
+      { id: 'step-1', label: '1. 学生建档', status: 'completed', detail: '张小飞' },
+      { id: 'step-2', label: '2. 交费', status: 'awaiting-confirmation', detail: '2400.00元，微信' },
+    ], issues: [] };
+    expect(parseAssistantSseFrame(`event: workspace.replace\ndata: ${JSON.stringify({ type: 'workspace.replace', document: { protocolVersion: '1.0', title: '多步办理', blocks: [plan], sources: [] } })}`)).toEqual({ type: 'workspace.replace', document: { protocolVersion: '1.0', title: '多步办理', blocks: [plan], sources: [] } });
+  });
+
   it('rejects malformed workspace envelopes and supported blocks', () => {
     const invalidDocuments = [
       { protocolVersion: '2.0', title: '标题', blocks: [] },

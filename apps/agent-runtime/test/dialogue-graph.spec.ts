@@ -46,6 +46,92 @@ function setup(intents: DialogueIntent[], multiStep?: DialogueMultiStepPlan | nu
   return { tools, understand, run, restart };
 }
 describe('模型驱动的持续业务任务', () => {
+  it('多步骤计划清楚展示待建档学生姓名', async () => {
+    const flow = setup([], {steps:[{operation:'student.create',fields:{name:'张小飞'}},{operation:'payment.preview',fields:{studentName:'张小飞',courseName:'主课',amount:'2400',channel:'微信'}}]});
+    const result = await flow.run('为张小飞建档并缴费2400元微信');
+    expect(result.answer).toMatch(/学生建档[^；]*张小飞/u);
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('多步骤计划未确认前可跨轮更正姓名并保留原金额渠道', async () => {
+    const flow = setup([intent('payment.preview', { studentName: '王娇娇' }, 'correct')], { steps: [
+      { operation: 'payment.preview', fields: { studentName: '张娇娇', courseName: '主课', amount: '2400', channel: '微信' } },
+      { operation: 'lesson.schedule', fields: { studentName: '张娇娇', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-22T09:00:00+08:00' } },
+    ] });
+    await flow.run('今天收了张娇娇主课2400元微信，然后排明天9点王老师主课');
+    const corrected = await flow.run('说错了，姓是王');
+    expect(corrected.task.planDraft?.revision).toBe(1);
+    expect(corrected.task.planDraft?.subjects[0]?.name).toBe('王娇娇');
+    expect(corrected.task.multiStep?.steps[0]?.fields.studentName).toBe('王娇娇');
+    expect(corrected.task.multiStep?.steps[0]?.fields.amount).toBe('2400');
+    expect(corrected.task.multiStep?.steps[0]?.fields.channel).toBe('微信');
+    await flow.run('开始第一步');
+    expect(flow.tools.createPaymentPreview).toHaveBeenCalledWith('cap', expect.objectContaining({ amount: '2400.00', channel: 'WECHAT' }));
+  });
+  it('跨四轮补齐同一笔新生缴费，不新建第二笔业务', async () => {
+    const flow = setup([
+      intent('payment.preview', { studentName: '王娇娇' }, 'correct'),
+      intent('payment.preview', { channel: '微信' }, 'continue'),
+      intent('payment.preview', { courseName: '主课', currentUnitPrice: '230' }, 'continue'),
+    ], { steps: [
+      { operation: 'student.create', fields: { name: '张娇娇' } },
+      { operation: 'payment.preview', fields: { studentName: '张娇娇', amount: '2400', channel: null, courseName: null, currentUnitPrice: null } },
+    ] });
+    await flow.run('今天收了一个叫张娇娇的新生缴费2400元');
+    const corrected = await flow.run('说错了，姓是王');
+    expect(corrected.answer).toContain('更新当前办理计划');
+    expect(corrected.task.planDraft?.subjects[0]?.name).toBe('王娇娇');
+    await flow.run('缴费通过微信');
+    const completedDraft = await flow.run('缴费是主课，然后单节收费230元');
+    expect(completedDraft.task.multiStep?.steps[1]?.fields).toMatchObject({ studentName: '王娇娇', amount: '2400', channel: '微信', courseName: '主课', currentUnitPrice: '230' });
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+  });
+  it('计划包含不支持动作时保留问题并阻止任何预览', async () => {
+    const flow = setup([intent('payment.preview', {}, 'continue'), intent('payment.preview', { studentName: '王娇娇' }, 'correct')], { steps: [
+      { operation: 'payment.preview', fields: { studentName: '张娇娇', courseName: '主课', amount: '2400', channel: '微信' } },
+      { operation: 'lesson.schedule', fields: { studentName: '张娇娇', courseName: '主课', teacherName: '王老师', startsAt: '2026-10-22T09:00:00+08:00' } },
+    ], issues: [{ code: 'unsupported', message: '自动发送微信通知不支持', blocking: true }] });
+    const result = await flow.run('收款、排课并自动通知家长');
+    expect(result.workspace.resultKind).toBe('clarification');
+    expect(result.answer).toContain('自动发送微信通知不支持');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    expect(flow.tools.createSingleLessonPreview).not.toHaveBeenCalled();
+    expect(result.task.planDraft?.status).toBe('blocked');
+    expect(result.task.planDraft?.issues[0]?.message).toContain('自动发送微信通知不支持');
+    expect(result.workspace.blocks.some(block => block.type === 'task-plan')).toBe(true);
+    const next = await flow.run('开始第一步');
+    expect(next.answer).toContain('仍有未解决问题');
+    expect(flow.tools.createPaymentPreview).not.toHaveBeenCalled();
+    const corrected = await flow.run('说错了姓是王');
+    expect(corrected.answer).toContain('仍有未解决问题');
+    expect(corrected.task.planDraft?.issues[0]?.message).toContain('自动发送微信通知不支持');
+  });
+  it('批量计划可以明确跳过当前行，但不能越过未处理的前一行', async () => {
+    const flow = setup([], { steps: [
+      { operation: 'payment.preview', fields: { studentName: '林悦', courseName: '主课', amount: '100', channel: '微信' } },
+      { operation: 'payment.preview', fields: { studentName: '陈晨', courseName: '主课', amount: '200', channel: '微信' } },
+    ] });
+    await flow.run('给林悦和陈晨分别缴费');
+    const outOfOrder = await flow.run('跳过第2步');
+    expect(outOfOrder.answer).toContain('只能按顺序跳过当前步骤');
+    const skipped = await flow.run('跳过第1步');
+    expect(skipped.answer).toContain('已跳过第1步');
+    expect(skipped.task.planDraft?.steps[0]?.status).toBe('cancelled');
+    expect(skipped.task.planDraft?.activeStepId).toBe('step-2');
+  });
+  it('批量当前行失败后显示需处理，并允许重试或跳过', async () => {
+    const flow = setup([], { steps: [
+      { operation: 'payment.preview', fields: { studentName: '林悦', courseName: '主课', amount: '100', channel: '微信' } },
+      { operation: 'payment.preview', fields: { studentName: '陈晨', courseName: '主课', amount: '200', channel: '微信' } },
+    ] });
+    flow.tools.createPaymentPreview.mockRejectedValueOnce(new CoreDialogueError(503));
+    await flow.run('给林悦和陈晨分别缴费');
+    const failed = await flow.run('开始第一步');
+    expect(failed.task.planDraft?.steps[0]?.status).toBe('failed');
+    expect(failed.task.planDraft?.activeStepId).toBe('step-1');
+    const skipped = await flow.run('跳过第1步');
+    expect(skipped.task.planDraft?.steps[0]?.status).toBe('cancelled');
+    expect(skipped.task.planDraft?.steps[1]?.status).toBe('ready');
+  });
   it('多步查询完成后可以自然开始新的查询', async () => {
     const steps = [{operation:'lessons.read',fields:{dateFrom:'2026-10-21',dateTo:'2026-10-21'}},{operation:'arrears.read',fields:{}}];
     const flow = setup([intent('overview.read',{})], undefined, {status:'completed',operation:'arrears.read',multiStep:{steps,currentStep:2,completedPreviewIds:[]}});

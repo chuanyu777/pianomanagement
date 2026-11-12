@@ -71,7 +71,7 @@ describe('两步任务类型化理解', () => {
     await expect(createModelMultiStepInterpreter({invoke} as never)({userMessage:'先赠送再排课',task:{},history})).rejects.toThrow('summary unavailable');
     expect(invoke).toHaveBeenCalledTimes(1);
   });
-  it('支持新的相邻组合及四步有序模型计划，不设固定业务步骤上限', async () => {
+  it('支持新的相邻组合及四步有序模型计划，并限制一次最多20项', async () => {
     const steps = [
       {operation:'gift.preview',fields:{}}, {operation:'payroll.pay',fields:{}},
       {operation:'lesson.schedule',fields:{}}, {operation:'payroll.generate',fields:{}},
@@ -79,6 +79,7 @@ describe('两步任务类型化理解', () => {
     const invoke = vi.fn().mockResolvedValueOnce({content:JSON.stringify({steps})}).mockResolvedValueOnce({content:'{"decision":"approve"}'});
     await expect(createModelMultiStepInterpreter({invoke} as never)({userMessage:'先赠送再支付工资然后排课接着生成工资',task:{}})).resolves.toEqual({steps});
     expect(DialogueMultiStepPlanSchema.safeParse({steps:Array.from({length:17}, () => steps[0])}).success).toBe(true);
+    expect(DialogueMultiStepPlanSchema.safeParse({steps:Array.from({length:21}, () => steps[0])}).success).toBe(false);
   });
 
   it('工资纠错位于后续步骤时仍须验证独立的明确年份', async () => {

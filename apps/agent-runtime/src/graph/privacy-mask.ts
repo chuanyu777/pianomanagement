@@ -62,35 +62,11 @@ export function buildNameMask(context: IntentContext): NameMask {
     for (const [placeholder, real] of backward) out = out.split(placeholder).join(real);
     return out;
   };
-  const maskRecord = (value: unknown): unknown => {
+  const maskTask = (value: unknown): unknown => {
+    if (typeof value === 'string') return maskText(value);
+    if (Array.isArray(value)) return value.map(maskTask);
     if (!value || typeof value !== 'object') return value;
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, typeof item === 'string' ? maskText(item) : item]),
-    );
-  };
-
-  const maskTask = (task: unknown): unknown => {
-    if (!task || typeof task !== 'object') return task;
-    const record = { ...(task as Record<string, unknown>) };
-    if (record['fields']) record['fields'] = maskRecord(record['fields']);
-    if (record['pendingStudentIntent'] && typeof record['pendingStudentIntent'] === 'object') {
-      const pending = { ...(record['pendingStudentIntent'] as Record<string, unknown>) };
-      if (pending['fields']) pending['fields'] = maskRecord(pending['fields']);
-      if (typeof pending['question'] === 'string') pending['question'] = maskText(pending['question']);
-      record['pendingStudentIntent'] = pending;
-    }
-    for (const listKey of ['candidates', 'references'] as const) {
-      const list = record[listKey];
-      if (!Array.isArray(list)) continue;
-      record[listKey] = list.map((item) => {
-        if (!item || typeof item !== 'object') return item;
-        const next = { ...(item as Record<string, unknown>) };
-        if (typeof next['label'] === 'string') next['label'] = maskText(next['label']);
-        if (next['values']) next['values'] = maskRecord(next['values']);
-        return next;
-      });
-    }
-    return record;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, maskTask(item)]));
   };
 
   return {

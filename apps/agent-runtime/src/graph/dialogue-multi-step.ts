@@ -13,8 +13,13 @@ const StepSchema = z.object({
   operation: z.enum([...queryOperations, 'student.create', 'student.update', 'teacher.create', 'teacher.compensation.update', 'course.create', 'course.update', 'course-account.open', 'course-account.price', 'payment.preview', 'gift.preview', 'lesson.schedule', 'lesson.reschedule', 'lesson.cancel', 'lesson.complete', 'lesson.complete.reversal', 'lesson.complete.correction', 'refund.preview', 'ledger-entry.reversal', 'payroll.cancel-payment', 'payroll.generate', 'payroll.adjust', 'payroll.pay', 'manual-transaction.create', 'period.close', 'period.reopen']),
   fields: z.record(z.string(), z.string().max(2000).nullable()),
 }).strict();
+const PlanIssueSchema = z.object({
+  code: z.enum(['unsupported', 'conflict', 'ambiguous', 'missing', 'permission', 'data-changed', 'model-invalid']),
+  message: z.string().min(1).max(500),
+  blocking: z.boolean(),
+}).strict();
 
-export const DialogueMultiStepPlanSchema = z.object({ steps: z.array(StepSchema).min(2) }).strict().superRefine(({ steps }, context) => {
+export const DialogueMultiStepPlanSchema = z.object({ steps: z.array(StepSchema).min(2).max(20, '一次最多办理20项，请分批说明'), issues: z.array(PlanIssueSchema).optional() }).strict().superRefine(({ steps }, context) => {
   for (const [index, step] of steps.entries()) {
     const parsed = DialogueIntentSchema.safeParse({ mode: 'new', operation: step.operation, fields: step.fields, question: null });
     if (!parsed.success) context.addIssue({ code: 'custom', path: ['steps', index], message: '步骤字段与操作不匹配' });
@@ -171,7 +176,8 @@ export function createModelMultiStepInterpreter(model: BaseChatModel): Understan
     const history = mask.maskedContext.history ? await compactConversation(model, mask.maskedContext.history, signal) : undefined;
     const messages: BaseMessage[] = [
       new SystemMessage(`你是琴行经营系统的有序任务识别节点，不查询或执行业务。只输出JSON或null，不要Markdown。
-仅当用户明确按顺序要求至少两步查询或办理，输出：{"steps":[{"operation":"...","fields":{...}},{"operation":"...","fields":{...}}]}。每一步只能使用下列单步操作，不限制相邻组合。不得遗漏、合并或凭空添加用户的动作。查询只读取，不代表任何写操作已确认。
+仅当用户明确按顺序要求至少两步查询或办理，输出：{"steps":[{"operation":"...","fields":{...}},{"operation":"...","fields":{...}}],"issues":[]}。每一步只能使用下列单步操作，不限制相邻组合。不得遗漏、合并或凭空添加用户的动作。查询只读取，不代表任何写操作已确认。
+用户同时提出本系统没有的动作、相互矛盾的要求、权限不允许的事项或关键参数无法判断时，保留能确定的步骤，并在issues中写明问题（code、message、blocking:true），不能静默删除不支持动作、改成备注或猜测。无法安全拆成有序步骤时输出null。
 task.pendingStudentIntent 是先前提出、等待建档确认后的单项待办。若建档已确认且用户只是继续、取消或更正这项待办，当前请求应输出null，不要将历史建档与待办重新拆成多步；更正尚未执行的缴费金额只是修改待办，不是冲正已执行的缴费。用户另行提出多项新业务时，仍按当前请求判断。
 “原1000元记错，应该800元”表示先冲正原1000元交费再登记800元；“工资支付登记错了，改成某日某渠道”表示先撤销原支付登记再重登同一份工资，因此两步的 period 相同，支付日期 paidAt 单独填写。例如 businessDate 是 2026-10-21，用户说“去年十二月的工资支付错了，撤销后改成今年一月五日微信”，两步的 period 都是 2025-12，重登的 paidAt 是 2026-01-05。工资纠错的工资所属月份和重登支付日期必须分别能够确定年份；用户明确说“去年”“今年”等时可结合 businessDate 推算，缺少年份依据时对应字段保留null，不得猜测。第一步reason必须概括纠错原因；第二步未明确渠道时保留null，不能把金额或渠道猜出来。
 除此以外一律输出null，包括单个动作或单次查询、任意步骤顺序不明确或含不支持操作的请求。不得省略用户提出的任何动作；缺少明确先后时不要拆解。每一步分别列出用户明确的对象与参数，不得按同名猜测对象身份。
